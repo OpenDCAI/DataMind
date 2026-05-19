@@ -7,12 +7,18 @@ and shares the Anthropic client across them.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from anthropic import AsyncAnthropic
 
 from datamind.capabilities.db import DBService, build_db_service, build_db_tools
 from datamind.capabilities.graph import GraphService, build_graph_service, build_graph_tools
+from datamind.capabilities.hooks import (
+    AuditLogHook,
+    DestructiveSqlHook,
+    PathAllowlistHook,
+)
 from datamind.capabilities.ingest import (
     IngestService,
     build_ingest_service,
@@ -26,6 +32,7 @@ from datamind.capabilities.memory import (
 )
 from datamind.capabilities.skills import SkillsService, build_skills_service, build_skills_tools
 from datamind.config import Settings
+from datamind.core.hooks import HookChain
 from datamind.core.logging import get_logger
 from datamind.core.tools import ToolRegistry
 
@@ -42,13 +49,14 @@ class DataMindAgent:
 
     client: AsyncAnthropic
     tools: ToolRegistry
-    loop: AgentLoopProtocolProtocol
+    loop: AgentLoopProtocol
     kb: KBService
     db: DBService
     graph: GraphService
     skills: SkillsService
     memory: MemoryService
     ingest: IngestService
+    hooks: HookChain | None = None
 
     async def warmup(self) -> dict[str, Any]:
         """Load skills index, graph triplets, etc. Returns a stats dict."""
@@ -56,8 +64,38 @@ class DataMindAgent:
         info["skills"] = await self.skills.load()
         info["graph"] = await self.graph.load_from_profile()
         info["kb_chunks"] = await self.kb.count()
+        info["hooks"] = self.hooks.names() if self.hooks else []
         _log.info("agent_warmup", extra=info)
         return info
+
+
+def _build_hook_chain(settings: Settings) -> HookChain | None:
+    """Assemble the HookChain per HooksConfig. Returns None if disabled."""
+    cfg = settings.hooks
+    if not cfg.enabled:
+        return None
+
+    chain_hooks: list[Any] = []
+
+    if cfg.path_allowlist:
+        roots: list[Path] = [
+            Path(settings.data.data_dir),
+            Path.cwd(),
+        ]
+        for extra in cfg.path_allowlist_extra:
+            roots.append(Path(extra).expanduser())
+        chain_hooks.append(PathAllowlistHook(roots=roots))
+
+    if cfg.destructive_sql:
+        chain_hooks.append(DestructiveSqlHook())
+
+    if cfg.audit_log:
+        audit_path = settings.data.storage_dir / "audit.jsonl"
+        chain_hooks.append(AuditLogHook(audit_path=audit_path))
+
+    if not chain_hooks:
+        return None
+    return HookChain(chain_hooks)
 
 
 async def build_agent(
@@ -150,13 +188,25 @@ async def build_agent(
             ccr_api_key=settings.agent.ccr_api_key.get_secret_value(),
         )
         _log.info("agent_loop_backend", extra={"backend": "sdk", "ccr": settings.agent.ccr_base_url})
+        # Hooks aren't currently wired into the SDK backend; the SDK
+        # owns its own dispatch loop. We return the chain anyway so
+        # callers can introspect / share it with custom flows.
+        hooks_chain = _build_hook_chain(settings)
     else:
+        hooks_chain = _build_hook_chain(settings)
         loop = NativeAgentLoop(
             client=client,
             tools=tools,
             config=loop_config,
+            hooks=hooks_chain,
         )
-        _log.info("agent_loop_backend", extra={"backend": "native"})
+        _log.info(
+            "agent_loop_backend",
+            extra={
+                "backend": "native",
+                "hooks": hooks_chain.names() if hooks_chain else [],
+            },
+        )
 
     return DataMindAgent(
         client=client,
@@ -168,6 +218,7 @@ async def build_agent(
         skills=skills,
         memory=memory,
         ingest=ingest,
+        hooks=hooks_chain,
     )
 
 

@@ -8,7 +8,11 @@ protocol:
     1. Send [history + user_message] with tools=[...] to /v1/messages
     2. If stop_reason == "tool_use":
          - For each tool_use block:
-             - Invoke ToolRegistry[name].handler(**input)
+             - Run the hook chain (PreToolUse) — Deny / AskUser / Rewrite
+               are surfaced as structured tool_results; Allow / Rewrite
+               proceed to the handler
+             - Invoke ToolRegistry[name].handler(**input_or_rewritten)
+             - Run the hook chain (PostToolUse) — audit log, metrics
              - Append tool_result block
          - Loop to step 1 with the tool_result(s) appended as user message
     3. Otherwise: emit the final assistant text and return
@@ -16,12 +20,10 @@ protocol:
 Both `run_turn` (non-streaming) and `stream_turn` (async generator of
 `AgentEvent`s) are exposed; the server uses `stream_turn` for SSE.
 
-Hooks (`on_tool_start`, `on_tool_end`) fire at well-defined points — the
-seam Phase 8 uses for audit logging and PreToolUse rejection.
-
-Renamed from `AgentLoop` to `NativeAgentLoop` in Phase 11 when we added
-the parallel `SdkAgentLoop` option. Shared types (`AgentEvent`,
-`AgentLoopConfig`, protocol, hook signatures) moved to `base.py`.
+Hook seam (Phase 8): the loop accepts an optional `HookChain` that runs
+on every tool dispatch. The legacy `on_tool_start` / `on_tool_end` void
+callbacks are kept for back-compat (tests, hello_agent) and run alongside
+the chain when both are provided.
 """
 from __future__ import annotations
 
@@ -31,6 +33,13 @@ from typing import Any, AsyncIterator
 from anthropic import AsyncAnthropic
 from anthropic.types import Message
 
+from datamind.core.hooks import (
+    AskUser,
+    Allow,
+    Deny,
+    HookChain,
+    Rewrite,
+)
 from datamind.core.logging import get_logger
 from datamind.core.tools import ToolRegistry
 
@@ -50,37 +59,106 @@ class NativeAgentLoop:
         config: AgentLoopConfig,
         on_tool_start: OnToolStart | None = None,
         on_tool_end: OnToolEnd | None = None,
+        hooks: HookChain | None = None,
     ) -> None:
         self._client = client
         self._tools = tools
         self._cfg = config
         self._on_tool_start = on_tool_start
         self._on_tool_end = on_tool_end
+        self._hooks = hooks
 
     # ----------------------------------------------------------- helpers
 
-    async def _dispatch_tool(self, name: str, tool_input: dict) -> tuple[Any, Exception | None]:
+    async def _dispatch_tool(
+        self, name: str, tool_input: dict
+    ) -> tuple[Any, Exception | None, dict[str, Any] | None]:
+        """Run the full pre-hook → handler → post-hook pipeline.
+
+        Returns `(result, error, hook_outcome)`:
+            result        — handler return, or a structured dict for
+                            Deny/AskUser. None on handler error.
+            error         — exception from handler (post-hooks see this).
+            hook_outcome  — None for normal Allow/Rewrite paths;
+                            {"kind": "denied"|"asks_user", ...} when the
+                            pre-hook chain short-circuited the call.
+        """
         try:
             spec = self._tools.get(name)
         except Exception as exc:  # unknown tool
-            return None, exc
+            return None, exc, None
+
+        effective_args = dict(tool_input)
+        hook_outcome: dict[str, Any] | None = None
+
+        # ---- Pre hooks (HookChain) -----------------------------------
+        if self._hooks:
+            decision = await self._hooks.pre(name, effective_args)
+            if isinstance(decision, Deny):
+                _log.info(
+                    "hook_denied",
+                    extra={"tool": name, "reason": decision.reason},
+                )
+                hook_outcome = {
+                    "kind": "denied",
+                    "tool": name,
+                    "reason": decision.reason,
+                    "message": (
+                        f"Tool call '{name}' was denied by a policy hook: "
+                        f"{decision.reason}"
+                    ),
+                }
+                # Run post-hooks so audit captures the denial.
+                await self._hooks.post(name, effective_args, hook_outcome, None)
+                return hook_outcome, None, hook_outcome
+            if isinstance(decision, AskUser):
+                _log.info(
+                    "hook_asks_user",
+                    extra={"tool": name, "prompt": decision.prompt[:200]},
+                )
+                hook_outcome = {
+                    "kind": "asks_user",
+                    "tool": name,
+                    "requires_confirmation": True,
+                    "prompt": decision.prompt,
+                    "details": decision.details,
+                    "confirm_args": decision.confirm_args,
+                    "message": (
+                        "This call requires explicit user confirmation. "
+                        "Show the prompt to the user, get their consent, "
+                        "then re-issue the call merging in `confirm_args`."
+                    ),
+                }
+                await self._hooks.post(name, effective_args, hook_outcome, None)
+                return hook_outcome, None, hook_outcome
+            if isinstance(decision, Rewrite):
+                effective_args = decision.new_args
+            # Allow → fall through unchanged
+
+        # ---- Legacy callback (back-compat) ---------------------------
         if self._on_tool_start:
             try:
-                await self._on_tool_start(name, tool_input)
+                await self._on_tool_start(name, effective_args)
             except Exception as exc:  # hook failure is non-fatal
                 _log.warning("on_tool_start_failed", extra={"err": repr(exc)})
+
+        # ---- Tool handler --------------------------------------------
         try:
-            result = await spec.handler(**tool_input)
+            result = await spec.handler(**effective_args)
             err: Exception | None = None
         except Exception as exc:  # noqa: BLE001
             result = None
             err = exc
+
+        # ---- Post hooks ----------------------------------------------
+        if self._hooks:
+            await self._hooks.post(name, effective_args, result, err)
         if self._on_tool_end:
             try:
-                await self._on_tool_end(name, tool_input, result, err)
+                await self._on_tool_end(name, effective_args, result, err)
             except Exception as exc:
                 _log.warning("on_tool_end_failed", extra={"err": repr(exc)})
-        return result, err
+        return result, err, None
 
     @staticmethod
     def _block_to_dict(block: Any) -> dict[str, Any]:
@@ -178,7 +256,7 @@ class NativeAgentLoop:
             for b in assistant_blocks:
                 if b.get("type") != "tool_use":
                     continue
-                result, err = await self._dispatch_tool(b["name"], b["input"])
+                result, err, _outcome = await self._dispatch_tool(b["name"], b["input"])
                 tool_results.append(self._tool_result_block(b["id"], result, err))
             conv.append({"role": "user", "content": tool_results})
 
@@ -249,9 +327,32 @@ class NativeAgentLoop:
                     type="tool_use",
                     data={"name": b["name"], "input": b["input"], "id": b["id"]},
                 )
-                result, err = await self._dispatch_tool(b["name"], b["input"])
+                result, err, outcome = await self._dispatch_tool(b["name"], b["input"])
                 tr = self._tool_result_block(b["id"], result, err)
                 tool_results.append(tr)
+                # If a hook short-circuited (denied / asks_user), surface it
+                # as a separate event so the frontend can render a modal /
+                # confirmation UI instead of treating it like a normal error.
+                if outcome and outcome.get("kind") == "asks_user":
+                    yield AgentEvent(
+                        type="hook_asks_user",
+                        data={
+                            "tool": outcome["tool"],
+                            "tool_use_id": b["id"],
+                            "prompt": outcome["prompt"],
+                            "details": outcome["details"],
+                            "confirm_args": outcome["confirm_args"],
+                        },
+                    )
+                elif outcome and outcome.get("kind") == "denied":
+                    yield AgentEvent(
+                        type="hook_denied",
+                        data={
+                            "tool": outcome["tool"],
+                            "tool_use_id": b["id"],
+                            "reason": outcome["reason"],
+                        },
+                    )
                 yield AgentEvent(
                     type="tool_result",
                     data={

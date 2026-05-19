@@ -174,6 +174,35 @@ class AgentConfig(BaseModel):
     max_turns: int = 12
 
 
+class HooksConfig(BaseModel):
+    """Phase 8 — sandboxed tool execution.
+
+    Hooks intercept every tool dispatch and can Allow / Deny / AskUser /
+    Rewrite. Three built-in hooks ship with v0.3:
+
+    - `path_allowlist`     — refuse paths outside the profile data dir
+    - `destructive_sql`    — AskUser on DELETE/UPDATE/DROP, Deny on
+                             DROP DATABASE
+    - `audit_log`          — append every tool call to audit.jsonl with
+                             a hash chain so tampering is detectable
+
+    Set `enabled=False` to bypass the chain entirely (useful for the
+    -hooks control arm of R3 red-team experiments).
+
+    `path_allowlist_extra` lets operators extend the allow-list beyond
+    the default (profile data dir + cwd). Each entry is a directory that
+    path-bearing tools (kb_add_file / db_import_csv / ...) may touch.
+    """
+
+    enabled: bool = True
+    destructive_sql: bool = True
+    path_allowlist: bool = True
+    audit_log: bool = True
+    # Additional roots the path allow-list will accept on top of profile
+    # data_dir and cwd. List of absolute paths (or `~`-prefixed).
+    path_allowlist_extra: list[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Root settings
 # ---------------------------------------------------------------------------
@@ -191,6 +220,7 @@ class Settings(BaseSettings):
     data: DataConfig = DataConfig()
     logging: LoggingConfig = LoggingConfig()
     agent: AgentConfig = AgentConfig()
+    hooks: HooksConfig = HooksConfig()
 
     model_config = SettingsConfigDict(
         # Two files tried in order; later entries take precedence.
@@ -220,4 +250,5 @@ __all__ = [
     "DataConfig",
     "LoggingConfig",
     "AgentConfig",
+    "HooksConfig",
 ]

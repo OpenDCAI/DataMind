@@ -105,6 +105,7 @@ python -m datamind.scripts.hello_graph     # Pure local — no network required
 python -m datamind.scripts.hello_db        # NL2SQL + safeguards (DELETE rejected)
 python -m datamind.scripts.hello_skills    # .claude/skills/ semantic search
 python -m datamind.scripts.hello_memory    # Short + long term + LLM fact extraction
+python -m datamind.scripts.hello_hooks     # Sandboxed dispatch + tamper-evident audit
 ```
 
 Each prints a compact narration. The last line of a successful run is always `[hello_<cap>] OK`.

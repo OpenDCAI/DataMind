@@ -31,6 +31,9 @@ dependencies = [
     # DB abstraction (dialect providers pluggable)
     "sqlalchemy>=2.0",
 
+    # SQL parsing for hooks (DestructiveSqlHook)
+    "sqlglot>=22",
+
     # Server + CLI
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",

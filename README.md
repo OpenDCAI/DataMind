@@ -16,6 +16,7 @@ An agentic retrieval assistant that pulls from **six** distinct knowledge surfac
 | **Skills** | `.claude/skills/<name>/SKILL.md` + safe Python tools | `skill_search`, `skill_get`, `skill_list`, `calculator`, `unit_convert`, `get_current_time`, `analyze_text` |
 | **Memory** | SQLite with cosine recall + LLM fact extraction; **scope-typed (`global` / `profile` / `session`)** for multi-tenant isolation | `memory_save`, `memory_recall`, `memory_forget`, `memory_list_profiles` |
 | **Ingest** ✨ | Conversational data import — drop a file in via chat or the browser drag-drop zone | `kb_add_file`, `kb_add_path`, `db_import_csv`, `graph_add_triples_from_text` |
+| **Hooks** ✨ v0.3 | Sandboxed tool dispatch — every call is intercepted; `Allow` / `Deny` / `AskUser` / `Rewrite`; tamper-evident audit log per profile | `PathAllowlistHook`, `DestructiveSqlHook`, `AuditLogHook` (built-in; user hooks pluggable) |
 
 **27 tools total.** All routed through one `ToolRegistry`; the agent decides what to call and in what order.
 

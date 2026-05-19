@@ -484,6 +484,40 @@ main {
   font-family: var(--sans);
 }
 .sample-prompt:hover { border-color: var(--accent); background: var(--surface3); }
+
+/* ---- hook confirmation modal -------------------------------------- */
+.hook-modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999;
+  animation: hook-fade 0.15s ease-out;
+}
+@keyframes hook-fade { from { opacity: 0 } to { opacity: 1 } }
+.hook-modal {
+  background: var(--surface, #fff);
+  color: var(--text, #111);
+  border: 1px solid var(--border, #ddd);
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 560px;
+  width: calc(100% - 32px);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+  font-family: var(--sans);
+}
+.hook-modal-title { font-size: 18px; font-weight: 700; color: #c2410c; margin-bottom: 12px; }
+.hook-modal-tool { font-size: 13px; color: var(--muted, #666); margin-bottom: 8px; }
+.hook-modal-tool code { background: var(--surface2, #f3f4f6); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+.hook-modal-prompt { font-size: 14px; line-height: 1.5; padding: 12px; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; margin-bottom: 12px; white-space: pre-wrap; }
+.hook-modal-details { font-size: 12px; margin-bottom: 16px; }
+.hook-modal-details summary { cursor: pointer; color: var(--muted, #666); }
+.hook-modal-details pre { background: var(--surface2, #f6f8fa); padding: 8px; border-radius: 6px; overflow-x: auto; font-size: 11px; max-height: 200px; }
+.hook-modal-actions { display: flex; gap: 12px; justify-content: flex-end; }
+.hook-modal-actions button { padding: 8px 16px; border-radius: 8px; font-family: var(--sans); font-size: 14px; cursor: pointer; border: 1px solid var(--border, #ddd); background: var(--surface2, #f3f4f6); }
+.hook-modal-cancel:hover { background: var(--surface3, #e5e7eb); }
+.hook-modal-confirm { background: #dc2626 !important; color: #fff !important; border-color: #b91c1c !important; }
+.hook-modal-confirm:hover { background: #b91c1c !important; }
+.tool-group.hook-denied { border-color: #dc2626; background: #fef2f2; }
 </style>
 </head>
 <body>
@@ -833,6 +867,72 @@ function completeToolGroup(det, { is_error, preview }) {
   }
 }
 
+// ---------- hook confirmation modal -----------------------------------
+// When a pre-tool-use hook returns AskUser, the agent receives a
+// structured `requires_confirmation` tool_result and the SSE stream
+// emits a `hook_asks_user` event. We render a modal so the human
+// can decide. Their answer is appended verbatim to the chat input
+// (with a hint about re-issuing) — the agent observes it and either
+// re-issues the call carrying the confirm_args, or backs off.
+function showConfirmationModal({ tool, prompt, details, confirm_args }) {
+  // Single instance — close any prior modal first.
+  const existing = document.getElementById('hookModal');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'hookModal';
+  overlay.className = 'hook-modal-overlay';
+
+  const panel = document.createElement('div');
+  panel.className = 'hook-modal';
+  panel.innerHTML = `
+    <div class="hook-modal-title">⚠️ 需要确认才能继续</div>
+    <div class="hook-modal-tool">tool · <code>${escapeHtml(tool)}</code></div>
+    <div class="hook-modal-prompt">${escapeHtml(prompt)}</div>
+    ${details && Object.keys(details).length
+      ? `<details class="hook-modal-details"><summary>详情</summary><pre>${escapeHtml(
+          JSON.stringify(details, null, 2)
+        )}</pre></details>`
+      : ''}
+    <div class="hook-modal-actions">
+      <button class="hook-modal-cancel">取消</button>
+      <button class="hook-modal-confirm">我已确认，继续</button>
+    </div>
+  `;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  panel.querySelector('.hook-modal-cancel').onclick = () => {
+    appendUserMessage('不要继续，请换一种方式回答。');
+    close();
+  };
+  panel.querySelector('.hook-modal-confirm').onclick = () => {
+    const argsLine =
+      confirm_args && Object.keys(confirm_args).length
+        ? `（重新发起 ${tool} 时带上 ${JSON.stringify(confirm_args)}）`
+        : '';
+    appendUserMessage(`已确认，可以继续。${argsLine}`);
+    close();
+  };
+  // ESC closes as cancel
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      appendUserMessage('不要继续，请换一种方式回答。');
+      close();
+    }
+  });
+}
+
+function appendUserMessage(text) {
+  const input = $('chatInput');
+  if (!input) return;
+  input.value = (input.value ? input.value + '\n' : '') + text;
+  // Auto-send so the human's confirmation is delivered in the next turn.
+  if (typeof autoresize === 'function') autoresize();
+  if (typeof sendMessage === 'function') sendMessage();
+}
+
 function hideWelcome() {
   const w = $('welcome');
   if (w) w.style.display = 'none';
@@ -917,6 +1017,21 @@ async function sendMessage() {
             completeToolGroup(unresolved, event);
             unresolved.classList.add('done');
           }
+        } else if (event.type === 'hook_asks_user') {
+          // A pre-tool-use hook (e.g. DestructiveSqlHook) wants explicit
+          // user consent before the tool is allowed to run. We surface it
+          // as a modal alongside the tool group so the user can approve
+          // or reject. The agent receives a structured result either way
+          // and decides whether to re-issue the call with confirm_args.
+          showConfirmationModal(event);
+          logLine(`hook asks_user: ${event.tool}`);
+        } else if (event.type === 'hook_denied') {
+          // A pre-hook hard-denied the call. The tool group will already
+          // render the error; we just decorate it.
+          const groups = aiBubble.querySelectorAll('.tool-group');
+          const last = groups[groups.length - 1];
+          if (last) last.classList.add('hook-denied');
+          logLine(`hook denied: ${event.tool} — ${event.reason}`);
         } else if (event.type === 'done') {
           logLine(`done: ${event.iterations} iter · stop=${event.stop_reason}`);
         }
