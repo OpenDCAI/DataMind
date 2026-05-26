@@ -1,0 +1,1248 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DataMind</title>
+<style>
+:root {
+  --bg: #0b0d14;
+  --surface: #12151f;
+  --surface2: #1b1f2c;
+  --surface3: #252a3a;
+  --border: #2a2f42;
+  --text: #e7e9ef;
+  --text2: #98a0b3;
+  --text3: #6b7389;
+  --accent: #7c6cff;
+  --accent-light: #9b8fff;
+  --green: #34d399;
+  --red: #f87171;
+  --amber: #fbbf24;
+  --blue: #60a5fa;
+  --cyan: #22d3ee;
+  --radius: 10px;
+  --mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+/* ───────── header ───────── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  height: 52px;
+}
+header h1 {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0;
+  background: linear-gradient(135deg, var(--accent), var(--cyan));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  letter-spacing: .3px;
+}
+header h1 small { font-size: 11px; color: var(--text3); font-weight: 500; margin-left: 8px; }
+.header-status {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--text2);
+}
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.pill.warn .dot { background: var(--amber); }
+.pill.err .dot { background: var(--red); }
+
+/* ───────── layout ───────── */
+main {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  height: calc(100vh - 52px);
+  /* Children must have a min-size of 0 so flex/grid items can shrink
+     past their content size — without this `.messages` overflow scrolls
+     get cut off at the bottom of the viewport. */
+  min-height: 0;
+  overflow: hidden;
+}
+@media (max-width: 960px) {
+  main { grid-template-columns: 1fr; }
+  .sidebar { display: none; }
+}
+
+/* ───────── chat panel ───────── */
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* Same trick: lets the .messages child actually flex/scroll. */
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.messages {
+  flex: 1 1 auto;
+  min-height: 0;            /* allow shrink, enable inner overflow */
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 22px 28px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.messages::-webkit-scrollbar { width: 8px; }
+.messages::-webkit-scrollbar-thumb { background: var(--surface3); border-radius: 4px; }
+
+.bubble {
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+  animation: slideIn .18s ease-out;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.bubble.user {
+  align-self: flex-end;
+  background: linear-gradient(135deg, var(--accent), var(--accent-light));
+  color: #fff;
+  border-bottom-right-radius: 3px;
+}
+.bubble.assistant {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 3px;
+}
+.bubble.assistant .caret {
+  display: inline-block;
+  width: 8px;
+  height: 14px;
+  background: var(--accent-light);
+  vertical-align: text-bottom;
+  margin-left: 2px;
+  animation: blink 1s steps(2) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* tool call block inside an assistant bubble */
+.tool-group {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+}
+.tool-group summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  user-select: none;
+  color: var(--text);
+}
+.tool-group summary::-webkit-details-marker { display: none; }
+.tool-group summary::before {
+  content: "▸";
+  font-size: 10px;
+  color: var(--text3);
+  transition: transform .15s;
+}
+.tool-group[open] summary::before { transform: rotate(90deg); }
+.tool-group .tool-name { color: var(--cyan); font-weight: 600; }
+.tool-group .tool-meta { color: var(--text3); margin-left: auto; font-size: 11px; }
+.tool-group .tool-body { padding: 0 12px 10px; }
+.tool-group pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+  max-height: 220px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.tool-group.error { border-color: #542230; background: #291218; }
+.tool-group.error .tool-name { color: var(--red); }
+
+/* error bubble */
+.bubble.error {
+  background: #2a1013;
+  border: 1px solid #542230;
+  color: var(--red);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* ───────── composer ───────── */
+.composer {
+  flex: 0 0 auto;            /* don't squash the messages area */
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 14px 20px;
+  /* Cap composer height so a long uploads list can't push messages
+     off-screen — its inner list will scroll instead. */
+  max-height: 45vh;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.composer-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+.composer textarea {
+  flex: 1;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: var(--sans);
+  resize: none;
+  min-height: 42px;
+  max-height: 180px;
+  line-height: 1.4;
+  outline: none;
+  transition: border-color .15s;
+}
+.composer textarea:focus { border-color: var(--accent); }
+.composer button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.composer button:hover { background: var(--accent-light); }
+.composer button:disabled { opacity: .5; cursor: not-allowed; }
+.composer button.stop { background: var(--red); }
+
+.composer-hints {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text3);
+  font-family: var(--mono);
+}
+.composer-hints kbd {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10.5px;
+  font-family: var(--mono);
+}
+.composer-hints .session-input {
+  background: transparent;
+  border: none;
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 11px;
+  outline: none;
+  width: 160px;
+}
+
+/* ───────── drop zone ───────── */
+.drop-zone {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text3);
+  background: var(--surface2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.drop-zone:hover { border-color: var(--accent); color: var(--text2); }
+.drop-zone.dragover {
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.08);
+  color: var(--accent);
+}
+.drop-zone .drop-zone-hint {
+  flex: 1;
+  user-select: none;
+}
+.drop-zone .drop-zone-actions { display: flex; gap: 8px; align-items: center; }
+.drop-zone .drop-zone-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+.drop-zone-uploads {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text3);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* Long upload lists scroll inside the composer rather than pushing
+     the chat area off-screen. */
+  max-height: 140px;
+  overflow-y: auto;
+}
+.drop-zone-uploads .uploaded-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--surface2);
+  border-radius: 4px;
+}
+.drop-zone-uploads .uploaded-row .name { color: var(--cyan); font-family: var(--mono); }
+.drop-zone-uploads .uploaded-row .ingest-btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+/* ───────── sidebar ───────── */
+.sidebar {
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  /* Same flex/grid trick: sidebar sits in a grid cell; without min-height
+     it expands to fit its content and the scrollbar disappears. */
+  min-height: 0;
+  height: 100%;
+  padding: 16px 18px 30px;
+}
+.sidebar::-webkit-scrollbar { width: 6px; }
+.sidebar::-webkit-scrollbar-thumb { background: var(--surface3); border-radius: 3px; }
+.section { margin-bottom: 22px; }
+.section h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text3);
+  margin: 0 0 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.section h2 .section-action {
+  font-size: 10px;
+  color: var(--accent-light);
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 12px; }
+.kv dt { color: var(--text3); font-family: var(--mono); font-size: 11px; }
+.kv dd { margin: 0; color: var(--text); font-family: var(--mono); font-size: 11px; word-break: break-all; }
+
+.tool-list { display: flex; flex-direction: column; gap: 4px; }
+.tool-item {
+  padding: 5px 9px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tool-item .group-tag {
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--surface3);
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+.tool-item .group-tag.kb { background: #1d3d5a; color: #7dd3fc; }
+.tool-item .group-tag.db { background: #3d2f1d; color: var(--amber); }
+.tool-item .group-tag.graph { background: #3a1f3a; color: #f0abfc; }
+.tool-item .group-tag.memory { background: #1e3a2c; color: var(--green); }
+.tool-item .group-tag.skillknowledge { background: #2a1f45; color: var(--accent-light); }
+.tool-item .group-tag.skillcode { background: #1f3b3f; color: var(--cyan); }
+
+.action-btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11.5px;
+  font-family: var(--sans);
+  transition: all .15s;
+}
+.action-btn:hover { border-color: var(--accent); background: var(--surface3); }
+.action-btn.small { padding: 3px 8px; font-size: 10.5px; }
+
+.memory-box input {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 11.5px;
+  font-family: var(--mono);
+  outline: none;
+  margin-bottom: 6px;
+}
+.memory-hit {
+  padding: 6px 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 4px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.memory-hit .score { color: var(--accent-light); font-family: var(--mono); font-size: 10.5px; }
+
+.log {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text3);
+  max-height: 160px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* welcome state */
+.welcome {
+  align-self: center;
+  max-width: 520px;
+  text-align: center;
+  color: var(--text2);
+  margin-top: 80px;
+}
+.welcome h3 { margin: 0 0 10px; color: var(--text); }
+.welcome p { font-size: 13px; line-height: 1.7; margin: 4px 0; }
+.welcome code { background: var(--surface2); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-light); }
+.sample-prompts { display: grid; gap: 8px; margin-top: 18px; }
+.sample-prompt {
+  padding: 9px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+  color: var(--text);
+  transition: all .15s;
+  font-family: var(--sans);
+}
+.sample-prompt:hover { border-color: var(--accent); background: var(--surface3); }
+
+/* ---- hook confirmation modal -------------------------------------- */
+.hook-modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999;
+  animation: hook-fade 0.15s ease-out;
+}
+@keyframes hook-fade { from { opacity: 0 } to { opacity: 1 } }
+.hook-modal {
+  background: var(--surface, #fff);
+  color: var(--text, #111);
+  border: 1px solid var(--border, #ddd);
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 560px;
+  width: calc(100% - 32px);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+  font-family: var(--sans);
+}
+.hook-modal-title { font-size: 18px; font-weight: 700; color: #c2410c; margin-bottom: 12px; }
+.hook-modal-tool { font-size: 13px; color: var(--muted, #666); margin-bottom: 8px; }
+.hook-modal-tool code { background: var(--surface2, #f3f4f6); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+.hook-modal-prompt { font-size: 14px; line-height: 1.5; padding: 12px; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; margin-bottom: 12px; white-space: pre-wrap; }
+.hook-modal-details { font-size: 12px; margin-bottom: 16px; }
+.hook-modal-details summary { cursor: pointer; color: var(--muted, #666); }
+.hook-modal-details pre { background: var(--surface2, #f6f8fa); padding: 8px; border-radius: 6px; overflow-x: auto; font-size: 11px; max-height: 200px; }
+.hook-modal-actions { display: flex; gap: 12px; justify-content: flex-end; }
+.hook-modal-actions button { padding: 8px 16px; border-radius: 8px; font-family: var(--sans); font-size: 14px; cursor: pointer; border: 1px solid var(--border, #ddd); background: var(--surface2, #f3f4f6); }
+.hook-modal-cancel:hover { background: var(--surface3, #e5e7eb); }
+.hook-modal-confirm { background: #dc2626 !important; color: #fff !important; border-color: #b91c1c !important; }
+.hook-modal-confirm:hover { background: #b91c1c !important; }
+.tool-group.hook-denied { border-color: #dc2626; background: #fef2f2; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DataMind <small>v0.2</small></h1>
+  <div class="header-status" id="headerStatus">
+    <span class="pill warn" id="healthPill"><span class="dot"></span><span>Connecting…</span></span>
+  </div>
+</header>
+
+<main>
+  <section class="chat-panel">
+    <div class="messages" id="messages">
+      <div class="welcome" id="welcome">
+        <h3>👋 欢迎使用 DataMind</h3>
+        <p>这是一个统一检索 Agent，可以调用 <code>kb_search</code>、<code>db_query_nl</code>、<code>graph_traverse</code>、<code>skill_search</code>、<code>memory_recall</code> 等工具自动回答你的问题。</p>
+        <p>下方输入问题试试 —— 工具调用会实时展示在回答中。</p>
+        <div class="sample-prompts" id="samplePrompts"></div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-zone-hint">
+          📎 拖拽文件到这里上传，或
+          <a class="drop-zone-link" href="#" id="dropZonePicker">点击选择文件</a>
+          （.md / .txt / .csv，单文件 ≤ 25 MB）
+        </div>
+        <div class="drop-zone-actions">
+          <span id="dropZoneStatus" style="font-family: var(--mono); font-size: 11px;"></span>
+        </div>
+      </div>
+      <div class="drop-zone-uploads" id="uploadsList"></div>
+      <input type="file" id="fileInput" style="display: none" multiple />
+
+      <div class="composer-row">
+        <textarea id="chatInput" placeholder="输入问题… (Enter 发送,  Shift+Enter 换行)" rows="1"></textarea>
+        <button id="sendBtn">发送</button>
+      </div>
+      <div class="composer-hints">
+        <span>
+          session: <input class="session-input" id="sessionInput" value="default" />
+          · 上下文条目: <span id="historyCount">0</span>
+          · <a href="#" id="clearHistoryBtn" style="color: var(--text3)">清空上下文</a>
+        </span>
+        <span>
+          <kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <aside class="sidebar">
+    <div class="section">
+      <h2>配置 <span class="section-action" id="refreshHealthBtn">刷新</span></h2>
+      <dl class="kv" id="configKV"></dl>
+    </div>
+
+    <div class="section">
+      <h2>工具 (<span id="toolCount">0</span>) <span class="section-action" id="refreshToolsBtn">刷新</span></h2>
+      <div class="tool-list" id="toolList"></div>
+    </div>
+
+    <div class="section">
+      <h2>记忆查看</h2>
+      <div class="memory-box">
+        <input id="memoryNs" placeholder="namespace (如 session:default)" />
+        <input id="memoryQuery" placeholder="搜索查询" />
+        <button class="action-btn small" id="memoryQueryBtn">查找</button>
+        <div id="memoryResults" style="margin-top: 8px;"></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>图谱 <span class="section-action" id="refreshGraphBtn">刷新</span></h2>
+      <dl class="kv" id="graphStats"></dl>
+    </div>
+
+    <div class="section">
+      <h2>知识库 <span class="section-action" id="refreshKbBtn">刷新</span></h2>
+      <dl class="kv" id="kbStats"></dl>
+      <button class="action-btn" id="reindexBtn" style="margin-top: 8px;">重建索引</button>
+    </div>
+
+    <div class="section">
+      <h2>运行日志</h2>
+      <div class="log" id="activityLog"></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+// ────────────────────────────────────────────────────────
+// State
+// ────────────────────────────────────────────────────────
+const state = {
+  health: null,
+  tools: [],
+  history: [],           // rolling conversation (for agent continuity)
+  streaming: false,
+  controller: null,
+};
+
+const $ = (id) => document.getElementById(id);
+
+// ────────────────────────────────────────────────────────
+// API helpers
+// ────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Session-Id': $('sessionInput').value.trim() || 'default',
+      ...(opts.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+function logLine(text) {
+  const log = $('activityLog');
+  const ts = new Date().toLocaleTimeString();
+  log.textContent = `${ts}  ${text}\n` + log.textContent;
+  log.textContent = log.textContent.split('\n').slice(0, 40).join('\n');
+}
+
+// ────────────────────────────────────────────────────────
+// Sidebar loaders
+// ────────────────────────────────────────────────────────
+async function loadHealth() {
+  try {
+    state.health = await api('/api/health');
+    const pill = $('healthPill');
+    pill.classList.remove('warn', 'err');
+    pill.innerHTML = `<span class="dot"></span><span>就绪 · ${state.health.tools} 工具</span>`;
+
+    const kv = $('configKV');
+    kv.innerHTML = '';
+    const rows = [
+      ['profile', state.health.profile],
+      ['model', state.health.model],
+      ['embedding', state.health.embedding],
+      ['db', state.health.db_dialect],
+    ];
+    for (const [k, v] of rows) {
+      kv.innerHTML += `<dt>${k}</dt><dd>${v}</dd>`;
+    }
+  } catch (err) {
+    const pill = $('healthPill');
+    pill.classList.remove('warn');
+    pill.classList.add('err');
+    pill.innerHTML = `<span class="dot"></span><span>未连接</span>`;
+    $('configKV').innerHTML = `<dt colspan="2" style="grid-column: 1/3; color: var(--red)">${err.message}</dt>`;
+    logLine(`health: ${err.message}`);
+  }
+}
+
+async function loadTools() {
+  try {
+    const d = await api('/api/tools');
+    state.tools = d.tools;
+    $('toolCount').textContent = d.count;
+    const list = $('toolList');
+    list.innerHTML = '';
+    for (const t of d.tools) {
+      const item = document.createElement('div');
+      item.className = 'tool-item';
+      const groupCls = (t.group || 'other').replace('.', '').toLowerCase();
+      const shortDesc = (t.description || '').split(/[\n.]/)[0].slice(0, 80);
+      item.innerHTML = `<span class="group-tag ${groupCls}">${t.group || '-'}</span><span title="${escapeHtml(t.description || '')}">${t.name}</span>`;
+      list.appendChild(item);
+    }
+    fillSamplePrompts();
+  } catch (err) {
+    logLine(`tools: ${err.message}`);
+  }
+}
+
+async function loadGraph() {
+  try {
+    const s = await api('/api/graph/stats');
+    const kv = $('graphStats');
+    kv.innerHTML = '';
+    const rows = Object.entries(s).length ? Object.entries(s) : [['(empty)', 'no graph loaded']];
+    for (const [k, v] of rows) kv.innerHTML += `<dt>${k}</dt><dd>${v}</dd>`;
+  } catch (err) {
+    $('graphStats').innerHTML = `<dt>error</dt><dd>${escapeHtml(err.message)}</dd>`;
+  }
+}
+
+async function loadKb() {
+  try {
+    const d = await api('/api/kb/documents');
+    const kv = $('kbStats');
+    kv.innerHTML = `<dt>documents</dt><dd>${d.count}</dd>`;
+    if (d.items && d.items.length) {
+      kv.innerHTML += `<dt>latest</dt><dd>${d.items[0].path}</dd>`;
+    }
+  } catch (err) {
+    $('kbStats').innerHTML = `<dt>error</dt><dd>${escapeHtml(err.message)}</dd>`;
+  }
+}
+
+async function reindexKb() {
+  const btn = $('reindexBtn');
+  btn.disabled = true;
+  btn.textContent = '重建中…';
+  try {
+    const out = await api('/api/kb/reindex', { method: 'POST' });
+    logLine(`kb reindex: pre_chunked=${out.pre_chunked} raw_chunks=${out.raw_chunks} total=${out.total_embedded}`);
+    await loadKb();
+  } catch (err) {
+    logLine(`reindex failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '重建索引';
+  }
+}
+
+async function runMemoryQuery() {
+  const ns = $('memoryNs').value.trim() || `session:${$('sessionInput').value.trim() || 'default'}`;
+  const q = $('memoryQuery').value.trim() || ' ';
+  const out = $('memoryResults');
+  out.innerHTML = '查询中…';
+  try {
+    const data = await api(`/api/memory/${encodeURIComponent(ns)}?query=${encodeURIComponent(q)}&top_k=5`);
+    if (!data.results || !data.results.length) {
+      out.innerHTML = `<div class="memory-hit" style="color: var(--text3)">no results in ${escapeHtml(ns)}</div>`;
+      return;
+    }
+    out.innerHTML = data.results.map(r => `
+      <div class="memory-hit">
+        <span class="score">score=${r.score?.toFixed(3) ?? 'n/a'}</span><br>
+        ${escapeHtml(r.content)}
+      </div>
+    `).join('');
+  } catch (err) {
+    out.innerHTML = `<div class="memory-hit" style="color: var(--red)">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// ────────────────────────────────────────────────────────
+// Sample prompts
+// ────────────────────────────────────────────────────────
+function fillSamplePrompts() {
+  const known = new Set(state.tools.map(t => t.name));
+  const bag = [];
+  if (known.has('kb_search')) bag.push('Search platform 团队负责人是谁？');
+  if (known.has('db_query_nl')) bag.push('数据库里有多少个员工？');
+  if (known.has('graph_traverse')) bag.push('Ann 三跳能到达哪些实体？');
+  if (known.has('skill_search')) bag.push('如何做代码审查？');
+  if (known.has('calculator')) bag.push('帮我算 sqrt(144) + 3^4 是多少');
+  if (known.has('memory_save')) bag.push('帮我记住：下周三会议调到周四');
+  if (known.has('get_current_time')) bag.push('现在几点了？');
+  if (!bag.length) bag.push('你能帮我做什么？');
+
+  const el = $('samplePrompts');
+  el.innerHTML = '';
+  for (const q of bag.slice(0, 6)) {
+    const btn = document.createElement('button');
+    btn.className = 'sample-prompt';
+    btn.textContent = q;
+    btn.onclick = () => { $('chatInput').value = q; sendMessage(); };
+    el.appendChild(btn);
+  }
+}
+
+// ────────────────────────────────────────────────────────
+// Chat (SSE streaming)
+// ────────────────────────────────────────────────────────
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function addBubble(role) {
+  hideWelcome();
+  const el = document.createElement('div');
+  el.className = `bubble ${role}`;
+  $('messages').appendChild(el);
+  scrollToBottom();
+  return el;
+}
+
+function appendText(bubble, text) {
+  // We append as text nodes then re-render with minimal markdown each time.
+  bubble.dataset.raw = (bubble.dataset.raw || '') + text;
+  renderMarkdown(bubble);
+  scrollToBottom();
+}
+
+function renderMarkdown(bubble) {
+  // Lightweight inline markdown: ` ` for inline code, **bold**, line breaks.
+  const raw = bubble.dataset.raw || '';
+  const html = escapeHtml(raw)
+    .replace(/`([^`\n]+)`/g, '<code style="background: var(--surface3); padding: 1px 4px; border-radius: 3px; font-family: var(--mono); font-size: 12.5px;">$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Preserve the rendered tool-groups (already live DOM).
+  const tools = bubble.querySelectorAll('details.tool-group');
+  const marker = '<!--TOOLGROUP-->';
+  const preserved = Array.from(tools).map(t => t.outerHTML);
+  let output = html + (bubble._caret ? '<span class="caret"></span>' : '');
+  if (preserved.length) {
+    output = preserved.join('') + '\n' + output;
+  }
+  bubble.innerHTML = output;
+}
+
+function addToolGroup(bubble, name, input, id) {
+  const det = document.createElement('details');
+  det.className = 'tool-group';
+  det.open = false;
+  det.dataset.toolId = id;
+  det.innerHTML = `
+    <summary>
+      <span class="tool-name">${escapeHtml(name)}</span>
+      <span class="tool-meta">调用中…</span>
+    </summary>
+    <div class="tool-body">
+      <pre><code>${escapeHtml(JSON.stringify(input, null, 2))}</code></pre>
+    </div>
+  `;
+  bubble.appendChild(det);
+  scrollToBottom();
+  return det;
+}
+
+function completeToolGroup(det, { is_error, preview }) {
+  if (is_error) det.classList.add('error');
+  const meta = det.querySelector('.tool-meta');
+  meta.textContent = is_error ? '❌ 失败' : '✓ 完成';
+  const body = det.querySelector('.tool-body');
+  if (preview) {
+    const pre = document.createElement('pre');
+    pre.innerHTML = `<code>${escapeHtml(preview)}</code>`;
+    body.appendChild(pre);
+  }
+}
+
+// ---------- hook confirmation modal -----------------------------------
+// When a pre-tool-use hook returns AskUser, the agent receives a
+// structured `requires_confirmation` tool_result and the SSE stream
+// emits a `hook_asks_user` event. We render a modal so the human
+// can decide. Their answer is appended verbatim to the chat input
+// (with a hint about re-issuing) — the agent observes it and either
+// re-issues the call carrying the confirm_args, or backs off.
+function showConfirmationModal({ tool, prompt, details, confirm_args }) {
+  // Single instance — close any prior modal first.
+  const existing = document.getElementById('hookModal');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'hookModal';
+  overlay.className = 'hook-modal-overlay';
+
+  const panel = document.createElement('div');
+  panel.className = 'hook-modal';
+  panel.innerHTML = `
+    <div class="hook-modal-title">⚠️ 需要确认才能继续</div>
+    <div class="hook-modal-tool">tool · <code>${escapeHtml(tool)}</code></div>
+    <div class="hook-modal-prompt">${escapeHtml(prompt)}</div>
+    ${details && Object.keys(details).length
+      ? `<details class="hook-modal-details"><summary>详情</summary><pre>${escapeHtml(
+          JSON.stringify(details, null, 2)
+        )}</pre></details>`
+      : ''}
+    <div class="hook-modal-actions">
+      <button class="hook-modal-cancel">取消</button>
+      <button class="hook-modal-confirm">我已确认，继续</button>
+    </div>
+  `;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  panel.querySelector('.hook-modal-cancel').onclick = () => {
+    appendUserMessage('不要继续，请换一种方式回答。');
+    close();
+  };
+  panel.querySelector('.hook-modal-confirm').onclick = () => {
+    const argsLine =
+      confirm_args && Object.keys(confirm_args).length
+        ? `（重新发起 ${tool} 时带上 ${JSON.stringify(confirm_args)}）`
+        : '';
+    appendUserMessage(`已确认，可以继续。${argsLine}`);
+    close();
+  };
+  // ESC closes as cancel
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      appendUserMessage('不要继续，请换一种方式回答。');
+      close();
+    }
+  });
+}
+
+function appendUserMessage(text) {
+  const input = $('chatInput');
+  if (!input) return;
+  input.value = (input.value ? input.value + '\n' : '') + text;
+  // Auto-send so the human's confirmation is delivered in the next turn.
+  if (typeof autoresize === 'function') autoresize();
+  if (typeof sendMessage === 'function') sendMessage();
+}
+
+function hideWelcome() {
+  const w = $('welcome');
+  if (w) w.style.display = 'none';
+}
+
+function scrollToBottom() {
+  const m = $('messages');
+  m.scrollTop = m.scrollHeight;
+}
+
+async function sendMessage() {
+  const input = $('chatInput');
+  const message = input.value.trim();
+  if (!message || state.streaming) return;
+
+  input.value = '';
+  autoresize();
+
+  addBubble('user').textContent = message;
+  const aiBubble = addBubble('assistant');
+  aiBubble._caret = true;
+
+  const toolDetsById = {};
+  const btn = $('sendBtn');
+  btn.textContent = '中止';
+  btn.classList.add('stop');
+  state.streaming = true;
+  state.controller = new AbortController();
+
+  const payload = { message, history: state.history };
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session-Id': $('sessionInput').value.trim() || 'default',
+      },
+      body: JSON.stringify(payload),
+      signal: state.controller.signal,
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`HTTP ${res.status}: ${t.slice(0, 200)}`);
+    }
+    if (!res.body) throw new Error('streaming not supported');
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames separated by blank line
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) >= 0) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const line = frame.split('\n').find(l => l.startsWith('data:'));
+        if (!line) continue;
+        const jsonStr = line.slice(5).trim();
+        if (!jsonStr) continue;
+
+        let event;
+        try { event = JSON.parse(jsonStr); } catch { continue; }
+
+        if (event.type === 'text' && event.delta) {
+          appendText(aiBubble, event.delta);
+        } else if (event.type === 'tool_use') {
+          const det = addToolGroup(aiBubble, event.name, event.input, event.id);
+          toolDetsById[event.id] = det;
+          logLine(`tool ${event.name}`);
+        } else if (event.type === 'tool_result') {
+          // Match by most-recent incomplete of same name since id wasn't echoed back
+          const unresolved = Array.from(aiBubble.querySelectorAll('.tool-group'))
+            .reverse()
+            .find(d => !d.classList.contains('done') && d.querySelector('.tool-name').textContent === event.name);
+          if (unresolved) {
+            completeToolGroup(unresolved, event);
+            unresolved.classList.add('done');
+          }
+        } else if (event.type === 'hook_asks_user') {
+          // A pre-tool-use hook (e.g. DestructiveSqlHook) wants explicit
+          // user consent before the tool is allowed to run. We surface it
+          // as a modal alongside the tool group so the user can approve
+          // or reject. The agent receives a structured result either way
+          // and decides whether to re-issue the call with confirm_args.
+          showConfirmationModal(event);
+          logLine(`hook asks_user: ${event.tool}`);
+        } else if (event.type === 'hook_denied') {
+          // A pre-hook hard-denied the call. The tool group will already
+          // render the error; we just decorate it.
+          const groups = aiBubble.querySelectorAll('.tool-group');
+          const last = groups[groups.length - 1];
+          if (last) last.classList.add('hook-denied');
+          logLine(`hook denied: ${event.tool} — ${event.reason}`);
+        } else if (event.type === 'done') {
+          logLine(`done: ${event.iterations} iter · stop=${event.stop_reason}`);
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      appendText(aiBubble, '\n\n[用户中止]');
+    } else {
+      const eb = document.createElement('div');
+      eb.className = 'bubble error';
+      eb.textContent = err.message;
+      $('messages').appendChild(eb);
+      logLine(`chat: ${err.message}`);
+    }
+  } finally {
+    aiBubble._caret = false;
+    renderMarkdown(aiBubble);
+    state.streaming = false;
+    state.controller = null;
+    btn.textContent = '发送';
+    btn.classList.remove('stop');
+
+    // Persist turn into rolling history for next call (simple text-only role+content).
+    const answer = aiBubble.dataset.raw || '';
+    state.history.push({ role: 'user', content: message });
+    state.history.push({ role: 'assistant', content: answer });
+    $('historyCount').textContent = state.history.length;
+  }
+}
+
+function stopStream() {
+  if (state.controller) state.controller.abort();
+}
+
+// ────────────────────────────────────────────────────────
+// Composer behavior
+// ────────────────────────────────────────────────────────
+function autoresize() {
+  const ta = $('chatInput');
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 180) + 'px';
+}
+
+$('chatInput').addEventListener('input', autoresize);
+$('chatInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+$('sendBtn').addEventListener('click', () => {
+  if (state.streaming) stopStream();
+  else sendMessage();
+});
+
+$('clearHistoryBtn').addEventListener('click', (e) => {
+  e.preventDefault();
+  state.history = [];
+  $('historyCount').textContent = '0';
+  $('messages').innerHTML = '';
+  $('messages').appendChild($('welcome'));
+  $('welcome').style.display = '';
+  logLine('history cleared');
+});
+
+$('refreshHealthBtn').addEventListener('click', loadHealth);
+$('refreshToolsBtn').addEventListener('click', loadTools);
+$('refreshGraphBtn').addEventListener('click', loadGraph);
+$('refreshKbBtn').addEventListener('click', loadKb);
+$('reindexBtn').addEventListener('click', reindexKb);
+$('memoryQueryBtn').addEventListener('click', runMemoryQuery);
+$('memoryQuery').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runMemoryQuery();
+});
+$('sessionInput').addEventListener('change', () => {
+  state.history = [];
+  $('historyCount').textContent = '0';
+  logLine(`session -> ${$('sessionInput').value}`);
+});
+
+// ────────────────────────────────────────────────────────
+// Drag-and-drop / file picker upload
+// ────────────────────────────────────────────────────────
+// Files dropped here are uploaded to /api/upload (server saves under
+// data/profiles/<profile>/uploads/) and then displayed in a small list
+// below the drop zone. Clicking "导入" on a row sends a follow-up chat
+// prompt that asks the agent to ingest the file via its kb_add_file /
+// db_import_csv tools — the agent picks based on the extension.
+
+const DROP = $('dropZone');
+const FILE_INPUT = $('fileInput');
+const UPLOADS = $('uploadsList');
+const STATUS = $('dropZoneStatus');
+
+function uploadStatus(msg, kind = 'info') {
+  STATUS.textContent = msg || '';
+  STATUS.style.color =
+    kind === 'error' ? 'var(--red)' :
+    kind === 'success' ? 'var(--accent)' : 'var(--text3)';
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function suggestPromptForFile(filename) {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.csv') || lower.endsWith('.tsv')) {
+    const tableHint = filename.replace(/\.(csv|tsv)$/i, '').replace(/[^a-zA-Z0-9_]+/g, '_');
+    return `把刚上传的 ${filename} 导入成数据表，表名叫 ${tableHint}`;
+  }
+  if (lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.txt')) {
+    return `帮我把刚上传的 ${filename} 加进知识库`;
+  }
+  // Fallback — let the agent decide
+  return `刚上传了文件 ${filename}，请帮我处理`;
+}
+
+async function uploadOne(file) {
+  if (file.size > 25 * 1024 * 1024) {
+    uploadStatus(`${file.name} 超过 25 MB，已跳过`, 'error');
+    return null;
+  }
+  const fd = new FormData();
+  fd.append('file', file);
+  uploadStatus(`正在上传 ${file.name}…`);
+  try {
+    const res = await fetch('/api/upload', { method: 'POST', body: fd });
+    if (!res.ok) {
+      const txt = await res.text();
+      uploadStatus(`上传失败: ${res.status}`, 'error');
+      logLine(`upload error: ${txt}`);
+      return null;
+    }
+    const data = await res.json();
+    uploadStatus(`已上传 ${data.filename} (${formatBytes(data.bytes)})`, 'success');
+    return data;
+  } catch (err) {
+    uploadStatus(`上传出错: ${err.message}`, 'error');
+    return null;
+  }
+}
+
+function renderUpload(data) {
+  const row = document.createElement('div');
+  row.className = 'uploaded-row';
+  row.innerHTML = `
+    <span class="name">📎 ${data.filename}</span>
+    <span style="color: var(--text3)">${formatBytes(data.bytes)}</span>
+    <button class="ingest-btn">导入</button>
+  `;
+  row.querySelector('.ingest-btn').addEventListener('click', () => {
+    const prompt = suggestPromptForFile(data.filename);
+    $('chatInput').value = prompt;
+    autoresize();
+    sendMessage();
+  });
+  UPLOADS.appendChild(row);
+}
+
+async function handleFiles(fileList) {
+  for (const f of fileList) {
+    const data = await uploadOne(f);
+    if (data) renderUpload(data);
+  }
+}
+
+DROP.addEventListener('click', () => FILE_INPUT.click());
+$('dropZonePicker').addEventListener('click', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  FILE_INPUT.click();
+});
+FILE_INPUT.addEventListener('change', (e) => {
+  if (e.target.files && e.target.files.length) {
+    handleFiles(e.target.files);
+    e.target.value = '';  // allow re-selecting the same file
+  }
+});
+
+['dragenter', 'dragover'].forEach((ev) => {
+  DROP.addEventListener(ev, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    DROP.classList.add('dragover');
+  });
+});
+['dragleave', 'drop'].forEach((ev) => {
+  DROP.addEventListener(ev, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    DROP.classList.remove('dragover');
+  });
+});
+DROP.addEventListener('drop', (e) => {
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+    handleFiles(e.dataTransfer.files);
+  }
+});
+
+// ────────────────────────────────────────────────────────
+// Bootstrap
+// ────────────────────────────────────────────────────────
+(async () => {
+  await Promise.all([loadHealth(), loadTools(), loadGraph(), loadKb()]);
+  $('chatInput').focus();
+})();
+</script>
+</body>
+</html>

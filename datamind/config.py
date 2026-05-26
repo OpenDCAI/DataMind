@@ -132,8 +132,27 @@ class DataConfig(BaseModel):
 
     @property
     def skills_dir(self) -> Path:
-        """SDK-style skill manifests: .claude/skills/<name>/SKILL.md"""
-        return self.base_dir / ".claude" / "skills"
+        """SDK-style skill manifests: <name>/SKILL.md.
+
+        Resolution order:
+          1. Repo-level `<base_dir>/.claude/skills/` (matches Anthropic CLI
+             convention; developers running from a checkout get this for free)
+          2. Package-bundled `datamind/skills/` (pip-install users get a
+             default skill set without cloning the repo)
+          3. ENV `DATAMIND__DATA__SKILLS_DIR` overrides everything (operators
+             pointing the agent at their own skill catalog)
+        """
+        user_dir = self.base_dir / ".claude" / "skills"
+        if user_dir.is_dir():
+            return user_dir
+        # Bundled fallback. Path(__file__) → datamind/config.py
+        # parent → datamind/, /skills → packaged skill set.
+        bundled = Path(__file__).resolve().parent / "skills"
+        if bundled.is_dir():
+            return bundled
+        # Last resort: return the user path even if it doesn't exist —
+        # SkillsService will simply load 0 skills, no crash.
+        return user_dir
 
 
 class LoggingConfig(BaseModel):

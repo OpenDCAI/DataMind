@@ -4,11 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datamind"
-version = "0.2.0"
-description = "Unified retrieval agent: KB / Graph / DB / Skills / Memory behind one Claude-powered loop."
+description = "Composable inference-time data framework for LLM agents — KB / Graph / DB / Skills / Memory / Hooks behind one tool registry"
 requires-python = ">=3.11"
-readme = "README.md"
-license = { text = "MIT" }
+readme = {file = "README.md", content-type = "text/markdown"}
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Hao Liang", email = "hao.liang@stu.pku.edu.cn"},
+    {name = "Wentao Zhang", email = "wentao.zhang@pku.edu.cn"},
+]
+keywords = [
+    "AI", "agent", "RAG", "GraphRAG", "Text2SQL",
+    "knowledge-graph", "memory", "MCP", "data-agent", "claude",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dynamic = ["version"]
 dependencies = [
     # Model client — we drive the agent loop ourselves via the Anthropic
     # Messages API (/v1/messages). This keeps us decoupled from the `claude`
@@ -44,6 +65,12 @@ dependencies = [
     "anyio>=4.2",
 ]
 
+[project.urls]
+Homepage      = "https://github.com/OpenDCAI/DataMind"
+Documentation = "https://haolpku.github.io/DataMind-Doc/"
+Repository    = "https://github.com/OpenDCAI/DataMind"
+Issues        = "https://github.com/OpenDCAI/DataMind/issues"
+
 [project.optional-dependencies]
 # Legacy v0.1 stack — kept so the old main.py / server.py / modules/* keep
 # working side-by-side with the new datamind/ package.
@@ -59,14 +86,42 @@ huggingface = ["sentence-transformers>=2.5"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "build>=1.0",
+    "twine>=4.0",
 ]
 
 [project.scripts]
 datamind = "datamind.cli:app"
 
+[tool.setuptools.dynamic]
+version = {attr = "datamind.__version__"}
+
+# Explicit include + exclude. `data*` was a foot-gun: it matches `datamind`
+# itself and silently produced empty wheels. We keep the include narrow
+# (only the `datamind` package and its sub-packages) and exclude only the
+# in-package test directory.
 [tool.setuptools.packages.find]
-include = ["datamind*"]
-exclude = ["modules*", "core*", "benchmark*", "schema*", "tests*", "data*", "storage*", "static*"]
+where = ["."]
+include = ["datamind", "datamind.*"]
+exclude = ["datamind.tests", "datamind.tests.*"]
+
+# Bundle non-Python resources so `pip install datamind` ships a working
+# server (browser UI under datamind/static/) and a default skill catalog
+# (datamind/skills/<name>/SKILL.md). Repo-side static/ and .claude/skills/
+# remain authoritative for development; server.py / config.py prefer them
+# when running from a checkout.
+[tool.setuptools.package-data]
+datamind = [
+    "static/*.html",
+    "static/*.css",
+    "static/*.js",
+    "skills/*/SKILL.md",
+    "skills/*/*.md",
+    "skills/*/*.py",
+    "skills/*/*.yaml",
+    "skills/*/*.yml",
+    "skills/*/*.json",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

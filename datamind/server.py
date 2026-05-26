@@ -70,10 +70,23 @@ app.add_middleware(
 )
 
 # ── Static files (frontend) ────────────────────────────────────────────────
-# Serve /static/* from the repo-level static/ dir and /, / → app.html.
-# We resolve the dir at import so the server can be started from anywhere.
-_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-if _STATIC_DIR.is_dir():
+# Resolution order:
+#   1. Repo-level static/ (developer running from a checkout)
+#   2. Package-bundled datamind/static/ (pip-install users)
+# Whichever exists first wins, so editable installs and wheel installs both
+# Just Work. The bundled copy ships with the wheel so `pip install datamind`
+# users get the browser UI without cloning the repo.
+def _resolve_static_dir() -> Path | None:
+    repo_static = Path(__file__).resolve().parent.parent / "static"
+    pkg_static = Path(__file__).resolve().parent / "static"
+    for cand in (repo_static, pkg_static):
+        if (cand / "app.html").is_file():
+            return cand
+    return None
+
+
+_STATIC_DIR = _resolve_static_dir()
+if _STATIC_DIR is not None:
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
     @app.get("/", include_in_schema=False)
