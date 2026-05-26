@@ -1,8 +1,41 @@
 # DataMind
 
+[![PyPI version](https://img.shields.io/pypi/v/datamind.svg)](https://pypi.org/project/datamind/)
+[![Python](https://img.shields.io/pypi/pyversions/datamind.svg)](https://pypi.org/project/datamind/)
+[![License](https://img.shields.io/pypi/l/datamind.svg)](https://github.com/OpenDCAI/DataMind/blob/main/LICENSE)
+
 An agentic retrieval assistant that pulls from **six** distinct knowledge surfaces and **picks the right tool itself**. Talk to it through a CLI or a browser UI; drag a file in and it'll route it into the right backend automatically.
 
-> **v0.2 is the current focus.** v0.1 (LlamaIndex `FunctionAgent` in `main.py` / `server.py` / `modules/`) still works for comparison. New code lives under [`datamind/`](./datamind/). For an end-to-end walkthrough see [`GETTING_STARTED.md`](./GETTING_STARTED.md) or the [docs site](https://haolpku.github.io/DataMind-Doc/en/).
+> **v0.3.0 is a preview release on PyPI.** New code lives under [`datamind/`](./datamind/); legacy v0.1 (`main.py` / `server.py` / `modules/`) still works for comparison. End-to-end walkthrough: [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [docs site](https://haolpku.github.io/DataMind-Doc/en/).
+
+---
+
+## Install
+
+```bash
+pip install datamind
+```
+
+Optional extras:
+
+```bash
+pip install 'datamind[mysql]'         # MySQL dialect
+pip install 'datamind[postgres]'      # PostgreSQL dialect
+pip install 'datamind[voyage]'        # Voyage embeddings
+pip install 'datamind[huggingface]'   # Local BGE / e5 embeddings
+pip install 'datamind[dev]'           # pytest + build + twine
+```
+
+Configure a Claude-compatible gateway and start chatting:
+
+```bash
+export DATAMIND__LLM__API_BASE=https://your-gateway.example.com
+export DATAMIND__LLM__API_KEY=sk-...
+export DATAMIND__LLM__MODEL=claude-sonnet-4-6
+
+datamind chat                                          # CLI
+python -m uvicorn datamind.server:app --port 8000      # browser UI on http://127.0.0.1:8000
+```
 
 ---
 
@@ -24,8 +57,11 @@ An agentic retrieval assistant that pulls from **six** distinct knowledge surfac
 
 ## 60-second demo
 
+> **Just want to use it?** `pip install datamind`, set `DATAMIND__LLM__API_KEY`, run `datamind chat`.
+> The walkthrough below clones the repo so you also get the seed scripts and the enterprise-demo dataset.
+
 ```bash
-git clone https://github.com/your-org/DataMind.git && cd DataMind
+git clone https://github.com/OpenDCAI/DataMind.git && cd DataMind
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
