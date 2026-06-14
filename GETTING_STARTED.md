@@ -207,9 +207,11 @@ DataMind ships two interchangeable agent-loop implementations:
 | Backend | How it talks to the model | When to pick it |
 |---|---|---|
 | `native` (default) | Pure Python, `anthropic` SDK → your gateway | Simplest deploy, fewest deps |
-| `sdk` | `claude-agent-sdk` → `claude` CLI → **CCR** (local translator) → your gateway | Want Hooks / Subagents / Compaction / Plan mode out of the box |
+| `sdk` | `claude-agent-sdk` → `claude` CLI → **CCR** (local translator) → your gateway | Want the SDK's own Subagents / Compaction / Plan mode out of the box |
 
-The **27 DataMind tools**, the SSE event shape, and the frontend all work identically either way — only the inner loop changes.
+The **27 DataMind tools**, the SSE event shape, the frontend, **and DataMind's own safety HookChain** (PathAllowlist / DestructiveSql / AuditLog) all work identically either way — only the inner loop changes. On `native` the HookChain runs at the loop's dispatch chokepoint; on `sdk` it runs inside each MCP tool wrapper. Same chain instance, same Allow/Deny/AskUser/Rewrite decisions, same audit log.
+
+> Note: the SDK's *own* hook system (its `PreToolUse`/`PostToolUse` API) is a separate thing from DataMind's `HookChain`. DataMind's safety hooks are enforced on both backends regardless of which one you pick.
 
 ### Why CCR
 

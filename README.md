@@ -94,15 +94,15 @@ Ask: **"工程部 Shanghai 的员工工资加起来是多少？"**
 
 The agent figures out it needs SQL, tries `db_query_nl`, gets an empty result, recovers by inspecting the schema (`db_list_tables` → `db_describe_table`), discovers the column is `Eng` not `Engineering`, rewrites the SQL itself, and answers ¥26,000 — without any of that being hard-coded. Same agent picks `graph_search_entities + graph_neighbors` for relationship questions, `kb_search + skill_get` for SOP questions, `memory_save` for "remember this for me" requests.
 
-**Frontend stays the same regardless.** The 27 tools, the streaming SSE protocol, and the chat UI work identically across two interchangeable agent backends:
+**Frontend stays the same regardless.** The 27 tools, the streaming SSE protocol, the chat UI, and DataMind's own safety HookChain work identically across two interchangeable agent backends:
 
 ```
 DATAMIND__AGENT__BACKEND=native   # default — pure-Python anthropic SDK + self-written loop
 DATAMIND__AGENT__BACKEND=sdk      # claude-agent-sdk + claude-code-router (CCR)
-                                  # unlocks Hooks / Subagents / Compaction / Plan mode
+                                  # adds the SDK's Subagents / Compaction / Plan mode
 ```
 
-Both verified end-to-end against the same 8 enterprise-demo questions ([numbers here](./GETTING_STARTED.md#10-bench)).
+DataMind's `HookChain` (path allow-list, destructive-SQL gate, tamper-evident audit) is enforced on **both** backends — at the dispatch chokepoint on `native`, inside each MCP tool wrapper on `sdk`. Both verified end-to-end against the same 8 enterprise-demo questions ([numbers here](./GETTING_STARTED.md#10-bench)).
 
 ---
 
