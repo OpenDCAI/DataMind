@@ -37,6 +37,7 @@ import json
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
+from datamind.core.hooks import AskUser, Allow, Deny, HookChain, Rewrite
 from datamind.core.logging import get_logger
 from datamind.core.tools import ToolRegistry, ToolSpec
 
@@ -48,7 +49,41 @@ _log = get_logger("agent.loop.sdk")
 # ----------------------------------------------------- ToolSpec → SDK tool
 
 
-def _spec_to_sdk_tool(spec: ToolSpec, hooks: dict[str, Any] | None = None):
+class _LegacyCallbackChain:
+    """Adapts the old (on_tool_start, on_tool_end) void callbacks to the
+    HookChain.pre/post surface that `_spec_to_sdk_tool` expects.
+
+    pre() always returns Allow() — the legacy callbacks can observe but not
+    steer — so this preserves pre-HookChain behaviour for any caller that
+    still passes raw callbacks instead of a HookChain.
+    """
+
+    def __init__(self, on_start: OnToolStart | None, on_end: OnToolEnd | None) -> None:
+        self._on_start = on_start
+        self._on_end = on_end
+
+    def __bool__(self) -> bool:  # truthy so `if hooks:` runs the wrapper
+        return bool(self._on_start or self._on_end)
+
+    async def pre(self, tool_name: str, args: dict[str, Any]):
+        from datamind.core.hooks import Allow  # noqa: PLC0415
+
+        if self._on_start:
+            try:
+                await self._on_start(tool_name, args)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("on_tool_start_failed", extra={"err": repr(exc), "tool": tool_name})
+        return Allow()
+
+    async def post(self, tool_name: str, args: dict[str, Any], result: Any, error: Exception | None) -> None:
+        if self._on_end:
+            try:
+                await self._on_end(tool_name, args, result, error)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("on_tool_end_failed", extra={"err": repr(exc), "tool": tool_name})
+
+
+def _spec_to_sdk_tool(spec: ToolSpec, hooks: HookChain | None = None):
     """Wrap a DataMind ToolSpec into an SDK SdkMcpTool.
 
     SDK expects:
@@ -58,47 +93,100 @@ def _spec_to_sdk_tool(spec: ToolSpec, hooks: dict[str, Any] | None = None):
     DataMind handlers are `async def handler(**kwargs) -> JSON-serialisable`.
     We splat `args`, stringify the result, and route errors into `isError`.
 
-    If hooks are provided, they fire around each tool invocation — same
-    semantics as NativeAgentLoop so audit logging works identically on
-    both backends.
+    Hook parity with NativeAgentLoop
+    --------------------------------
+    The SDK owns its outer control loop, but EVERY DataMind tool call still
+    funnels through this wrapper — it is the one chokepoint we control. So
+    we run the full `HookChain` here:
+
+      - pre-hooks → Allow / Deny / AskUser / Rewrite
+        * Deny     → return a structured tool_result, handler never runs
+        * AskUser  → return a `requires_confirmation` tool_result so the
+                     model surfaces it to the human; a follow-up call
+                     carrying `confirm_args` (e.g. confirm_destructive=True)
+                     passes the gate on the next turn
+        * Rewrite  → run the handler with mutated args
+        * Allow    → run unchanged
+      - post-hooks → audit log etc. run for completed, denied, and
+        ask-user calls (so audit.jsonl matches native exactly)
+
+    This gives the `sdk` backend the same DestructiveSqlHook /
+    PathAllowlistHook / AuditLogHook guarantees as `native`.
     """
     from claude_agent_sdk import tool  # local import — SDK is optional
 
     schema = spec.input_schema or {"type": "object", "properties": {}}
-    hooks = hooks or {}
-    on_start: OnToolStart | None = hooks.get("on_tool_start")
-    on_end: OnToolEnd | None = hooks.get("on_tool_end")
+
+    def _as_text_result(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
+        if isinstance(payload, (dict, list)):
+            text = json.dumps(payload, ensure_ascii=False, default=str)
+        else:
+            text = str(payload)
+        out: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
+        if is_error:
+            out["isError"] = True
+        return out
 
     @tool(spec.name, spec.description, schema)
     async def _wrapped(args: dict[str, Any]) -> dict[str, Any]:
         args = args or {}
-        if on_start:
-            try:
-                await on_start(spec.name, args)
-            except Exception as exc:
-                _log.warning("on_tool_start_failed", extra={"err": repr(exc), "tool": spec.name})
+        effective_args = dict(args)
+
+        # ---- Pre-hook chain --------------------------------------------
+        if hooks:
+            decision = await hooks.pre(spec.name, effective_args)
+            if isinstance(decision, Deny):
+                outcome = {
+                    "kind": "denied",
+                    "tool": spec.name,
+                    "reason": decision.reason,
+                    "message": (
+                        f"Tool call '{spec.name}' was denied by a policy "
+                        f"hook: {decision.reason}"
+                    ),
+                }
+                await hooks.post(spec.name, effective_args, outcome, None)
+                _log.info("hook_denied", extra={"tool": spec.name})
+                return _as_text_result(outcome, is_error=True)
+            if isinstance(decision, AskUser):
+                outcome = {
+                    "kind": "asks_user",
+                    "tool": spec.name,
+                    "requires_confirmation": True,
+                    "prompt": decision.prompt,
+                    "details": decision.details,
+                    "confirm_args": decision.confirm_args,
+                    "message": (
+                        "This call requires explicit user confirmation. "
+                        "Show the prompt to the user, get their consent, "
+                        "then re-issue the call merging in `confirm_args`."
+                    ),
+                }
+                await hooks.post(spec.name, effective_args, outcome, None)
+                _log.info("hook_asks_user", extra={"tool": spec.name})
+                # Not an error — the model must read it and act.
+                return _as_text_result(outcome)
+            if isinstance(decision, Rewrite):
+                effective_args = decision.new_args
+            # Allow → fall through
+
+        # ---- Handler ---------------------------------------------------
         try:
-            result = await spec.handler(**args)
+            result = await spec.handler(**effective_args)
             err: Exception | None = None
         except Exception as exc:  # noqa: BLE001
             result = None
             err = exc
-        if on_end:
-            try:
-                await on_end(spec.name, args, result, err)
-            except Exception as exc:
-                _log.warning("on_tool_end_failed", extra={"err": repr(exc), "tool": spec.name})
+
+        # ---- Post-hook chain -------------------------------------------
+        if hooks:
+            await hooks.post(spec.name, effective_args, result, err)
 
         if err is not None:
-            return {
-                "content": [{"type": "text", "text": f"[{type(err).__name__}] {err}"}],
-                "isError": True,
-            }
-        if isinstance(result, (dict, list)):
-            payload = json.dumps(result, ensure_ascii=False, default=str)
-        else:
-            payload = str(result)
-        return {"content": [{"type": "text", "text": payload}]}
+            return _as_text_result(
+                f"[{type(err).__name__}] {err}", is_error=True
+            )
+        return _as_text_result(result)
 
     return _wrapped
 
@@ -122,6 +210,7 @@ class SdkAgentLoop:
         config: AgentLoopConfig,
         ccr_base_url: str,
         ccr_api_key: str,
+        hooks: HookChain | None = None,
         on_tool_start: OnToolStart | None = None,
         on_tool_end: OnToolEnd | None = None,
     ) -> None:
@@ -132,7 +221,17 @@ class SdkAgentLoop:
         self._tools = tools
         self._ccr_base = ccr_base_url
         self._ccr_key = ccr_api_key
-        self._hooks = {"on_tool_start": on_tool_start, "on_tool_end": on_tool_end}
+        # The HookChain runs inside each tool wrapper (the one chokepoint we
+        # control under the SDK's own loop) — giving the sdk backend the same
+        # Allow/Deny/AskUser/Rewrite + audit guarantees as native. The legacy
+        # on_tool_start/on_tool_end callbacks are still accepted but, if a
+        # HookChain is supplied, prefer it; otherwise fall back to wrapping
+        # the callbacks into a chain so old call sites keep working.
+        if hooks is None and (on_tool_start or on_tool_end):
+            from datamind.core.hooks import HookChain as _HC  # noqa: PLC0415
+
+            hooks = _LegacyCallbackChain(on_tool_start, on_tool_end)
+        self._hooks = hooks
 
         # Build the in-process MCP server once — reuse across turns.
         sdk_tools = [

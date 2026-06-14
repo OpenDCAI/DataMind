@@ -494,3 +494,124 @@ async def test_native_loop_runs_handler_on_allow():
     assert err is None
     assert outcome is None
     assert result == {"ran": True, "got": {"q": "hi"}}
+
+
+# ----------------------------------------- SDK backend hook parity (loop_sdk)
+# The sdk backend runs the HookChain inside each MCP tool wrapper — the one
+# chokepoint DataMind controls under the SDK's own loop. These tests poke the
+# wrapper directly (no `claude` CLI / CCR needed) to prove Deny / AskUser /
+# Rewrite / Allow + post-audit all behave like NativeAgentLoop.
+
+def _sdk_handler(wrapped):
+    """SDK @tool decorator returns an SdkMcpTool whose callable is .handler."""
+    return getattr(wrapped, "handler", wrapped)
+
+
+@pytest.mark.asyncio
+async def test_sdk_wrapper_asks_user_on_destructive_sql():
+    pytest.importorskip("claude_agent_sdk")
+    from datamind.agent.loop_sdk import _spec_to_sdk_tool
+    from datamind.core.tools import ToolSpec
+
+    ran = []
+
+    async def handler(**kw):
+        ran.append(kw)
+        return {"ok": True}
+
+    spec = ToolSpec(name="db_query_sql", description="x",
+                    input_schema={"type": "object"}, handler=handler)
+    wrapped = _sdk_handler(_spec_to_sdk_tool(spec, hooks=HookChain([DestructiveSqlHook()])))
+
+    out = await wrapped({"sql": "DELETE FROM orders"})
+    text = out["content"][0]["text"]
+    assert "asks_user" in text
+    assert ran == []  # handler must NOT have run
+
+
+@pytest.mark.asyncio
+async def test_sdk_wrapper_confirm_flag_runs_handler():
+    pytest.importorskip("claude_agent_sdk")
+    from datamind.agent.loop_sdk import _spec_to_sdk_tool
+    from datamind.core.tools import ToolSpec
+
+    ran = []
+
+    async def handler(**kw):
+        ran.append(kw)
+        return {"ok": True}
+
+    spec = ToolSpec(name="db_query_sql", description="x",
+                    input_schema={"type": "object"}, handler=handler)
+    wrapped = _sdk_handler(_spec_to_sdk_tool(spec, hooks=HookChain([DestructiveSqlHook()])))
+
+    await wrapped({"sql": "DELETE FROM orders", "confirm_destructive": True})
+    assert len(ran) == 1
+
+
+@pytest.mark.asyncio
+async def test_sdk_wrapper_denies_path_outside_allowlist(tmp_path):
+    pytest.importorskip("claude_agent_sdk")
+    from datamind.agent.loop_sdk import _spec_to_sdk_tool
+    from datamind.core.tools import ToolSpec
+
+    ran = []
+
+    async def handler(**kw):
+        ran.append(kw)
+        return {"ok": True}
+
+    spec = ToolSpec(name="kb_add_file", description="x",
+                    input_schema={"type": "object"}, handler=handler)
+    chain = HookChain([PathAllowlistHook(roots=[tmp_path])])
+    wrapped = _sdk_handler(_spec_to_sdk_tool(spec, hooks=chain))
+
+    out = await wrapped({"path": "/etc/passwd"})
+    assert out.get("isError") is True
+    assert "denied" in out["content"][0]["text"]
+    assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_sdk_wrapper_audit_logs_through_chain(tmp_path):
+    pytest.importorskip("claude_agent_sdk")
+    from datamind.agent.loop_sdk import _spec_to_sdk_tool
+    from datamind.capabilities.hooks import AuditLogHook
+    from datamind.capabilities.hooks.audit import verify_audit_log
+    from datamind.core.tools import ToolSpec
+
+    async def handler(**kw):
+        return {"ok": True}
+
+    audit = tmp_path / "audit.jsonl"
+    spec = ToolSpec(name="kb_search", description="x",
+                    input_schema={"type": "object"}, handler=handler)
+    chain = HookChain([AuditLogHook(audit_path=audit)])
+    wrapped = _sdk_handler(_spec_to_sdk_tool(spec, hooks=chain))
+
+    # Bind a request context so the audit record has trace/profile fields.
+    from datamind.core.logging import bind_context
+    with bind_context(_ctx()):
+        await wrapped({"query": "hello"})
+        await wrapped({"query": "world"})
+
+    ok, bad, n = verify_audit_log(audit)
+    assert ok is True, bad
+    assert n == 2
+
+
+@pytest.mark.asyncio
+async def test_sdk_wrapper_allows_benign_call():
+    pytest.importorskip("claude_agent_sdk")
+    from datamind.agent.loop_sdk import _spec_to_sdk_tool
+    from datamind.core.tools import ToolSpec
+
+    async def handler(**kw):
+        return {"hits": []}
+
+    spec = ToolSpec(name="kb_search", description="x",
+                    input_schema={"type": "object"}, handler=handler)
+    wrapped = _sdk_handler(_spec_to_sdk_tool(spec, hooks=HookChain([DestructiveSqlHook()])))
+    out = await wrapped({"query": "anything"})
+    assert "isError" not in out
+    assert "hits" in out["content"][0]["text"]

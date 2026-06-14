@@ -176,24 +176,32 @@ async def build_agent(
     )
 
     loop: AgentLoopProtocol
+    hooks_chain = _build_hook_chain(settings)
     if settings.agent.backend == "sdk":
         # Import locally so the `claude-agent-sdk` dependency is only
         # loaded when actually selected. Native users don't pay for it.
         from .loop_sdk import SdkAgentLoop  # noqa: PLC0415
 
+        # The HookChain runs inside each MCP tool wrapper — the one
+        # chokepoint we control under the SDK's own loop — so the sdk
+        # backend gets the same Allow/Deny/AskUser/Rewrite + audit
+        # guarantees as native.
         loop = SdkAgentLoop(
             tools=tools,
             config=loop_config,
             ccr_base_url=settings.agent.ccr_base_url,
             ccr_api_key=settings.agent.ccr_api_key.get_secret_value(),
+            hooks=hooks_chain,
         )
-        _log.info("agent_loop_backend", extra={"backend": "sdk", "ccr": settings.agent.ccr_base_url})
-        # Hooks aren't currently wired into the SDK backend; the SDK
-        # owns its own dispatch loop. We return the chain anyway so
-        # callers can introspect / share it with custom flows.
-        hooks_chain = _build_hook_chain(settings)
+        _log.info(
+            "agent_loop_backend",
+            extra={
+                "backend": "sdk",
+                "ccr": settings.agent.ccr_base_url,
+                "hooks": hooks_chain.names() if hooks_chain else [],
+            },
+        )
     else:
-        hooks_chain = _build_hook_chain(settings)
         loop = NativeAgentLoop(
             client=client,
             tools=tools,
