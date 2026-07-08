@@ -353,7 +353,7 @@ pytest datamind/tests/
 
 ## What next
 
-- [Architecture overview](https://haolpku.github.io/DataMind-Doc/en/notes/guide/basicinfo/architecture/) — how the protocols, registries, and tool framework fit together.
-- [Configuration reference](https://haolpku.github.io/DataMind-Doc/en/notes/guide/advanced/config/) — every `DATAMIND__*` variable.
-- [Per-capability guides](https://haolpku.github.io/DataMind-Doc/en/notes/guide/modules/) — KB / Graph / DB / Skills / Memory deep dives.
+- [Architecture overview](https://opendcai.github.io/DataMind-Doc/en/notes/guide/basicinfo/architecture/) — how the protocols, registries, and tool framework fit together.
+- [Configuration reference](https://opendcai.github.io/DataMind-Doc/en/notes/guide/advanced/config/) — every `DATAMIND__*` variable.
+- [Per-capability guides](https://opendcai.github.io/DataMind-Doc/en/notes/guide/modules/) — KB / Graph / DB / Skills / Memory deep dives.
 - [Legacy v0.1 README](./README.md#repo-layout) — if you need to compare against the previous implementation, `python main.py` still works.

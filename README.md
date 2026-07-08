@@ -8,7 +8,7 @@
 
 An agentic retrieval assistant that pulls from **six** distinct knowledge surfaces and **picks the right tool itself**. Talk to it through a CLI or a browser UI; drag a file in and it'll route it into the right backend automatically.
 
-> **v0.3.0 is a preview release on PyPI.** The current codebase lives under [`datamind/`](./datamind/); the original v0.1 prototype (`main.py` / `server.py` / `modules/`) is kept in-tree for comparison only. End-to-end walkthrough: [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [docs site](https://haolpku.github.io/DataMind-Doc/en/).
+> **v0.3.0 is a preview release on PyPI.** The current codebase lives under [`datamind/`](./datamind/); the original v0.1 prototype (`main.py` / `server.py` / `modules/`) is kept in-tree for comparison only. End-to-end walkthrough: [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [docs site](https://opendcai.github.io/DataMind-Doc/en/).
 
 ---
 
@@ -200,7 +200,7 @@ The v0.1 prototype was functional but coupled: a global `AppState`, hard-wired m
 - **Zero global state** — every request owns its own `RequestContext` with a trace id.
 - **Side-by-side with v0.1** — the original code paths are untouched, so you can diff old against new.
 
-See [Architecture](https://haolpku.github.io/DataMind-Doc/en/notes/guide/basicinfo/architecture/) for full detail.
+See [Architecture](https://opendcai.github.io/DataMind-Doc/en/notes/guide/basicinfo/architecture/) for full detail.
 
 ---
 
@@ -260,4 +260,4 @@ Plus live smoke + benchmark scripts:
 
 ## Full documentation
 
-See **[DataMind-Doc](https://haolpku.github.io/DataMind-Doc/en/)** for architecture, configuration reference, per-capability deep dives, and tutorials in English and Chinese.
+See **[DataMind-Doc](https://opendcai.github.io/DataMind-Doc/en/)** for architecture, configuration reference, per-capability deep dives, and tutorials in English and Chinese.
