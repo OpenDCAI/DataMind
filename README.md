@@ -200,7 +200,7 @@ The v0.1 prototype was functional but coupled: a global `AppState`, hard-wired m
 - **Zero global state** — every request owns its own `RequestContext` with a trace id.
 - **Side-by-side with v0.1** — the original code paths are untouched, so you can diff old against new.
 
-See [Architecture](https://opendcai.github.io/DataMind-Doc/en/notes/guide/basicinfo/architecture/) for full detail.
+See [Architecture](https://opendcai.github.io/DataMind-Doc/en/guide/basicinfo/architecture/) for full detail.
 
 ---
 
