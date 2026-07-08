@@ -1,12 +1,14 @@
 # DataMind
 
+**English** | [中文](./README_zh.md)
+
 [![PyPI version](https://img.shields.io/pypi/v/datamind.svg)](https://pypi.org/project/datamind/)
 [![Python](https://img.shields.io/pypi/pyversions/datamind.svg)](https://pypi.org/project/datamind/)
 [![License](https://img.shields.io/pypi/l/datamind.svg)](https://github.com/OpenDCAI/DataMind/blob/main/LICENSE)
 
 An agentic retrieval assistant that pulls from **six** distinct knowledge surfaces and **picks the right tool itself**. Talk to it through a CLI or a browser UI; drag a file in and it'll route it into the right backend automatically.
 
-> **v0.3.0 is a preview release on PyPI.** New code lives under [`datamind/`](./datamind/); legacy v0.1 (`main.py` / `server.py` / `modules/`) still works for comparison. End-to-end walkthrough: [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [docs site](https://haolpku.github.io/DataMind-Doc/en/).
+> **v0.3.0 is a preview release on PyPI.** The current codebase lives under [`datamind/`](./datamind/); the original v0.1 prototype (`main.py` / `server.py` / `modules/`) is kept in-tree for comparison only. End-to-end walkthrough: [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [docs site](https://haolpku.github.io/DataMind-Doc/en/).
 
 ---
 
@@ -188,15 +190,15 @@ Or drop the file into the browser dropzone and click **导入**. Or say "把这�
 
 ---
 
-## Why v0.2
+## Why the rewrite (v0.1 → v0.3)
 
-v0.1 was functional but coupled: a global `AppState`, hard-wired modules, vendor-locked to the `claude` CLI. v0.2 reshapes it around:
+The v0.1 prototype was functional but coupled: a global `AppState`, hard-wired modules, vendor-locked to the `claude` CLI. The current architecture reshapes it around:
 
 - **Protocols + registries** — every capability is a `Protocol`; concrete classes register under a short name. New DB dialect / embedding provider / retriever strategy = one file.
 - **Pluggable agent loop** — `native` (anthropic SDK) or `sdk` (claude-agent-sdk + CCR), one ENV switch.
 - **Real SSE streaming** through FastAPI — not v0.1's fake character-sliced streaming.
 - **Zero global state** — every request owns its own `RequestContext` with a trace id.
-- **Side-by-side with v0.1** — old code paths untouched, easy comparison.
+- **Side-by-side with v0.1** — the original code paths are untouched, so you can diff old against new.
 
 See [Architecture](https://haolpku.github.io/DataMind-Doc/en/notes/guide/basicinfo/architecture/) for full detail.
 
@@ -206,7 +208,7 @@ See [Architecture](https://haolpku.github.io/DataMind-Doc/en/notes/guide/basicin
 
 ```
 DataMind/
-├── datamind/                     # ── v0.2 (new code) ──────────────────
+├── datamind/                     # ── current codebase ────────────────
 │   ├── agent/                    # base.py + loop_native.py + loop_sdk.py
 │   ├── capabilities/             # kb / graph / db / skills / memory /
 │   │                             #   ingest / embedding
@@ -225,7 +227,7 @@ DataMind/
 │
 ├── data/profiles/<profile>/      # per-profile raw inputs
 ├── storage/<profile>/            # per-profile indexes & DBs
-├── pyproject.toml                # v0.2 install + CLI entry
+├── pyproject.toml                # install + CLI entry
 └── .env.datamind.example         # nested env template
 ```
 
