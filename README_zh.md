@@ -202,7 +202,8 @@ DataMind/
 │   ├── agent/                    # base.py + loop_native.py + loop_sdk.py
 │   ├── capabilities/             # kb / graph / db / skills / memory /
 │   │                             #   ingest / embedding
-│   ├── core/                     # Protocol、Registry、Config、Logging、Tools
+│   ├── core/                     # Protocol、Registry、Logging、Tools、Hooks
+│   ├── config.py                 # Settings（LLM / 嵌入 / 检索 / …）
 │   ├── scripts/                  # hello_*.py + seed_enterprise_demo.py
 │   ├── cli.py                    # `python -m datamind ...`
 │   ├── server.py                 # FastAPI + 真 SSE + /api/upload

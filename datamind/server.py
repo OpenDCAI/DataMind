@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from datamind import __version__
 from datamind.agent import DataMindAgent, build_agent
 from datamind.config import Settings
 from datamind.core.logging import setup_logging
@@ -59,7 +60,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="DataMind", version="0.2.0", lifespan=_lifespan)
+app = FastAPI(title="DataMind", version=__version__, lifespan=_lifespan)
 
 # CORS: permissive by default — tighten in production via env or reverse proxy.
 app.add_middleware(

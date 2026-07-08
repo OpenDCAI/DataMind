@@ -1,4 +1,4 @@
-"""DataMind v0.2 configuration.
+"""DataMind v0.3 configuration.
 
 Nested `pydantic-settings` with env prefix `DATAMIND__` and double-underscore
 delimiter. Example:
