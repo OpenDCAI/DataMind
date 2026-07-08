@@ -26,16 +26,22 @@ pip install 'datamind[huggingface]'   # Local BGE / e5 embeddings
 pip install 'datamind[dev]'           # pytest + build + twine
 ```
 
-Configure a Claude-compatible gateway and start chatting:
+Point it at an **Anthropic-compatible** gateway and start chatting:
 
 ```bash
 export DATAMIND__LLM__API_BASE=https://your-gateway.example.com
-export DATAMIND__LLM__API_KEY=sk-...
+export DATAMIND__LLM__API_KEY=sk-ant-...
 export DATAMIND__LLM__MODEL=claude-sonnet-4-6
 
 datamind chat                                          # CLI
 python -m uvicorn datamind.server:app --port 8000      # browser UI on http://127.0.0.1:8000
 ```
+
+> **DataMind only speaks Anthropic.** Every request goes out over Anthropic's
+> `/v1/messages` protocol with an Anthropic-format key — there is no OpenAI
+> client path in the codebase. If the only gateway/key you have speaks **OpenAI
+> format**, don't rewrite DataMind: put a translator in front of it. See
+> [Bring your own key — the CCR bridge](#bring-your-own-key--the-ccr-bridge).
 
 ---
 
@@ -98,11 +104,72 @@ The agent figures out it needs SQL, tries `db_query_nl`, gets an empty result, r
 
 ```
 DATAMIND__AGENT__BACKEND=native   # default — pure-Python anthropic SDK + self-written loop
+                                  # requires an Anthropic-format upstream
 DATAMIND__AGENT__BACKEND=sdk      # claude-agent-sdk + claude-code-router (CCR)
-                                  # adds the SDK's Subagents / Compaction / Plan mode
+                                  # use this to sit on an OpenAI-format gateway
+                                  # (CCR translates); adds Subagents / Compaction / Plan mode
 ```
 
 DataMind's `HookChain` (path allow-list, destructive-SQL gate, tamper-evident audit) is enforced on **both** backends — at the dispatch chokepoint on `native`, inside each MCP tool wrapper on `sdk`. Both verified end-to-end against the same 8 enterprise-demo questions ([numbers here](./GETTING_STARTED.md#10-bench)).
+
+---
+
+## Bring your own key — the CCR bridge
+
+DataMind talks **Anthropic and only Anthropic** (the `/v1/messages` protocol, an
+`sk-ant-...`-style key). That's a deliberate choice — one protocol, one auth path,
+one set of streaming semantics to reason about.
+
+But most self-hosted gateways and many cheaper key resellers only expose the
+**OpenAI** Chat Completions format (`/v1/chat/completions`). Rather than fork
+DataMind to add an OpenAI client, we sit a tiny translator in front of the upstream:
+
+**[claude-code-router (CCR)](https://github.com/musistudio/claude-code-router)** — a
+local proxy that accepts Anthropic `/v1/messages` requests and forwards them to an
+OpenAI-format upstream, translating the payloads (and the streaming events) in both
+directions.
+
+```
+DataMind ──Anthropic /v1/messages──▶  CCR (localhost)  ──OpenAI /v1/chat/completions──▶  your gateway
+   (sdk backend)                     translates both ways                                (OpenAI-format key)
+```
+
+So DataMind never changes: it always thinks it's talking to Anthropic. CCR absorbs
+the format mismatch. This is exactly what the `sdk` agent backend is wired for.
+
+### When do I need it?
+
+| Your upstream gateway speaks… | What to do |
+|---|---|
+| **Anthropic** (`/v1/messages`, `sk-ant` key) | Nothing. Use `BACKEND=native`, point `DATAMIND__LLM__API_BASE` straight at it. |
+| **OpenAI** (`/v1/chat/completions`) | Run CCR, use `BACKEND=sdk`, point DataMind at CCR. |
+
+### Setup (OpenAI-format upstream)
+
+```bash
+# 1. Install CCR (Node ≥ 18)
+npm install -g @musistudio/claude-code-router
+#    …or clone https://github.com/musistudio/claude-code-router and build it.
+
+# 2. Launch the local bridge. It writes a config that registers your
+#    OpenAI-format upstream and applies the `anthropic` transformer.
+UPSTREAM_BASE=https://your-openai-gateway.example.com/v1 \
+UPSTREAM_KEY=sk-your-openai-format-key \
+UPSTREAM_MODEL=claude-sonnet-4-6 \
+  ./scripts/start_ccr.sh
+# → [ccr] listen = http://127.0.0.1:13456
+
+# 3. Point DataMind's sdk backend at CCR (in .env.datamind):
+DATAMIND__AGENT__BACKEND=sdk
+DATAMIND__AGENT__CCR_BASE_URL=http://127.0.0.1:13456
+DATAMIND__AGENT__CCR_API_KEY=dummy       # CCR holds the real key; this is unused
+```
+
+`scripts/start_ccr.sh` generates CCR's `config.json` for you, normalises the upstream
+URL to `/v1/chat/completions`, and maps the `default` / `background` / `think` routes
+onto your primary and fallback models. Override `CCR_PORT`, `UPSTREAM_FALLBACK`, or
+`CCR_SERVER_ENTRY` (path to CCR's `packages/server/dist/index.js`) via env vars — see
+the header comment in that script.
 
 ---
 
