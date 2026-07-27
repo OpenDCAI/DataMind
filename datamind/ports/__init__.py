@@ -4,9 +4,19 @@ from .source import (
     SourceCatalogPort,
     SourceResult,
 )
+from .trace import (
+    RecordedPlan,
+    RecordedResult,
+    ReplayArtifactStore,
+    TraceStore,
+)
 
 __all__ = [
     "DataSource",
+    "RecordedPlan",
+    "RecordedResult",
+    "ReplayArtifactStore",
     "SourceCatalogPort",
     "SourceResult",
+    "TraceStore",
 ]

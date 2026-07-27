@@ -47,3 +47,18 @@ class ExecutionError(KernelError):
 class SourceExecutionError(ExecutionError):
     """A source adapter failed while executing a DataOp."""
 
+
+class TraceError(KernelError):
+    """Base error for trace recording and lookup."""
+
+
+class TraceConflictError(TraceError):
+    """A trace or artifact identity has already been recorded."""
+
+
+class TraceNotFoundError(TraceError, LookupError):
+    """A requested trace or replay artifact does not exist."""
+
+
+class ReplayError(TraceError):
+    """A recorded execution cannot be replayed equivalently."""

@@ -14,11 +14,16 @@ from .errors import (
     KernelError,
     KernelValidationError,
     PlanValidationError,
+    ReplayError,
     SerializationError,
     SourceExecutionError,
+    TraceConflictError,
+    TraceError,
+    TraceNotFoundError,
 )
 from .provenance import Provenance
 from .source import SourceDescriptor
+from .trace import ExecutionTrace, TraceEvent, TraceEventKind
 from .types import (
     JsonObject,
     JsonScalar,
@@ -41,6 +46,7 @@ __all__ = [
     "EffectSpec",
     "ExecutionContext",
     "ExecutionError",
+    "ExecutionTrace",
     "JsonObject",
     "JsonScalar",
     "JsonValue",
@@ -48,12 +54,18 @@ __all__ = [
     "KernelValidationError",
     "PlanValidationError",
     "Provenance",
+    "ReplayError",
     "SerializationError",
     "SnapshotRef",
     "SourceDescriptor",
     "SourceExecutionError",
     "SourceKind",
     "SourceRef",
+    "TraceConflictError",
+    "TraceError",
+    "TraceEvent",
+    "TraceEventKind",
+    "TraceNotFoundError",
     "Usage",
     "effect_violations",
     "freeze_json",

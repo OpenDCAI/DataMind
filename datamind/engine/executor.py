@@ -1,41 +1,55 @@
-"""Deterministic DataOp/DataPlan execution against injected source ports."""
+"""Deterministic DataOp execution against injected source ports."""
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass, replace
-from typing import Any, Dict, Mapping, Sequence, Tuple
+from dataclasses import replace
+from typing import Any, Dict, Mapping, Optional
 
 from datamind.dataops import (
     Compose,
-    ContextItem,
-    ContextPack,
     DataPlan,
     Describe,
     Discover,
     OutputRef,
     ResultEnvelope,
     ResultKind,
-    ResultStatus,
     validate_plan,
 )
 from datamind.kernel import (
     Budget,
     ExecutionContext,
     ExecutionError,
-    Provenance,
-    SnapshotRef,
+    ReplayError,
     SourceExecutionError,
     Usage,
     require_effect_allowed,
     utc_now,
 )
-from datamind.ports import SourceCatalogPort, SourceResult
+from datamind.ports import (
+    ReplayArtifactStore,
+    SourceCatalogPort,
+    SourceResult,
+    TraceStore,
+)
+
+from .recording import ExecutionRecorder
+from .runtime import compose_results, select_path
 
 
 class Executor:
-    """Execute validated plans without model calls or implicit registration."""
+    """Validate, schedule, and execute plans without model calls."""
 
-    def __init__(self, catalog: SourceCatalogPort) -> None:
+    def __init__(
+        self,
+        catalog: SourceCatalogPort,
+        *,
+        trace_store: Optional[TraceStore] = None,
+        artifact_store: Optional[ReplayArtifactStore] = None,
+    ) -> None:
         self._catalog = catalog
+        self._recorder = ExecutionRecorder(
+            trace_store=trace_store,
+            artifact_store=artifact_store,
+        )
 
     async def execute(
         self,
@@ -48,7 +62,39 @@ class Executor:
             if isinstance(operation_or_plan, DataPlan)
             else self._single_operation_plan(operation_or_plan)
         )
-        return await self._execute_plan(plan, context=context)
+        trace_started = False
+        try:
+            trace_started = await self._recorder.start_plan(
+                plan,
+                context=context,
+            )
+            result = await self._execute_plan(plan, context=context)
+            await self._recorder.complete_plan(
+                context.trace_id,
+                plan,
+                result,
+            )
+            return result
+        except Exception as exc:
+            if trace_started:
+                await self._recorder.fail_plan(context.trace_id, exc)
+            raise
+
+    async def replay(self, trace_id: str) -> ResultEnvelope[Any]:
+        """Replay a completed trace without consulting live source adapters."""
+
+        trace_store, artifact_store = self._recorder.replay_stores
+        if trace_store is None or artifact_store is None:
+            raise ReplayError(
+                "replay requires both TraceStore and ReplayArtifactStore"
+            )
+        from .replay import ReplayEngine
+
+        replay_engine = ReplayEngine(
+            trace_store=trace_store,
+            artifact_store=artifact_store,
+        )
+        return await replay_engine.replay(trace_id)
 
     def _single_operation_plan(self, operation: Any) -> DataPlan:
         try:
@@ -78,6 +124,11 @@ class Executor:
         )
         report.require_valid()
         self._preflight(plan, context=context)
+        await self._recorder.plan_validated(
+            context.trace_id,
+            topological_order=report.topological_order,
+            static_actions=len(plan.operations),
+        )
 
         operations = {operation.op_id: operation for operation in plan.operations}
         results: Dict[str, ResultEnvelope[Any]] = {}
@@ -85,20 +136,38 @@ class Executor:
         for op_id in report.topological_order:
             self._require_before_deadline(context)
             operation = operations[op_id]
-            result = await self._execute_one(
+            await self._recorder.start_operation(
+                context.trace_id,
                 operation,
-                prior_results=results,
-                context=context,
             )
-            total_usage = total_usage + result.usage
-            plan.budget.require(total_usage)
-            context.budget.require(total_usage)
-            results[op_id] = result
+            try:
+                result = await self._execute_one(
+                    operation,
+                    prior_results=results,
+                    context=context,
+                )
+                total_usage = total_usage + result.usage
+                plan.budget.require(total_usage)
+                context.budget.require(total_usage)
+                await self._recorder.complete_operation(
+                    context.trace_id,
+                    result,
+                )
+                results[op_id] = result
+            except Exception as exc:
+                await self._recorder.fail_operation(
+                    context.trace_id,
+                    op_id,
+                    exc,
+                )
+                raise
 
         final = results[plan.output.op_id]
         if plan.output.path:
-            selected = self._select_path(final.value, plan.output.path)
-            final = replace(final, value=selected)
+            final = replace(
+                final,
+                value=select_path(final.value, plan.output.path),
+            )
         return replace(final, usage=total_usage)
 
     def _preflight(
@@ -108,8 +177,7 @@ class Executor:
         context: ExecutionContext,
     ) -> None:
         self._require_before_deadline(context)
-        static_usage = Usage(actions=len(plan.operations))
-        context.budget.require(static_usage)
+        context.budget.require(Usage(actions=len(plan.operations)))
         for operation in plan.operations:
             require_effect_allowed(
                 operation.effect,
@@ -136,33 +204,15 @@ class Executor:
                 result_kind=ResultKind.SOURCE_DESCRIPTOR,
             )
         elif isinstance(operation, Compose):
-            source_result = self._compose(
+            source_result = compose_results(
                 operation,
                 prior_results=prior_results,
             )
         else:
-            if operation.source is None:
-                raise ExecutionError(
-                    "operation {!r} has no Core executor or source".format(
-                        operation.operation
-                    )
-                )
-            adapter = self._catalog.get(operation.source)
-            try:
-                source_result = await adapter.execute(
-                    operation,
-                    context=context,
-                )
-            except SourceExecutionError:
-                raise
-            except Exception as exc:
-                raise SourceExecutionError(
-                    "source {!r} failed operation {!r}: {}".format(
-                        operation.source.source_id,
-                        operation.operation,
-                        exc,
-                    )
-                ) from exc
+            source_result = await self._execute_source(
+                operation,
+                context=context,
+            )
 
         if not isinstance(source_result, SourceResult):
             raise ExecutionError(
@@ -196,114 +246,31 @@ class Executor:
             status=source_result.status,
         )
 
-    def _compose(
+    async def _execute_source(
         self,
-        operation: Compose,
+        operation: Any,
         *,
-        prior_results: Mapping[str, ResultEnvelope[Any]],
-    ) -> SourceResult[ContextPack]:
-        items = []
-        evidence = []
-        provenance = []
-        snapshots = []
-        warnings = []
-        partial = False
-        seen_evidence = set()
-        seen_provenance = set()
-        seen_snapshots = set()
-
-        for ref in operation.inputs:
-            upstream = prior_results.get(ref.op_id)
-            if upstream is None:
-                raise ExecutionError(
-                    "compose input {!r} has not been executed".format(ref.op_id)
+        context: ExecutionContext,
+    ) -> SourceResult[Any]:
+        if operation.source is None:
+            raise ExecutionError(
+                "operation {!r} has no Core executor or source".format(
+                    operation.operation
                 )
-            selected = self._select_path(upstream.value, ref.path)
-            items.append(ContextItem(ref=ref, value=selected))
-            partial = partial or upstream.status is ResultStatus.PARTIAL
-            warnings.extend(upstream.warnings)
-
-            for item in upstream.evidence:
-                if item.evidence_id not in seen_evidence:
-                    seen_evidence.add(item.evidence_id)
-                    evidence.append(item)
-            for item in upstream.provenance:
-                key = self._provenance_key(item)
-                if key not in seen_provenance:
-                    seen_provenance.add(key)
-                    provenance.append(item)
-            for item in upstream.snapshots:
-                key = self._snapshot_key(item)
-                if key not in seen_snapshots:
-                    seen_snapshots.add(key)
-                    snapshots.append(item)
-
-        context_pack = ContextPack(
-            strategy=operation.strategy,
-            items=tuple(items),
-            evidence_ids=tuple(item.evidence_id for item in evidence),
-        )
-        return SourceResult(
-            value=context_pack,
-            result_kind=ResultKind.EVIDENCE_SET,
-            evidence=tuple(evidence),
-            provenance=tuple(provenance),
-            snapshots=tuple(snapshots),
-            warnings=tuple(warnings),
-            status=ResultStatus.PARTIAL if partial else ResultStatus.OK,
-        )
-
-    @staticmethod
-    def _select_path(value: Any, path: Sequence[Any]) -> Any:
-        selected = value
-        for part in path:
-            if isinstance(selected, Mapping):
-                try:
-                    selected = selected[part]
-                except KeyError as exc:
-                    raise ExecutionError(
-                        "output path key {!r} does not exist".format(part)
-                    ) from exc
-            elif (
-                isinstance(selected, Sequence)
-                and not isinstance(selected, (str, bytes, bytearray))
-                and isinstance(part, int)
-            ):
-                try:
-                    selected = selected[part]
-                except IndexError as exc:
-                    raise ExecutionError(
-                        "output path index {} is out of range".format(part)
-                    ) from exc
-            elif is_dataclass(selected) and isinstance(part, str):
-                field_names = {item.name for item in fields(selected)}
-                if part not in field_names:
-                    raise ExecutionError(
-                        "output path field {!r} does not exist".format(part)
-                    )
-                selected = getattr(selected, part)
-            else:
-                raise ExecutionError(
-                    "cannot apply output path item {!r} to {}".format(
-                        part,
-                        type(selected).__name__,
-                    )
+            )
+        adapter = self._catalog.get(operation.source)
+        try:
+            return await adapter.execute(operation, context=context)
+        except SourceExecutionError:
+            raise
+        except Exception as exc:
+            raise SourceExecutionError(
+                "source {!r} failed operation {!r}: {}".format(
+                    operation.source.source_id,
+                    operation.operation,
+                    exc,
                 )
-        return selected
-
-    @staticmethod
-    def _provenance_key(item: Provenance) -> Tuple[Any, ...]:
-        return (
-            item.source,
-            item.locator,
-            item.snapshot,
-            item.valid_from,
-            item.valid_to,
-        )
-
-    @staticmethod
-    def _snapshot_key(item: SnapshotRef) -> Tuple[Any, ...]:
-        return (item.source, item.version, item.checksum)
+            ) from exc
 
     @staticmethod
     def _require_before_deadline(context: ExecutionContext) -> None:
