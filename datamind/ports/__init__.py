@@ -1,4 +1,10 @@
 """Stable dependency-inversion ports used by the DataMind Core."""
+from .lifecycle import (
+    ArtifactStore,
+    LifecyclePort,
+    SnapshotSource,
+    SyncTarget,
+)
 from .source import (
     DataSource,
     SourceCatalogPort,
@@ -12,11 +18,15 @@ from .trace import (
 )
 
 __all__ = [
+    "ArtifactStore",
     "DataSource",
+    "LifecyclePort",
     "RecordedPlan",
     "RecordedResult",
     "ReplayArtifactStore",
     "SourceCatalogPort",
     "SourceResult",
+    "SnapshotSource",
+    "SyncTarget",
     "TraceStore",
 ]

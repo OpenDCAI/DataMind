@@ -69,6 +69,18 @@ class ExecutionRecorder:
                         "context_budget": self._budget_details(
                             context.budget
                         ),
+                        "snapshot_set_fingerprint": fingerprint(
+                            context.snapshots
+                        ),
+                        "snapshot_pins": [
+                            {
+                                "source_id": item.source.source_id,
+                                "source_kind": item.source.kind.value,
+                                "version": item.version,
+                                "checksum": item.checksum,
+                            }
+                            for item in context.snapshots.snapshots
+                        ],
                         "request_id": context.request_id,
                         "profile_fingerprint": fingerprint(context.profile),
                         "session_fingerprint": (
@@ -80,6 +92,14 @@ class ExecutionRecorder:
                             fingerprint(context.user_id)
                             if context.user_id is not None
                             else None
+                        ),
+                        "readable_scope_fingerprints": sorted(
+                            fingerprint(item)
+                            for item in context.readable_scopes
+                        ),
+                        "writable_scope_fingerprints": sorted(
+                            fingerprint(item)
+                            for item in context.writable_scopes
                         ),
                     },
                 )
@@ -115,6 +135,7 @@ class ExecutionRecorder:
         )
 
     async def start_operation(self, trace_id: str, operation: Any) -> None:
+        scopes = tuple(getattr(operation, "scopes", ()))
         await self._append(
             trace_id,
             TraceEventKind.OP_STARTED,
@@ -128,6 +149,19 @@ class ExecutionRecorder:
                     else None
                 ),
                 "inputs": [ref.op_id for ref in operation.inputs],
+                "scope_fingerprints": sorted(
+                    fingerprint(item) for item in scopes
+                ),
+                "valid_at": (
+                    operation.valid_at.isoformat()
+                    if getattr(operation, "valid_at", None) is not None
+                    else None
+                ),
+                "known_at": (
+                    operation.known_at.isoformat()
+                    if getattr(operation, "known_at", None) is not None
+                    else None
+                ),
             },
         )
 

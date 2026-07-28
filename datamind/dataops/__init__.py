@@ -7,6 +7,7 @@ from .operations import (
     Discover,
     InitialDataOp,
     Query,
+    Recall,
     Search,
 )
 from .plan import DataPlan
@@ -14,6 +15,7 @@ from .results import (
     ContextItem,
     ContextPack,
     Evidence,
+    MemoryRecallResult,
     ResultEnvelope,
     ResultStatus,
 )
@@ -52,10 +54,12 @@ __all__ = [
     "PlanValidationIssue",
     "PlanValidationReport",
     "Query",
+    "Recall",
     "ResultEnvelope",
     "ResultKind",
     "ResultStatus",
     "Search",
+    "MemoryRecallResult",
     "operation_from_dict",
     "operation_to_dict",
     "plan_from_dict",

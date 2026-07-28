@@ -21,6 +21,7 @@ class ResultKind(str, Enum):
     SOURCE_DESCRIPTOR = "source_descriptor"
     DOCUMENT_HITS = "document_hits"
     TABLE = "table"
+    MEMORY_RECORDS = "memory_records"
     EVIDENCE_SET = "evidence_set"
 
     def __str__(self) -> str:

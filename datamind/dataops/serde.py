@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Mapping
 
 from datamind.kernel import (
     Budget,
     EffectLevel,
+    MemoryKind,
+    ScopeKind,
+    ScopeRef,
     SerializationError,
     SourceKind,
     SourceRef,
@@ -15,7 +19,7 @@ from datamind.kernel import (
 )
 
 from .base import OutputRef
-from .operations import Compose, Describe, Discover, Query, Search
+from .operations import Compose, Describe, Discover, Query, Recall, Search
 from .plan import DataPlan
 
 DATA_PLAN_SCHEMA = "datamind.data_plan"
@@ -44,6 +48,25 @@ def _output_from_dict(payload: Mapping[str, Any]) -> OutputRef:
     )
 
 
+def _scope_to_dict(scope: ScopeRef) -> dict:
+    return {"kind": scope.kind.value, "scope_id": scope.scope_id}
+
+
+def _scope_from_dict(payload: Mapping[str, Any]) -> ScopeRef:
+    return ScopeRef(
+        kind=ScopeKind(str(payload["kind"])),
+        scope_id=str(payload["scope_id"]),
+    )
+
+
+def _datetime_to_json(value: Any) -> Any:
+    return value.isoformat() if value is not None else None
+
+
+def _datetime_from_json(value: Any) -> Any:
+    return datetime.fromisoformat(str(value)) if value is not None else None
+
+
 def operation_to_dict(op: Any) -> dict:
     common = {"type": op.operation, "op_id": op.op_id}
     if isinstance(op, Discover):
@@ -66,6 +89,20 @@ def operation_to_dict(op: Any) -> dict:
                 "statement": op.statement,
                 "language": op.language,
                 "parameters": thaw_json(op.parameters),
+            }
+        )
+    elif isinstance(op, Recall):
+        common.update(
+            {
+                "source": _source_to_dict(op.source),
+                "query": op.query,
+                "scopes": [
+                    _scope_to_dict(scope) for scope in op.scopes
+                ],
+                "kinds": [kind.value for kind in op.kinds],
+                "valid_at": _datetime_to_json(op.valid_at),
+                "known_at": _datetime_to_json(op.known_at),
+                "limit": op.limit,
             }
         )
     elif isinstance(op, Compose):
@@ -113,6 +150,23 @@ def operation_from_dict(payload: Mapping[str, Any]) -> Any:
                 statement=str(payload["statement"]),
                 language=str(payload.get("language", "sql")),
                 parameters=payload.get("parameters", {}),
+            )
+        if op_type == "recall":
+            return Recall(
+                op_id=op_id,
+                source=_source_from_dict(payload["source"]),
+                query=str(payload["query"]),
+                scopes=tuple(
+                    _scope_from_dict(item)
+                    for item in payload.get("scopes", ())
+                ),
+                kinds=tuple(
+                    MemoryKind(str(item))
+                    for item in payload.get("kinds", ())
+                ),
+                valid_at=_datetime_from_json(payload.get("valid_at")),
+                known_at=_datetime_from_json(payload.get("known_at")),
+                limit=int(payload.get("limit", 10)),
             )
         if op_type == "compose":
             return Compose(

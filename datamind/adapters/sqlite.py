@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
@@ -21,6 +21,7 @@ from datamind.kernel import (
     KernelValidationError,
     Provenance,
     SnapshotRef,
+    SnapshotUnavailableError,
     SourceDescriptor,
     SourceExecutionError,
     SourceKind,
@@ -99,11 +100,12 @@ class SQLiteReadSource:
         self._row_limit = row_limit
         self._timeout_seconds = float(timeout_seconds)
         ref = SourceRef(source_id, SourceKind.TABLE)
+        initial_checksum = self._artifact_checksum()
         self._descriptor = SourceDescriptor(
             ref=ref,
             display_name=display_name,
             capabilities=frozenset(("query",)),
-            version=self._artifact_version(),
+            version="sha256:{}".format(initial_checksum),
             schema={
                 "result": {
                     "columns": "tuple[string]",
@@ -121,6 +123,21 @@ class SQLiteReadSource:
     def descriptor(self) -> SourceDescriptor:
         return self._descriptor
 
+    async def current_snapshot(self) -> SnapshotRef:
+        checksum = await asyncio.to_thread(self._artifact_checksum)
+        snapshot = self._snapshot(checksum)
+        self._descriptor = replace(
+            self._descriptor,
+            version=snapshot.version,
+        )
+        return snapshot
+
+    async def has_snapshot(self, snapshot: SnapshotRef) -> bool:
+        if not isinstance(snapshot, SnapshotRef):
+            return False
+        current = await self.current_snapshot()
+        return current.same_version_as(snapshot)
+
     async def execute(
         self,
         operation: Any,
@@ -137,6 +154,14 @@ class SQLiteReadSource:
                     operation.language
                 )
             )
+        pinned = context.snapshots.get(self.descriptor.ref)
+        if pinned is not None and not await self.has_snapshot(pinned):
+            raise SnapshotUnavailableError(
+                "SQLite source {!r} cannot serve snapshot {!r}".format(
+                    self.descriptor.ref.source_id,
+                    pinned.version,
+                )
+            )
         try:
             columns, rows, truncated, latency_ms = await asyncio.to_thread(
                 self._run_query,
@@ -150,11 +175,17 @@ class SQLiteReadSource:
             ) from exc
 
         checksum = self._artifact_checksum()
-        snapshot = SnapshotRef(
-            source=self.descriptor.ref,
-            version="sha256:{}".format(checksum[:16]),
-            checksum=checksum,
+        snapshot = self._snapshot(checksum)
+        self._descriptor = replace(
+            self._descriptor,
+            version=snapshot.version,
         )
+        if pinned is not None and not snapshot.same_version_as(pinned):
+            raise SnapshotUnavailableError(
+                "SQLite source {!r} changed during pinned execution".format(
+                    self.descriptor.ref.source_id
+                )
+            )
         table = SQLiteTable(
             columns=columns,
             rows=rows,
@@ -264,9 +295,12 @@ class SQLiteReadSource:
             else sqlite3.SQLITE_OK
         )
 
-    def _artifact_version(self) -> str:
-        stat = self._path.stat()
-        return "file:{}:{}".format(stat.st_mtime_ns, stat.st_size)
+    def _snapshot(self, checksum: str) -> SnapshotRef:
+        return SnapshotRef(
+            source=self.descriptor.ref,
+            version="sha256:{}".format(checksum),
+            checksum=checksum,
+        )
 
     def _artifact_checksum(self) -> str:
         digest = hashlib.sha256()

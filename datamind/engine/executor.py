@@ -10,6 +10,7 @@ from datamind.dataops import (
     Describe,
     Discover,
     OutputRef,
+    Recall,
     ResultEnvelope,
     ResultKind,
     validate_plan,
@@ -19,6 +20,7 @@ from datamind.kernel import (
     ExecutionContext,
     ExecutionError,
     ReplayError,
+    SnapshotUnavailableError,
     SourceExecutionError,
     Usage,
     require_effect_allowed,
@@ -26,6 +28,7 @@ from datamind.kernel import (
 )
 from datamind.ports import (
     ReplayArtifactStore,
+    SnapshotSource,
     SourceCatalogPort,
     SourceResult,
     TraceStore,
@@ -123,7 +126,7 @@ class Executor:
             sources=self._catalog.descriptors(),
         )
         report.require_valid()
-        self._preflight(plan, context=context)
+        await self._preflight(plan, context=context)
         await self._recorder.plan_validated(
             context.trace_id,
             topological_order=report.topological_order,
@@ -170,7 +173,7 @@ class Executor:
             )
         return replace(final, usage=total_usage)
 
-    def _preflight(
+    async def _preflight(
         self,
         plan: DataPlan,
         *,
@@ -185,6 +188,34 @@ class Executor:
                 approvals=context.approvals,
                 allowed_resources=context.allowed_resources,
             )
+            if isinstance(operation, Recall):
+                context.require_readable_scopes(operation.scopes)
+        checked_sources = set()
+        for operation in plan.operations:
+            if (
+                operation.source is None
+                or isinstance(operation, Describe)
+                or operation.source.source_id in checked_sources
+            ):
+                continue
+            checked_sources.add(operation.source.source_id)
+            pinned = context.snapshots.get(operation.source)
+            if pinned is None:
+                continue
+            adapter = self._catalog.get(operation.source)
+            if not isinstance(adapter, SnapshotSource):
+                raise SnapshotUnavailableError(
+                    "source {!r} does not support pinned execution".format(
+                        operation.source.source_id
+                    )
+                )
+            if not await adapter.has_snapshot(pinned):
+                raise SnapshotUnavailableError(
+                    "source {!r} cannot serve pinned snapshot {!r}".format(
+                        operation.source.source_id,
+                        pinned.version,
+                    )
+                )
 
     async def _execute_one(
         self,
@@ -260,8 +291,8 @@ class Executor:
             )
         adapter = self._catalog.get(operation.source)
         try:
-            return await adapter.execute(operation, context=context)
-        except SourceExecutionError:
+            result = await adapter.execute(operation, context=context)
+        except ExecutionError:
             raise
         except Exception as exc:
             raise SourceExecutionError(
@@ -271,6 +302,18 @@ class Executor:
                     exc,
                 )
             ) from exc
+        pinned = context.snapshots.get(operation.source)
+        if pinned is not None and not any(
+            item.same_version_as(pinned) for item in result.snapshots
+        ):
+            raise SnapshotUnavailableError(
+                "source {!r} did not execute against pinned snapshot "
+                "{!r}".format(
+                    operation.source.source_id,
+                    pinned.version,
+                )
+            )
+        return result
 
     @staticmethod
     def _require_before_deadline(context: ExecutionContext) -> None:

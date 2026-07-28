@@ -32,6 +32,8 @@ from datamind.kernel import (
     EffectPolicyError,
     ExecutionContext,
     PlanValidationError,
+    SnapshotSet,
+    SnapshotUnavailableError,
     SourceExecutionError,
     SourceKind,
     SourceRef,
@@ -246,6 +248,35 @@ class ExecutorTests(ExecutionFixture):
 
 
 class SQLiteSafetyTests(ExecutionFixture):
+    async def test_sqlite_accepts_only_its_current_pinned_snapshot(
+        self,
+    ) -> None:
+        snapshot = await self.sqlite_source.current_snapshot()
+        operation = Query(
+            source=self.sqlite_source.descriptor.ref,
+            statement="SELECT COUNT(*) AS count FROM expenses",
+        )
+
+        result = await self.executor.execute(
+            operation,
+            context=ExecutionContext.new(
+                snapshots=SnapshotSet((snapshot,))
+            ),
+        )
+        self.assertTrue(result.snapshots[0].same_version_as(snapshot))
+
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute(
+                "INSERT INTO expenses VALUES (9, 'meal', 25.0)"
+            )
+        with self.assertRaises(SnapshotUnavailableError):
+            await self.executor.execute(
+                operation,
+                context=ExecutionContext.new(
+                    snapshots=SnapshotSet((snapshot,))
+                ),
+            )
+
     async def test_sqlite_connection_rejects_write_statements(self) -> None:
         operation = Query(
             source=self.sqlite_source.descriptor.ref,

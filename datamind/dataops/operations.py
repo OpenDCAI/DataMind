@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, FrozenSet, Tuple, Type, Union
+from datetime import datetime
+from typing import Any, ClassVar, FrozenSet, Optional, Tuple, Type, Union
 
 from datamind.kernel import (
     EffectLevel,
     JsonObject,
     KernelValidationError,
+    MemoryKind,
+    ScopeRef,
     SourceKind,
     SourceRef,
     freeze_json_object,
     new_id,
+    require_aware,
 )
 
 from .base import OperationMixin, OutputRef, ResultKind
@@ -124,6 +128,73 @@ class Query(OperationMixin):
 
 
 @dataclass(frozen=True)
+class Recall(OperationMixin):
+    """Recall typed memory records from explicit scopes and time slices."""
+
+    source: SourceRef
+    query: str
+    scopes: Tuple[ScopeRef, ...]
+    kinds: Tuple[MemoryKind, ...] = ()
+    valid_at: Optional[datetime] = None
+    known_at: Optional[datetime] = None
+    limit: int = 10
+    op_id: str = field(default_factory=lambda: new_id("recall"))
+    inputs: Tuple[OutputRef[Any], ...] = field(default=(), init=False)
+
+    operation: ClassVar[str] = "recall"
+    output_kind: ClassVar[ResultKind] = ResultKind.MEMORY_RECORDS
+    effect_level: ClassVar[EffectLevel] = EffectLevel.READ
+    allowed_source_kinds: ClassVar[FrozenSet[SourceKind]] = frozenset(
+        (SourceKind.MEMORY,)
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.query, str) or not self.query.strip():
+            raise KernelValidationError(
+                "recall query must be a non-empty string"
+            )
+        object.__setattr__(self, "scopes", tuple(self.scopes))
+        if not self.scopes:
+            raise KernelValidationError(
+                "recall requires at least one explicit scope"
+            )
+        if any(not isinstance(item, ScopeRef) for item in self.scopes):
+            raise KernelValidationError(
+                "recall scopes must contain ScopeRef values"
+            )
+        if len(set(self.scopes)) != len(self.scopes):
+            raise KernelValidationError(
+                "recall scopes cannot contain duplicates"
+            )
+        object.__setattr__(self, "kinds", tuple(self.kinds))
+        if any(not isinstance(item, MemoryKind) for item in self.kinds):
+            raise KernelValidationError(
+                "recall kinds must contain MemoryKind values"
+            )
+        if len(set(self.kinds)) != len(self.kinds):
+            raise KernelValidationError(
+                "recall kinds cannot contain duplicates"
+            )
+        for name in ("valid_at", "known_at"):
+            value = getattr(self, name)
+            if value is not None:
+                if not isinstance(value, datetime):
+                    raise KernelValidationError(
+                        "recall {} must be a datetime".format(name)
+                    )
+                require_aware(value, "recall {}".format(name))
+        if isinstance(self.limit, bool) or not isinstance(self.limit, int):
+            raise KernelValidationError(
+                "recall limit must be an integer"
+            )
+        if self.limit <= 0:
+            raise KernelValidationError(
+                "recall limit must be positive"
+            )
+        self._validate_common()
+
+
+@dataclass(frozen=True)
 class Compose(OperationMixin):
     """Combine prior typed results into a normalized evidence set."""
 
@@ -148,12 +219,13 @@ class Compose(OperationMixin):
         self._validate_common()
 
 
-InitialDataOp = Union[Discover, Describe, Search, Query, Compose]
+InitialDataOp = Union[Discover, Describe, Search, Query, Recall, Compose]
 INITIAL_DATA_OP_TYPES: Tuple[Type[OperationMixin], ...] = (
     Discover,
     Describe,
     Search,
     Query,
+    Recall,
     Compose,
 )
 
@@ -164,5 +236,6 @@ __all__ = [
     "INITIAL_DATA_OP_TYPES",
     "InitialDataOp",
     "Query",
+    "Recall",
     "Search",
 ]

@@ -104,12 +104,12 @@ class SourceRef:
 
 @dataclass(frozen=True)
 class SnapshotRef:
-    """Version of a source observed by a particular execution."""
+    """Immutable identity of one version of a logical source."""
 
     source: SourceRef
     version: str
     checksum: Optional[str] = None
-    observed_at: datetime = field(default_factory=utc_now)
+    observed_at: datetime = field(default_factory=utc_now, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, SourceRef):
@@ -126,3 +126,16 @@ class SnapshotRef:
         if not isinstance(self.observed_at, datetime):
             raise KernelValidationError("observed_at must be a datetime")
         require_aware(self.observed_at, "observed_at")
+
+    def same_version_as(self, other: "SnapshotRef") -> bool:
+        """Compare versions without treating observation time as identity."""
+
+        if not isinstance(other, SnapshotRef):
+            return False
+        if self.source != other.source or self.version != other.version:
+            return False
+        return (
+            self.checksum is None
+            or other.checksum is None
+            or self.checksum == other.checksum
+        )

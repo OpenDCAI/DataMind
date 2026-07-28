@@ -20,6 +20,14 @@ class EffectPolicyError(KernelError, PermissionError):
         super().__init__("; ".join(self.violations) or "effect policy denied")
 
 
+class ScopePolicyError(KernelError, PermissionError):
+    """A memory operation requested scopes unavailable to this context."""
+
+    def __init__(self, violations: Iterable[str]) -> None:
+        self.violations: Tuple[str, ...] = tuple(violations)
+        super().__init__("; ".join(self.violations) or "scope policy denied")
+
+
 class BudgetExceeded(KernelError):
     """Observed or statically known usage exceeds its budget."""
 
@@ -62,3 +70,31 @@ class TraceNotFoundError(TraceError, LookupError):
 
 class ReplayError(TraceError):
     """A recorded execution cannot be replayed equivalently."""
+
+
+class SnapshotUnavailableError(ExecutionError):
+    """A source cannot serve the snapshot pinned by an execution."""
+
+
+class SyncError(KernelError):
+    """A versioned artifact change cannot be synchronized."""
+
+
+class VersionConflictError(SyncError):
+    """A change set was based on a source version that is no longer current."""
+
+
+class ArtifactIntegrityError(SyncError):
+    """Artifact content does not match its declared manifest."""
+
+
+class ArtifactNotFoundError(SyncError, LookupError):
+    """A manifest references an unavailable artifact."""
+
+
+class IdempotencyConflictError(SyncError):
+    """An idempotency key was reused for a different change set."""
+
+
+class UnsupportedSyncError(SyncError):
+    """A source or engine configuration does not support synchronization."""

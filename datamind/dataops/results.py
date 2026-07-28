@@ -9,6 +9,8 @@ from typing import Any, Generic, Optional, Tuple, TypeVar
 from datamind.kernel import (
     JsonObject,
     KernelValidationError,
+    MemoryConflict,
+    MemoryRecord,
     Provenance,
     SnapshotRef,
     SourceKind,
@@ -63,6 +65,42 @@ class ContextPack:
         ):
             raise KernelValidationError(
                 "context pack evidence ids must be non-empty strings"
+            )
+
+
+@dataclass(frozen=True)
+class MemoryRecallResult:
+    """Native Recall value with conflicts kept separate from memory content."""
+
+    records: Tuple[MemoryRecord, ...]
+    conflicts: Tuple[MemoryConflict, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "records", tuple(self.records))
+        object.__setattr__(self, "conflicts", tuple(self.conflicts))
+        if any(not isinstance(item, MemoryRecord) for item in self.records):
+            raise KernelValidationError(
+                "memory recall records must contain MemoryRecord values"
+            )
+        if any(
+            not isinstance(item, MemoryConflict)
+            for item in self.conflicts
+        ):
+            raise KernelValidationError(
+                "memory recall conflicts must contain MemoryConflict values"
+            )
+        record_ids = tuple(item.memory_id for item in self.records)
+        if len(set(record_ids)) != len(record_ids):
+            raise KernelValidationError(
+                "memory recall records must have unique ids"
+            )
+        returned = set(record_ids)
+        if any(
+            not set(conflict.record_ids).issubset(returned)
+            for conflict in self.conflicts
+        ):
+            raise KernelValidationError(
+                "memory conflicts must reference returned records"
             )
 
 
