@@ -1,32 +1,50 @@
-"""Deterministic in-memory reference adapter for typed stateful Recall."""
+"""Deterministic reference adapter for governed, bi-temporal Memory."""
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import re
+from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 from urllib.parse import quote
 
 from datamind.dataops import (
+    ApplyMutation,
     Evidence,
     MemoryRecallResult,
+    ProposeMutation,
     Recall,
     ResultKind,
 )
 from datamind.kernel import (
+    AssertMemory,
+    EffectLevel,
     ExecutionContext,
     KernelValidationError,
     MemoryConflict,
+    MemoryIdempotencyConflictError,
     MemoryKind,
+    MemoryLink,
     MemoryLinkKind,
+    MemoryMutationDraft,
+    MemoryMutationError,
+    MemoryMutationProposal,
+    MemoryMutationReceipt,
+    MemoryOriginChannel,
     MemoryRecord,
+    MemoryVersionConflictError,
     Provenance,
+    RetractMemory,
     SnapshotRef,
     SnapshotUnavailableError,
     SourceDescriptor,
     SourceExecutionError,
     SourceKind,
     SourceRef,
+    SupersedeMemory,
+    memory_write_requires_approval,
     require_aware,
     sha256_checksum,
     thaw_json,
@@ -37,8 +55,21 @@ from datamind.ports import SourceResult
 _TOKEN_PATTERN = re.compile(r"\w+", flags=re.UNICODE)
 
 
+@dataclass(frozen=True)
+class _MemoryVersion:
+    snapshot: SnapshotRef
+    records: Tuple[MemoryRecord, ...]
+
+
+@dataclass(frozen=True)
+class _ProposalEntry:
+    draft: MemoryMutationDraft
+    channel: MemoryOriginChannel
+    proposal: MemoryMutationProposal
+
+
 class InMemoryMemorySource:
-    """Immutable, bi-temporal Recall baseline without ranking dependencies."""
+    """Versioned reference baseline for Recall and governed state changes."""
 
     def __init__(
         self,
@@ -48,17 +79,18 @@ class InMemoryMemorySource:
         version: str = "1",
         display_name: str = "In-memory typed memory",
         observed_at: Optional[datetime] = None,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         supplied = tuple(records)
         if any(not isinstance(item, MemoryRecord) for item in supplied):
             raise KernelValidationError(
                 "memory source records must contain MemoryRecord values"
             )
-        ordered = tuple(
-            sorted(supplied, key=lambda item: item.memory_id)
-        )
+        if not callable(clock):
+            raise KernelValidationError("memory source clock must be callable")
+        ordered = self._ordered(supplied)
         ref = SourceRef(source_id, SourceKind.MEMORY)
-        snapshot_time = observed_at or utc_now()
+        snapshot_time = observed_at or clock()
         if not isinstance(snapshot_time, datetime):
             raise KernelValidationError(
                 "memory snapshot observed_at must be a datetime"
@@ -66,17 +98,30 @@ class InMemoryMemorySource:
         require_aware(snapshot_time, "memory snapshot observed_at")
         self._validate_history(ordered, snapshot_time=snapshot_time)
         checksum = self._state_checksum(ordered)
-        self._records = ordered
-        self._snapshot = SnapshotRef(
+        snapshot = SnapshotRef(
             source=ref,
             version=version,
             checksum=checksum,
             observed_at=snapshot_time,
         )
+        self._versions: Dict[str, _MemoryVersion] = {
+            version: _MemoryVersion(snapshot=snapshot, records=ordered)
+        }
+        self._current_version = version
+        self._clock = clock
+        self._proposals: Dict[str, _ProposalEntry] = {}
+        self._receipts: Dict[
+            str,
+            Tuple[MemoryMutationProposal, MemoryMutationReceipt],
+        ] = {}
+        self._lock = asyncio.Lock()
         self._descriptor = SourceDescriptor(
             ref=ref,
             display_name=display_name,
-            capabilities=frozenset(("recall",)),
+            capabilities=frozenset(
+                ("recall", "propose_mutation", "apply_mutation")
+            ),
+            max_effect=EffectLevel.INTERNAL_WRITE,
             version=version,
             schema={
                 "record": {
@@ -86,14 +131,20 @@ class InMemoryMemorySource:
                     "content": "string",
                     "valid_time": "[from, to)",
                     "recorded_time": "[from, to)",
+                    "origin": "MemoryOrigin",
                     "evidence": "EvidenceRef[]",
                     "links": "MemoryLink[]",
-                }
+                },
+                "mutation": {
+                    "actions": ["assert", "supersede", "retract"],
+                    "atomicity": "one source and one explicit scope",
+                },
             },
             metadata={
                 "adapter": "in_memory_memory",
                 "time_model": "bitemporal",
                 "implicit_scope_inheritance": False,
+                "cross_scope_mutation": False,
             },
         )
 
@@ -102,13 +153,18 @@ class InMemoryMemorySource:
         return self._descriptor
 
     async def current_snapshot(self) -> SnapshotRef:
-        return self._snapshot
+        async with self._lock:
+            return self._versions[self._current_version].snapshot
 
     async def has_snapshot(self, snapshot: SnapshotRef) -> bool:
-        return (
-            isinstance(snapshot, SnapshotRef)
-            and self._snapshot.same_version_as(snapshot)
-        )
+        if not isinstance(snapshot, SnapshotRef):
+            return False
+        async with self._lock:
+            recorded = self._versions.get(snapshot.version)
+            return (
+                recorded is not None
+                and recorded.snapshot.same_version_as(snapshot)
+            )
 
     async def execute(
         self,
@@ -116,20 +172,28 @@ class InMemoryMemorySource:
         *,
         context: ExecutionContext,
     ) -> SourceResult[Any]:
-        if not isinstance(operation, Recall):
-            raise SourceExecutionError(
-                "memory source only supports Recall"
-            )
+        if isinstance(operation, Recall):
+            return await self._recall(operation, context=context)
+        if isinstance(operation, ProposeMutation):
+            return await self._propose(operation, context=context)
+        if isinstance(operation, ApplyMutation):
+            return await self._apply(operation, context=context)
+        raise SourceExecutionError(
+            "memory source supports Recall, ProposeMutation, and "
+            "ApplyMutation"
+        )
+
+    async def _recall(
+        self,
+        operation: Recall,
+        *,
+        context: ExecutionContext,
+    ) -> SourceResult[Any]:
         context.require_readable_scopes(operation.scopes)
-        pinned = context.snapshots.get(self.descriptor.ref)
-        if pinned is not None and not self._snapshot.same_version_as(pinned):
-            raise SnapshotUnavailableError(
-                "memory source {!r} cannot serve snapshot {!r}".format(
-                    self.descriptor.ref.source_id,
-                    pinned.version,
-                )
-            )
-        snapshot = self._snapshot
+        async with self._lock:
+            selected = self._select_version(context)
+
+        snapshot = selected.snapshot
         known_at = operation.known_at or snapshot.observed_at
         valid_at = operation.valid_at or snapshot.observed_at
         if known_at > snapshot.observed_at:
@@ -140,7 +204,7 @@ class InMemoryMemorySource:
         requested_scopes = frozenset(operation.scopes)
         requested_kinds = frozenset(operation.kinds)
         matches = []
-        for record in self._records:
+        for record in selected.records:
             if record.scope not in requested_scopes:
                 continue
             if requested_kinds and record.kind not in requested_kinds:
@@ -186,6 +250,7 @@ class InMemoryMemorySource:
                         "memory_id": record.memory_id,
                         "memory_kind": record.kind.value,
                         "scope_kind": record.scope.kind.value,
+                        "origin_channel": record.origin.channel.value,
                     },
                 )
             )
@@ -201,6 +266,342 @@ class InMemoryMemorySource:
             provenance=tuple(provenance),
             snapshots=(snapshot,),
         )
+
+    async def _propose(
+        self,
+        operation: ProposeMutation,
+        *,
+        context: ExecutionContext,
+    ) -> SourceResult[MemoryMutationProposal]:
+        draft = operation.draft
+        context.require_readable_scopes((draft.scope,))
+        context.require_writable_scopes((draft.scope,))
+        origin = context.bind_memory_origin(
+            scope=draft.scope,
+            approval_key=draft.approval_key,
+        )
+        channel = origin.channel
+        required = memory_write_requires_approval(origin, draft.scope)
+        requires_approval = required or draft.approval_key is not None
+
+        async with self._lock:
+            prior = self._proposals.get(draft.idempotency_key)
+            if prior is not None:
+                if prior.draft != draft or prior.channel is not channel:
+                    raise MemoryIdempotencyConflictError(
+                        "idempotency key {!r} belongs to different "
+                        "memory intent".format(draft.idempotency_key)
+                    )
+                proposal = prior.proposal
+            else:
+                selected = self._select_version(context)
+                self._validate_draft(
+                    draft,
+                    records=selected.records,
+                )
+                proposal = MemoryMutationProposal(
+                    proposal_id=self._proposal_id(
+                        draft.idempotency_key
+                    ),
+                    source=self.descriptor.ref,
+                    base_snapshot=selected.snapshot,
+                    draft=draft,
+                    origin=origin,
+                    requires_approval=requires_approval,
+                )
+                self._proposals[draft.idempotency_key] = _ProposalEntry(
+                    draft=draft,
+                    channel=channel,
+                    proposal=proposal,
+                )
+
+        return SourceResult(
+            value=proposal,
+            result_kind=ResultKind.MEMORY_MUTATION_PROPOSAL,
+            snapshots=(proposal.base_snapshot,),
+        )
+
+    async def _apply(
+        self,
+        operation: ApplyMutation,
+        *,
+        context: ExecutionContext,
+    ) -> SourceResult[MemoryMutationReceipt]:
+        proposal = operation.proposal
+        draft = proposal.draft
+        context.require_writable_scopes((draft.scope,))
+
+        async with self._lock:
+            recorded = self._receipts.get(draft.idempotency_key)
+            if recorded is not None:
+                prior_proposal, prior_receipt = recorded
+                if prior_proposal != proposal:
+                    raise MemoryIdempotencyConflictError(
+                        "idempotency key {!r} belongs to a different "
+                        "memory proposal".format(draft.idempotency_key)
+                    )
+                reused = replace(prior_receipt, reused=True)
+                return SourceResult(
+                    value=reused,
+                    result_kind=ResultKind.MEMORY_MUTATION_RECEIPT,
+                    snapshots=(
+                        reused.previous_snapshot,
+                        reused.snapshot,
+                    ),
+                )
+
+            issued = self._proposals.get(draft.idempotency_key)
+            if issued is None or issued.proposal != proposal:
+                raise MemoryMutationError(
+                    "apply requires a proposal issued by this source"
+                )
+            current = self._versions[self._current_version]
+            if not current.snapshot.same_version_as(
+                proposal.base_snapshot
+            ):
+                raise MemoryVersionConflictError(
+                    "memory source {!r} is at version {!r}, not proposal "
+                    "base {!r}".format(
+                        self.descriptor.ref.source_id,
+                        current.snapshot.version,
+                        proposal.base_snapshot.version,
+                    )
+                )
+            pinned = context.snapshots.get(self.descriptor.ref)
+            if (
+                pinned is not None
+                and not pinned.same_version_as(proposal.base_snapshot)
+            ):
+                raise MemoryVersionConflictError(
+                    "execution snapshot does not match proposal base"
+                )
+
+            self._validate_draft(draft, records=current.records)
+            committed_at = self._clock()
+            if not isinstance(committed_at, datetime):
+                raise MemoryMutationError(
+                    "memory source clock returned a non-datetime value"
+                )
+            require_aware(committed_at, "memory commit time")
+            if committed_at <= current.snapshot.observed_at:
+                raise MemoryMutationError(
+                    "memory commit time must advance beyond its base snapshot"
+                )
+            records, created_ids, closed_ids = self._apply_changes(
+                current.records,
+                proposal=proposal,
+                committed_at=committed_at,
+            )
+            self._validate_history(records, snapshot_time=committed_at)
+            checksum = self._state_checksum(records)
+            version = "sha256:{}".format(checksum)
+            snapshot = SnapshotRef(
+                source=self.descriptor.ref,
+                version=version,
+                checksum=checksum,
+                observed_at=committed_at,
+            )
+            self._versions[version] = _MemoryVersion(
+                snapshot=snapshot,
+                records=records,
+            )
+            self._current_version = version
+            self._descriptor = replace(
+                self._descriptor,
+                version=version,
+            )
+            receipt = MemoryMutationReceipt(
+                proposal_id=proposal.proposal_id,
+                idempotency_key=draft.idempotency_key,
+                scope=draft.scope,
+                origin=proposal.origin,
+                previous_snapshot=current.snapshot,
+                snapshot=snapshot,
+                created_ids=created_ids,
+                closed_ids=closed_ids,
+                applied_at=committed_at,
+            )
+            self._receipts[draft.idempotency_key] = (
+                proposal,
+                receipt,
+            )
+
+        return SourceResult(
+            value=receipt,
+            result_kind=ResultKind.MEMORY_MUTATION_RECEIPT,
+            snapshots=(current.snapshot, snapshot),
+        )
+
+    def _select_version(
+        self,
+        context: ExecutionContext,
+    ) -> _MemoryVersion:
+        pinned = context.snapshots.get(self.descriptor.ref)
+        if pinned is None:
+            return self._versions[self._current_version]
+        selected = self._versions.get(pinned.version)
+        if (
+            selected is None
+            or not selected.snapshot.same_version_as(pinned)
+        ):
+            raise SnapshotUnavailableError(
+                "memory source {!r} cannot serve snapshot {!r}".format(
+                    self.descriptor.ref.source_id,
+                    pinned.version,
+                )
+            )
+        return selected
+
+    def _apply_changes(
+        self,
+        records: Tuple[MemoryRecord, ...],
+        *,
+        proposal: MemoryMutationProposal,
+        committed_at: datetime,
+    ) -> Tuple[Tuple[MemoryRecord, ...], Tuple[str, ...], Tuple[str, ...]]:
+        mutable = {item.memory_id: item for item in records}
+        created_ids = []
+        closed_ids = []
+        for index, change in enumerate(proposal.draft.changes):
+            if isinstance(change, AssertMemory):
+                memory_id = self._memory_id(
+                    proposal.draft.idempotency_key,
+                    index,
+                )
+                if memory_id in mutable:
+                    raise MemoryMutationError(
+                        "deterministic memory id already exists"
+                    )
+                mutable[memory_id] = MemoryRecord(
+                    memory_id=memory_id,
+                    kind=change.kind,
+                    scope=proposal.draft.scope,
+                    content=change.content,
+                    recorded_from=committed_at,
+                    valid_from=change.valid_from,
+                    valid_to=change.valid_to,
+                    origin=proposal.origin,
+                    mutation_id=proposal.proposal_id,
+                    evidence=change.evidence,
+                    links=change.links,
+                    metadata=change.metadata,
+                )
+                created_ids.append(memory_id)
+                continue
+
+            target = mutable[change.target_id]
+            mutable[target.memory_id] = replace(
+                target,
+                recorded_to=committed_at,
+            )
+            closed_ids.append(target.memory_id)
+            if isinstance(change, RetractMemory):
+                continue
+            if not isinstance(change, SupersedeMemory):
+                raise MemoryMutationError(
+                    "unsupported prepared memory change"
+                )
+            memory_id = self._memory_id(
+                proposal.draft.idempotency_key,
+                index,
+            )
+            if memory_id in mutable:
+                raise MemoryMutationError(
+                    "deterministic memory id already exists"
+                )
+            mutable[memory_id] = MemoryRecord(
+                memory_id=memory_id,
+                kind=target.kind,
+                scope=proposal.draft.scope,
+                content=change.content,
+                recorded_from=committed_at,
+                valid_from=change.valid_from,
+                valid_to=change.valid_to,
+                origin=proposal.origin,
+                mutation_id=proposal.proposal_id,
+                evidence=change.evidence,
+                links=(
+                    MemoryLink(
+                        MemoryLinkKind.SUPERSEDES,
+                        target.memory_id,
+                    ),
+                )
+                + change.links,
+                metadata=change.metadata,
+            )
+            created_ids.append(memory_id)
+        return (
+            self._ordered(mutable.values()),
+            tuple(created_ids),
+            tuple(closed_ids),
+        )
+
+    @staticmethod
+    def _validate_draft(
+        draft: MemoryMutationDraft,
+        *,
+        records: Tuple[MemoryRecord, ...],
+    ) -> None:
+        by_id = {item.memory_id: item for item in records}
+        for change in draft.changes:
+            if isinstance(change, (SupersedeMemory, RetractMemory)):
+                target = by_id.get(change.target_id)
+                if target is None:
+                    raise MemoryMutationError(
+                        "memory target {!r} does not exist".format(
+                            change.target_id
+                        )
+                    )
+                if target.scope != draft.scope:
+                    raise MemoryMutationError(
+                        "memory mutation cannot cross scope boundaries"
+                    )
+                if target.recorded_to is not None:
+                    raise MemoryMutationError(
+                        "memory target {!r} is not current".format(
+                            change.target_id
+                        )
+                    )
+            links = getattr(change, "links", ())
+            for link in links:
+                linked = by_id.get(link.target_id)
+                if linked is None:
+                    raise MemoryMutationError(
+                        "memory link target {!r} does not exist".format(
+                            link.target_id
+                        )
+                    )
+                if linked.scope != draft.scope:
+                    raise MemoryMutationError(
+                        "memory mutation cannot create cross-scope links"
+                    )
+
+    def _proposal_id(self, idempotency_key: str) -> str:
+        digest = hashlib.sha256(
+            json.dumps(
+                [
+                    self.descriptor.ref.source_id,
+                    idempotency_key,
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return "memory_proposal_{}".format(digest)
+
+    def _memory_id(self, idempotency_key: str, index: int) -> str:
+        digest = hashlib.sha256(
+            json.dumps(
+                [
+                    self.descriptor.ref.source_id,
+                    idempotency_key,
+                    index,
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return "memory_{}".format(digest)
 
     @staticmethod
     def _score(query: str, content: str) -> float:
@@ -282,9 +683,15 @@ class InMemoryMemorySource:
                         )
 
     @staticmethod
+    def _ordered(
+        records: Iterable[MemoryRecord],
+    ) -> Tuple[MemoryRecord, ...]:
+        return tuple(sorted(records, key=lambda item: item.memory_id))
+
+    @staticmethod
     def _state_checksum(records: Tuple[MemoryRecord, ...]) -> str:
         payload = []
-        for record in records:
+        for record in InMemoryMemorySource._ordered(records):
             payload.append(
                 {
                     "memory_id": record.memory_id,
@@ -310,6 +717,11 @@ class InMemoryMemorySource:
                         if record.valid_to is not None
                         else None
                     ),
+                    "origin": {
+                        "channel": record.origin.channel.value,
+                        "trace_id": record.origin.trace_id,
+                    },
+                    "mutation_id": record.mutation_id,
                     "evidence": [
                         {
                             "evidence_id": item.evidence_id,
@@ -322,6 +734,39 @@ class InMemoryMemorySource:
                             "locator": item.provenance.locator,
                             "observed_at": (
                                 item.provenance.observed_at.isoformat()
+                            ),
+                            "snapshot": (
+                                {
+                                    "source_id": (
+                                        item.provenance.snapshot
+                                        .source.source_id
+                                    ),
+                                    "source_kind": (
+                                        item.provenance.snapshot
+                                        .source.kind.value
+                                    ),
+                                    "version": (
+                                        item.provenance.snapshot.version
+                                    ),
+                                    "checksum": (
+                                        item.provenance.snapshot.checksum
+                                    ),
+                                }
+                                if item.provenance.snapshot is not None
+                                else None
+                            ),
+                            "valid_from": (
+                                item.provenance.valid_from.isoformat()
+                                if item.provenance.valid_from is not None
+                                else None
+                            ),
+                            "valid_to": (
+                                item.provenance.valid_to.isoformat()
+                                if item.provenance.valid_to is not None
+                                else None
+                            ),
+                            "derived_from": list(
+                                item.provenance.derived_from
                             ),
                         }
                         for item in record.evidence

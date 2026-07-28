@@ -7,9 +7,12 @@ from typing import Any, ClassVar, FrozenSet, Optional, Tuple, Type, Union
 
 from datamind.kernel import (
     EffectLevel,
+    EffectSpec,
     JsonObject,
     KernelValidationError,
     MemoryKind,
+    MemoryMutationDraft,
+    MemoryMutationProposal,
     ScopeRef,
     SourceKind,
     SourceRef,
@@ -195,6 +198,79 @@ class Recall(OperationMixin):
 
 
 @dataclass(frozen=True)
+class ProposeMutation(OperationMixin):
+    """Validate untrusted Memory intent without changing authoritative state."""
+
+    source: SourceRef
+    draft: MemoryMutationDraft
+    op_id: str = field(default_factory=lambda: new_id("propose_mutation"))
+    inputs: Tuple[OutputRef[Any], ...] = field(default=(), init=False)
+
+    operation: ClassVar[str] = "propose_mutation"
+    output_kind: ClassVar[ResultKind] = (
+        ResultKind.MEMORY_MUTATION_PROPOSAL
+    )
+    effect_level: ClassVar[EffectLevel] = EffectLevel.READ
+    allowed_source_kinds: ClassVar[FrozenSet[SourceKind]] = frozenset(
+        (SourceKind.MEMORY,)
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.draft, MemoryMutationDraft):
+            raise KernelValidationError(
+                "propose_mutation draft must be a MemoryMutationDraft"
+            )
+        self._validate_common()
+
+    @property
+    def scopes(self) -> Tuple[ScopeRef, ...]:
+        return (self.draft.scope,)
+
+
+@dataclass(frozen=True)
+class ApplyMutation(OperationMixin):
+    """Atomically apply one validated, snapshot-bound Memory proposal."""
+
+    source: SourceRef
+    proposal: MemoryMutationProposal
+    op_id: str = field(default_factory=lambda: new_id("apply_mutation"))
+    inputs: Tuple[OutputRef[Any], ...] = field(default=(), init=False)
+
+    operation: ClassVar[str] = "apply_mutation"
+    output_kind: ClassVar[ResultKind] = ResultKind.MEMORY_MUTATION_RECEIPT
+    effect_level: ClassVar[EffectLevel] = EffectLevel.INTERNAL_WRITE
+    allowed_source_kinds: ClassVar[FrozenSet[SourceKind]] = frozenset(
+        (SourceKind.MEMORY,)
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.proposal, MemoryMutationProposal):
+            raise KernelValidationError(
+                "apply_mutation proposal must be a MemoryMutationProposal"
+            )
+        if self.proposal.source != self.source:
+            raise KernelValidationError(
+                "apply_mutation source must match its proposal"
+            )
+        self._validate_common()
+
+    @property
+    def scopes(self) -> Tuple[ScopeRef, ...]:
+        return (self.proposal.draft.scope,)
+
+    @property
+    def effect(self) -> EffectSpec:
+        return EffectSpec(
+            level=self.effect_level,
+            resource=self.source,
+            reversible=True,
+            requires_approval=self.proposal.requires_approval,
+            approval_key=self.proposal.draft.approval_key,
+            idempotency_key=self.proposal.draft.idempotency_key,
+        )
+
+
+@dataclass(frozen=True)
 class Compose(OperationMixin):
     """Combine prior typed results into a normalized evidence set."""
 
@@ -219,22 +295,35 @@ class Compose(OperationMixin):
         self._validate_common()
 
 
-InitialDataOp = Union[Discover, Describe, Search, Query, Recall, Compose]
+InitialDataOp = Union[
+    Discover,
+    Describe,
+    Search,
+    Query,
+    Recall,
+    ProposeMutation,
+    ApplyMutation,
+    Compose,
+]
 INITIAL_DATA_OP_TYPES: Tuple[Type[OperationMixin], ...] = (
     Discover,
     Describe,
     Search,
     Query,
     Recall,
+    ProposeMutation,
+    ApplyMutation,
     Compose,
 )
 
 __all__ = [
+    "ApplyMutation",
     "Compose",
     "Describe",
     "Discover",
     "INITIAL_DATA_OP_TYPES",
     "InitialDataOp",
+    "ProposeMutation",
     "Query",
     "Recall",
     "Search",

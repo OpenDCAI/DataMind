@@ -2,10 +2,12 @@
 from .base import DataOp, OperationMixin, OutputRef, ResultKind
 from .operations import (
     INITIAL_DATA_OP_TYPES,
+    ApplyMutation,
     Compose,
     Describe,
     Discover,
     InitialDataOp,
+    ProposeMutation,
     Query,
     Recall,
     Search,
@@ -37,6 +39,7 @@ from .validation import (
 )
 
 __all__ = [
+    "ApplyMutation",
     "Compose",
     "ContextItem",
     "ContextPack",
@@ -53,6 +56,7 @@ __all__ = [
     "OutputRef",
     "PlanValidationIssue",
     "PlanValidationReport",
+    "ProposeMutation",
     "Query",
     "Recall",
     "ResultEnvelope",

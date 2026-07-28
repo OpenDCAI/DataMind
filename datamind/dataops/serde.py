@@ -7,19 +7,40 @@ from decimal import Decimal
 from typing import Any, Mapping
 
 from datamind.kernel import (
+    AssertMemory,
     Budget,
     EffectLevel,
+    EvidenceRef,
     MemoryKind,
+    MemoryLink,
+    MemoryLinkKind,
+    MemoryMutationDraft,
+    MemoryMutationProposal,
+    MemoryOrigin,
+    MemoryOriginChannel,
+    Provenance,
+    RetractMemory,
     ScopeKind,
     ScopeRef,
     SerializationError,
+    SnapshotRef,
     SourceKind,
     SourceRef,
+    SupersedeMemory,
     thaw_json,
 )
 
 from .base import OutputRef
-from .operations import Compose, Describe, Discover, Query, Recall, Search
+from .operations import (
+    ApplyMutation,
+    Compose,
+    Describe,
+    Discover,
+    ProposeMutation,
+    Query,
+    Recall,
+    Search,
+)
 from .plan import DataPlan
 
 DATA_PLAN_SCHEMA = "datamind.data_plan"
@@ -56,6 +77,243 @@ def _scope_from_dict(payload: Mapping[str, Any]) -> ScopeRef:
     return ScopeRef(
         kind=ScopeKind(str(payload["kind"])),
         scope_id=str(payload["scope_id"]),
+    )
+
+
+def _snapshot_to_dict(snapshot: SnapshotRef) -> dict:
+    return {
+        "source": _source_to_dict(snapshot.source),
+        "version": snapshot.version,
+        "checksum": snapshot.checksum,
+        "observed_at": snapshot.observed_at.isoformat(),
+    }
+
+
+def _snapshot_from_dict(payload: Mapping[str, Any]) -> SnapshotRef:
+    return SnapshotRef(
+        source=_source_from_dict(payload["source"]),
+        version=str(payload["version"]),
+        checksum=payload.get("checksum"),
+        observed_at=datetime.fromisoformat(str(payload["observed_at"])),
+    )
+
+
+def _provenance_to_dict(provenance: Provenance) -> dict:
+    return {
+        "source": _source_to_dict(provenance.source),
+        "locator": provenance.locator,
+        "observed_at": provenance.observed_at.isoformat(),
+        "snapshot": (
+            _snapshot_to_dict(provenance.snapshot)
+            if provenance.snapshot is not None
+            else None
+        ),
+        "valid_from": _datetime_to_json(provenance.valid_from),
+        "valid_to": _datetime_to_json(provenance.valid_to),
+        "derived_from": list(provenance.derived_from),
+    }
+
+
+def _provenance_from_dict(payload: Mapping[str, Any]) -> Provenance:
+    snapshot = payload.get("snapshot")
+    return Provenance(
+        source=_source_from_dict(payload["source"]),
+        locator=str(payload["locator"]),
+        observed_at=datetime.fromisoformat(str(payload["observed_at"])),
+        snapshot=(
+            _snapshot_from_dict(snapshot)
+            if snapshot is not None
+            else None
+        ),
+        valid_from=_datetime_from_json(payload.get("valid_from")),
+        valid_to=_datetime_from_json(payload.get("valid_to")),
+        derived_from=tuple(payload.get("derived_from", ())),
+    )
+
+
+def _evidence_ref_to_dict(evidence: EvidenceRef) -> dict:
+    return {
+        "evidence_id": evidence.evidence_id,
+        "provenance": _provenance_to_dict(evidence.provenance),
+    }
+
+
+def _evidence_ref_from_dict(payload: Mapping[str, Any]) -> EvidenceRef:
+    return EvidenceRef(
+        evidence_id=str(payload["evidence_id"]),
+        provenance=_provenance_from_dict(payload["provenance"]),
+    )
+
+
+def _link_to_dict(link: MemoryLink) -> dict:
+    return {
+        "kind": link.kind.value,
+        "target_id": link.target_id,
+    }
+
+
+def _link_from_dict(payload: Mapping[str, Any]) -> MemoryLink:
+    return MemoryLink(
+        kind=MemoryLinkKind(str(payload["kind"])),
+        target_id=str(payload["target_id"]),
+    )
+
+
+def _change_to_dict(change: Any) -> dict:
+    common = {"action": change.action.value}
+    if isinstance(change, AssertMemory):
+        common.update(
+            {
+                "kind": change.kind.value,
+                "content": change.content,
+                "valid_from": _datetime_to_json(change.valid_from),
+                "valid_to": _datetime_to_json(change.valid_to),
+                "evidence": [
+                    _evidence_ref_to_dict(item)
+                    for item in change.evidence
+                ],
+                "links": [
+                    _link_to_dict(item) for item in change.links
+                ],
+                "metadata": thaw_json(change.metadata),
+            }
+        )
+    elif isinstance(change, SupersedeMemory):
+        common.update(
+            {
+                "target_id": change.target_id,
+                "content": change.content,
+                "valid_from": _datetime_to_json(change.valid_from),
+                "valid_to": _datetime_to_json(change.valid_to),
+                "evidence": [
+                    _evidence_ref_to_dict(item)
+                    for item in change.evidence
+                ],
+                "links": [
+                    _link_to_dict(item) for item in change.links
+                ],
+                "metadata": thaw_json(change.metadata),
+            }
+        )
+    elif isinstance(change, RetractMemory):
+        common.update(
+            {
+                "target_id": change.target_id,
+                "reason": change.reason,
+                "evidence": [
+                    _evidence_ref_to_dict(item)
+                    for item in change.evidence
+                ],
+            }
+        )
+    else:
+        raise SerializationError(
+            "unsupported memory change {!r}".format(
+                type(change).__name__
+            )
+        )
+    return common
+
+
+def _change_from_dict(payload: Mapping[str, Any]) -> Any:
+    action = str(payload["action"])
+    evidence = tuple(
+        _evidence_ref_from_dict(item)
+        for item in payload.get("evidence", ())
+    )
+    if action == "assert":
+        return AssertMemory(
+            kind=MemoryKind(str(payload["kind"])),
+            content=str(payload["content"]),
+            valid_from=_datetime_from_json(payload.get("valid_from")),
+            valid_to=_datetime_from_json(payload.get("valid_to")),
+            evidence=evidence,
+            links=tuple(
+                _link_from_dict(item)
+                for item in payload.get("links", ())
+            ),
+            metadata=payload.get("metadata", {}),
+        )
+    if action == "supersede":
+        return SupersedeMemory(
+            target_id=str(payload["target_id"]),
+            content=str(payload["content"]),
+            valid_from=_datetime_from_json(payload.get("valid_from")),
+            valid_to=_datetime_from_json(payload.get("valid_to")),
+            evidence=evidence,
+            links=tuple(
+                _link_from_dict(item)
+                for item in payload.get("links", ())
+            ),
+            metadata=payload.get("metadata", {}),
+        )
+    if action == "retract":
+        return RetractMemory(
+            target_id=str(payload["target_id"]),
+            reason=str(payload["reason"]),
+            evidence=evidence,
+        )
+    raise SerializationError(
+        "unknown memory change action {!r}".format(action)
+    )
+
+
+def _draft_to_dict(draft: MemoryMutationDraft) -> dict:
+    return {
+        "scope": _scope_to_dict(draft.scope),
+        "changes": [_change_to_dict(item) for item in draft.changes],
+        "idempotency_key": draft.idempotency_key,
+        "approval_key": draft.approval_key,
+    }
+
+
+def _draft_from_dict(payload: Mapping[str, Any]) -> MemoryMutationDraft:
+    return MemoryMutationDraft(
+        scope=_scope_from_dict(payload["scope"]),
+        changes=tuple(
+            _change_from_dict(item)
+            for item in payload.get("changes", ())
+        ),
+        idempotency_key=str(payload["idempotency_key"]),
+        approval_key=payload.get("approval_key"),
+    )
+
+
+def _origin_to_dict(origin: MemoryOrigin) -> dict:
+    return {
+        "channel": origin.channel.value,
+        "trace_id": origin.trace_id,
+    }
+
+
+def _origin_from_dict(payload: Mapping[str, Any]) -> MemoryOrigin:
+    return MemoryOrigin(
+        channel=MemoryOriginChannel(str(payload["channel"])),
+        trace_id=payload.get("trace_id"),
+    )
+
+
+def _proposal_to_dict(proposal: MemoryMutationProposal) -> dict:
+    return {
+        "proposal_id": proposal.proposal_id,
+        "source": _source_to_dict(proposal.source),
+        "base_snapshot": _snapshot_to_dict(proposal.base_snapshot),
+        "draft": _draft_to_dict(proposal.draft),
+        "origin": _origin_to_dict(proposal.origin),
+        "requires_approval": proposal.requires_approval,
+    }
+
+
+def _proposal_from_dict(
+    payload: Mapping[str, Any],
+) -> MemoryMutationProposal:
+    return MemoryMutationProposal(
+        proposal_id=str(payload["proposal_id"]),
+        source=_source_from_dict(payload["source"]),
+        base_snapshot=_snapshot_from_dict(payload["base_snapshot"]),
+        draft=_draft_from_dict(payload["draft"]),
+        origin=_origin_from_dict(payload["origin"]),
+        requires_approval=payload["requires_approval"],
     )
 
 
@@ -103,6 +361,20 @@ def operation_to_dict(op: Any) -> dict:
                 "valid_at": _datetime_to_json(op.valid_at),
                 "known_at": _datetime_to_json(op.known_at),
                 "limit": op.limit,
+            }
+        )
+    elif isinstance(op, ProposeMutation):
+        common.update(
+            {
+                "source": _source_to_dict(op.source),
+                "draft": _draft_to_dict(op.draft),
+            }
+        )
+    elif isinstance(op, ApplyMutation):
+        common.update(
+            {
+                "source": _source_to_dict(op.source),
+                "proposal": _proposal_to_dict(op.proposal),
             }
         )
     elif isinstance(op, Compose):
@@ -167,6 +439,18 @@ def operation_from_dict(payload: Mapping[str, Any]) -> Any:
                 valid_at=_datetime_from_json(payload.get("valid_at")),
                 known_at=_datetime_from_json(payload.get("known_at")),
                 limit=int(payload.get("limit", 10)),
+            )
+        if op_type == "propose_mutation":
+            return ProposeMutation(
+                op_id=op_id,
+                source=_source_from_dict(payload["source"]),
+                draft=_draft_from_dict(payload["draft"]),
+            )
+        if op_type == "apply_mutation":
+            return ApplyMutation(
+                op_id=op_id,
+                source=_source_from_dict(payload["source"]),
+                proposal=_proposal_from_dict(payload["proposal"]),
             )
         if op_type == "compose":
             return Compose(

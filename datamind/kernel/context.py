@@ -7,9 +7,14 @@ from typing import FrozenSet, Iterable, Optional
 
 from .budget import Budget
 from .effects import EffectLevel
-from .errors import KernelValidationError, ScopePolicyError
+from .errors import (
+    EffectPolicyError,
+    KernelValidationError,
+    ScopePolicyError,
+)
 from .lifecycle import SnapshotSet
-from .memory import ScopeRef
+from .memory import MemoryOrigin, MemoryOriginChannel, ScopeRef
+from .memory_mutation import memory_write_requires_approval
 from .types import new_id, require_aware
 
 
@@ -29,6 +34,7 @@ class ExecutionContext:
     budget: Budget = field(default_factory=Budget)
     snapshots: SnapshotSet = field(default_factory=SnapshotSet)
     deadline: Optional[datetime] = None
+    memory_origin: Optional[MemoryOriginChannel] = None
 
     def __post_init__(self) -> None:
         for field_name in ("request_id", "trace_id", "profile"):
@@ -65,6 +71,16 @@ class ExecutionContext:
             raise KernelValidationError(
                 "execution snapshots must be a SnapshotSet"
             )
+        if (
+            self.memory_origin is not None
+            and not isinstance(
+                self.memory_origin,
+                MemoryOriginChannel,
+            )
+        ):
+            raise KernelValidationError(
+                "memory_origin must be a MemoryOriginChannel"
+            )
         if self.deadline is not None:
             require_aware(self.deadline, "deadline")
 
@@ -80,6 +96,7 @@ class ExecutionContext:
         snapshots: Optional[SnapshotSet] = None,
         readable_scopes: FrozenSet[ScopeRef] = frozenset(),
         writable_scopes: FrozenSet[ScopeRef] = frozenset(),
+        memory_origin: Optional[MemoryOriginChannel] = None,
     ) -> "ExecutionContext":
         return cls(
             request_id=new_id("req"),
@@ -92,6 +109,7 @@ class ExecutionContext:
             snapshots=snapshots or SnapshotSet(),
             readable_scopes=readable_scopes,
             writable_scopes=writable_scopes,
+            memory_origin=memory_origin,
         )
 
     def require_readable_scopes(
@@ -107,3 +125,53 @@ class ExecutionContext:
                     "execution context".format(len(missing)),
                 )
             )
+
+    def require_writable_scopes(
+        self,
+        scopes: Iterable[ScopeRef],
+    ) -> None:
+        requested = frozenset(scopes)
+        missing = requested - self.writable_scopes
+        if missing:
+            raise ScopePolicyError(
+                (
+                    "memory mutation requested {} scope(s) unavailable "
+                    "for writing in this execution context".format(
+                        len(missing)
+                    ),
+                )
+            )
+
+    def bind_memory_origin(
+        self,
+        *,
+        scope: ScopeRef,
+        approval_key: Optional[str] = None,
+    ) -> MemoryOrigin:
+        """Bind caller authority to a proposal without trusting its content."""
+
+        if (
+            self.memory_origin is None
+            or self.memory_origin is MemoryOriginChannel.IMPORTED
+        ):
+            raise EffectPolicyError(
+                (
+                    "memory mutation proposal requires a bound runtime "
+                    "origin channel",
+                )
+            )
+        origin = MemoryOrigin(
+            channel=self.memory_origin,
+            trace_id=self.trace_id,
+        )
+        if (
+            memory_write_requires_approval(origin, scope)
+            and not approval_key
+        ):
+            raise EffectPolicyError(
+                (
+                    "this memory write channel or scope requires an "
+                    "approval_key",
+                )
+            )
+        return origin

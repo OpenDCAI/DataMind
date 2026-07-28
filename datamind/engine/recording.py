@@ -134,8 +134,28 @@ class ExecutionRecorder:
             },
         )
 
-    async def start_operation(self, trace_id: str, operation: Any) -> None:
+    async def start_operation(
+        self,
+        trace_id: str,
+        operation: Any,
+        *,
+        context: ExecutionContext,
+    ) -> None:
         scopes = tuple(getattr(operation, "scopes", ()))
+        proposal = getattr(operation, "proposal", None)
+        draft = getattr(operation, "draft", None)
+        if draft is None and proposal is not None:
+            draft = proposal.draft
+        origin_channel = (
+            proposal.origin.channel.value
+            if proposal is not None
+            else (
+                context.memory_origin.value
+                if draft is not None
+                and context.memory_origin is not None
+                else None
+            )
+        )
         await self._append(
             trace_id,
             TraceEventKind.OP_STARTED,
@@ -151,6 +171,17 @@ class ExecutionRecorder:
                 "inputs": [ref.op_id for ref in operation.inputs],
                 "scope_fingerprints": sorted(
                     fingerprint(item) for item in scopes
+                ),
+                "memory_origin_channel": origin_channel,
+                "memory_proposal_fingerprint": (
+                    fingerprint(proposal)
+                    if proposal is not None
+                    else None
+                ),
+                "idempotency_key_fingerprint": (
+                    fingerprint(draft.idempotency_key)
+                    if draft is not None
+                    else None
                 ),
                 "valid_at": (
                     operation.valid_at.isoformat()

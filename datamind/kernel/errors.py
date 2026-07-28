@@ -76,6 +76,18 @@ class SnapshotUnavailableError(ExecutionError):
     """A source cannot serve the snapshot pinned by an execution."""
 
 
+class MemoryMutationError(ExecutionError):
+    """A governed Memory transition cannot be proposed or applied."""
+
+
+class MemoryVersionConflictError(MemoryMutationError):
+    """A Memory proposal is based on a snapshot that is no longer current."""
+
+
+class MemoryIdempotencyConflictError(MemoryMutationError):
+    """A Memory idempotency key was reused for different semantic intent."""
+
+
 class SyncError(KernelError):
     """A versioned artifact change cannot be synchronized."""
 

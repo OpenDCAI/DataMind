@@ -53,6 +53,48 @@ class MemoryKind(str, Enum):
         return self.value
 
 
+class MemoryOriginChannel(str, Enum):
+    """System-bound channel through which a memory entered the data plane."""
+
+    IMPORTED = "imported"
+    USER_EXPLICIT = "user_explicit"
+    AGENT_INFERRED = "agent_inferred"
+    TOOL_DERIVED = "tool_derived"
+    POLICY_COMPACTION = "policy_compaction"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True)
+class MemoryOrigin:
+    """Auditable write authority without embedding principal identity."""
+
+    channel: MemoryOriginChannel = MemoryOriginChannel.IMPORTED
+    trace_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.channel, MemoryOriginChannel):
+            raise KernelValidationError(
+                "memory origin channel must be a MemoryOriginChannel"
+            )
+        if self.trace_id is not None:
+            if (
+                not isinstance(self.trace_id, str)
+                or not self.trace_id.strip()
+            ):
+                raise KernelValidationError(
+                    "memory origin trace_id must be a non-empty string"
+                )
+        if (
+            self.channel is not MemoryOriginChannel.IMPORTED
+            and self.trace_id is None
+        ):
+            raise KernelValidationError(
+                "runtime memory origins require a trace_id"
+            )
+
+
 class MemoryLinkKind(str, Enum):
     """Auditable relations between memory records, not a general graph API."""
 
@@ -114,6 +156,8 @@ class MemoryRecord:
     recorded_to: Optional[datetime] = None
     valid_from: Optional[datetime] = None
     valid_to: Optional[datetime] = None
+    origin: MemoryOrigin = field(default_factory=MemoryOrigin)
+    mutation_id: Optional[str] = None
     evidence: Tuple[EvidenceRef, ...] = ()
     links: Tuple[MemoryLink, ...] = ()
     metadata: JsonObject = field(default_factory=freeze_json_object)
@@ -161,6 +205,25 @@ class MemoryRecord:
         ):
             raise KernelValidationError(
                 "valid interval must be half-open and non-empty"
+            )
+        if not isinstance(self.origin, MemoryOrigin):
+            raise KernelValidationError(
+                "memory origin must be a MemoryOrigin"
+            )
+        if self.mutation_id is not None:
+            if (
+                not isinstance(self.mutation_id, str)
+                or not self.mutation_id.strip()
+            ):
+                raise KernelValidationError(
+                    "memory mutation_id must be a non-empty string"
+                )
+        if (
+            self.origin.channel is not MemoryOriginChannel.IMPORTED
+            and self.mutation_id is None
+        ):
+            raise KernelValidationError(
+                "runtime memory records require a mutation_id"
             )
 
         object.__setattr__(self, "evidence", tuple(self.evidence))
@@ -260,6 +323,8 @@ __all__ = [
     "MemoryKind",
     "MemoryLink",
     "MemoryLinkKind",
+    "MemoryOrigin",
+    "MemoryOriginChannel",
     "MemoryRecord",
     "ScopeKind",
     "ScopeRef",

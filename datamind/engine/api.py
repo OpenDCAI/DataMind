@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from datamind.dataops import ResultEnvelope
+from datamind.dataops import ApplyMutation, ResultEnvelope
 from datamind.kernel import (
     ChangeSet,
     ExecutionContext,
+    MemoryMutationProposal,
+    MemoryMutationReceipt,
     SyncReceipt,
     UnsupportedSyncError,
 )
@@ -53,6 +55,22 @@ class Engine:
     ) -> ResultEnvelope[Any]:
         return await self._executor.execute(
             operation_or_plan,
+            context=context,
+        )
+
+    async def apply(
+        self,
+        proposal: MemoryMutationProposal,
+        *,
+        context: ExecutionContext,
+    ) -> ResultEnvelope[MemoryMutationReceipt]:
+        """Apply a validated Memory proposal through normal execution."""
+
+        return await self.execute(
+            ApplyMutation(
+                source=proposal.source,
+                proposal=proposal,
+            ),
             context=context,
         )
 

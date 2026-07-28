@@ -5,11 +5,13 @@ from dataclasses import replace
 from typing import Any, Dict, Mapping, Optional
 
 from datamind.dataops import (
+    ApplyMutation,
     Compose,
     DataPlan,
     Describe,
     Discover,
     OutputRef,
+    ProposeMutation,
     Recall,
     ResultEnvelope,
     ResultKind,
@@ -142,6 +144,7 @@ class Executor:
             await self._recorder.start_operation(
                 context.trace_id,
                 operation,
+                context=context,
             )
             try:
                 result = await self._execute_one(
@@ -190,6 +193,15 @@ class Executor:
             )
             if isinstance(operation, Recall):
                 context.require_readable_scopes(operation.scopes)
+            elif isinstance(operation, ProposeMutation):
+                context.require_readable_scopes(operation.scopes)
+                context.require_writable_scopes(operation.scopes)
+                context.bind_memory_origin(
+                    scope=operation.draft.scope,
+                    approval_key=operation.draft.approval_key,
+                )
+            elif isinstance(operation, ApplyMutation):
+                context.require_writable_scopes(operation.scopes)
         checked_sources = set()
         for operation in plan.operations:
             if (

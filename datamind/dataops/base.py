@@ -22,6 +22,8 @@ class ResultKind(str, Enum):
     DOCUMENT_HITS = "document_hits"
     TABLE = "table"
     MEMORY_RECORDS = "memory_records"
+    MEMORY_MUTATION_PROPOSAL = "memory_mutation_proposal"
+    MEMORY_MUTATION_RECEIPT = "memory_mutation_receipt"
     EVIDENCE_SET = "evidence_set"
 
     def __str__(self) -> str:
