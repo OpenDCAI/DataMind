@@ -1,12 +1,12 @@
 """Deterministic DataOp execution against injected source ports."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from datamind.dataops import (
     ApplyMutation,
-    Compose,
     DataPlan,
     Describe,
     Discover,
@@ -19,6 +19,7 @@ from datamind.dataops import (
 )
 from datamind.kernel import (
     Budget,
+    EffectLevel,
     ExecutionContext,
     ExecutionError,
     ReplayError,
@@ -37,7 +38,11 @@ from datamind.ports import (
 )
 
 from .recording import ExecutionRecorder
-from .runtime import compose_results, select_path
+from .runtime import (
+    execute_dataflow_operation,
+    is_dataflow_operation,
+    select_path,
+)
 
 
 class Executor:
@@ -49,8 +54,18 @@ class Executor:
         *,
         trace_store: Optional[TraceStore] = None,
         artifact_store: Optional[ReplayArtifactStore] = None,
+        max_parallelism: int = 4,
     ) -> None:
+        if (
+            isinstance(max_parallelism, bool)
+            or not isinstance(max_parallelism, int)
+            or max_parallelism <= 0
+        ):
+            raise ExecutionError(
+                "max_parallelism must be a positive integer"
+            )
         self._catalog = catalog
+        self._max_parallelism = max_parallelism
         self._recorder = ExecutionRecorder(
             trace_store=trace_store,
             artifact_store=artifact_store,
@@ -133,40 +148,63 @@ class Executor:
             context.trace_id,
             topological_order=report.topological_order,
             static_actions=len(plan.operations),
+            max_parallelism=self._max_parallelism,
         )
 
         operations = {operation.op_id: operation for operation in plan.operations}
         results: Dict[str, ResultEnvelope[Any]] = {}
         total_usage = Usage()
-        for op_id in report.topological_order:
+        remaining = list(report.topological_order)
+        while remaining:
             self._require_before_deadline(context)
-            operation = operations[op_id]
-            await self._recorder.start_operation(
-                context.trace_id,
-                operation,
-                context=context,
+            batch = self._ready_batch(
+                remaining,
+                operations=operations,
+                results=results,
             )
-            try:
-                result = await self._execute_one(
-                    operation,
-                    prior_results=results,
+            for op_id in batch:
+                await self._recorder.start_operation(
+                    context.trace_id,
+                    operations[op_id],
                     context=context,
                 )
+            outcomes = await asyncio.gather(
+                *(
+                    self._execute_one(
+                        operations[op_id],
+                        prior_results=results,
+                        context=context,
+                    )
+                    for op_id in batch
+                ),
+                return_exceptions=True,
+            )
+            first_error = None
+            for op_id, outcome in zip(batch, outcomes):
+                if isinstance(outcome, Exception):
+                    await self._recorder.fail_operation(
+                        context.trace_id,
+                        op_id,
+                        outcome,
+                    )
+                    if first_error is None:
+                        first_error = outcome
+                    continue
+                result = outcome
                 total_usage = total_usage + result.usage
-                plan.budget.require(total_usage)
-                context.budget.require(total_usage)
                 await self._recorder.complete_operation(
                     context.trace_id,
                     result,
                 )
                 results[op_id] = result
-            except Exception as exc:
-                await self._recorder.fail_operation(
-                    context.trace_id,
-                    op_id,
-                    exc,
-                )
-                raise
+            if first_error is not None:
+                raise first_error
+            plan.budget.require(total_usage)
+            context.budget.require(total_usage)
+            completed = set(batch)
+            remaining = [
+                op_id for op_id in remaining if op_id not in completed
+            ]
 
         final = results[plan.output.op_id]
         if plan.output.path:
@@ -175,6 +213,38 @@ class Executor:
                 value=select_path(final.value, plan.output.path),
             )
         return replace(final, usage=total_usage)
+
+    def _ready_batch(
+        self,
+        remaining: list,
+        *,
+        operations: Mapping[str, Any],
+        results: Mapping[str, ResultEnvelope[Any]],
+    ) -> Tuple[str, ...]:
+        ready = tuple(
+            op_id
+            for op_id in remaining
+            if all(
+                ref.op_id in results
+                for ref in operations[op_id].inputs
+            )
+        )
+        if not ready:
+            raise ExecutionError(
+                "validated plan has no schedulable operation"
+            )
+        first = operations[ready[0]]
+        if first.effect.level > EffectLevel.READ:
+            return (ready[0],)
+        batch = []
+        for op_id in ready:
+            operation = operations[op_id]
+            if operation.effect.level > EffectLevel.READ:
+                break
+            batch.append(op_id)
+            if len(batch) >= self._max_parallelism:
+                break
+        return tuple(batch)
 
     async def _preflight(
         self,
@@ -246,8 +316,8 @@ class Executor:
                 value=self._catalog.describe(operation.source),
                 result_kind=ResultKind.SOURCE_DESCRIPTOR,
             )
-        elif isinstance(operation, Compose):
-            source_result = compose_results(
+        elif is_dataflow_operation(operation):
+            source_result = execute_dataflow_operation(
                 operation,
                 prior_results=prior_results,
             )
@@ -282,6 +352,7 @@ class Executor:
             result_kind=source_result.result_kind,
             trace_id=context.trace_id,
             evidence=source_result.evidence,
+            bindings=source_result.bindings,
             provenance=source_result.provenance,
             snapshots=source_result.snapshots,
             usage=source_result.usage + Usage(actions=1),

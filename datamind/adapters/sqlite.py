@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
 from datamind.dataops import (
+    BindingRow,
+    BindingSet,
     Evidence,
     Query,
     ResultKind,
@@ -192,6 +194,7 @@ class SQLiteReadSource:
             truncated=truncated,
         )
         evidence = []
+        binding_rows = []
         provenance = []
         statement_hash = hashlib.sha256(
             operation.statement.encode("utf-8")
@@ -208,17 +211,25 @@ class SQLiteReadSource:
                 snapshot=snapshot,
             )
             provenance.append(origin)
-            evidence.append(
-                Evidence(
-                    kind=SourceKind.TABLE,
-                    content=json.dumps(
-                        row_value,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        default=str,
-                    ),
-                    provenance=origin,
-                    metadata={"row_index": index},
+            evidence_item = Evidence(
+                kind=SourceKind.TABLE,
+                content=json.dumps(
+                    row_value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ),
+                provenance=origin,
+                metadata={"row_index": index},
+            )
+            evidence.append(evidence_item)
+            binding_rows.append(
+                BindingRow(
+                    values={
+                        column: self._binding_value(value)
+                        for column, value in zip(columns, row)
+                    },
+                    evidence_ids=(evidence_item.evidence_id,),
                 )
             )
 
@@ -235,6 +246,10 @@ class SQLiteReadSource:
             value=table,
             result_kind=ResultKind.TABLE,
             evidence=tuple(evidence),
+            bindings=BindingSet(
+                fields=columns,
+                rows=tuple(binding_rows),
+            ),
             provenance=tuple(provenance),
             snapshots=(snapshot,),
             usage=Usage(latency_ms=latency_ms),
@@ -294,6 +309,14 @@ class SQLiteReadSource:
             if action in _SQLITE_DENIED_ACTIONS
             else sqlite3.SQLITE_OK
         )
+
+    @staticmethod
+    def _binding_value(value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return "hex:{}".format(bytes(value).hex())
+        return str(value)
 
     def _snapshot(self, checksum: str) -> SnapshotRef:
         return SnapshotRef(

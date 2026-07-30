@@ -32,12 +32,14 @@ class Engine:
         lifecycle: Optional[LifecyclePort] = None,
         trace_store: Optional[TraceStore] = None,
         replay_artifact_store: Optional[ReplayArtifactStore] = None,
+        max_parallelism: int = 4,
     ) -> None:
         self._lifecycle = lifecycle
         self._executor = Executor(
             catalog,
             trace_store=trace_store,
             artifact_store=replay_artifact_store,
+            max_parallelism=max_parallelism,
         )
 
     async def sync(self, change_set: ChangeSet) -> SyncReceipt:

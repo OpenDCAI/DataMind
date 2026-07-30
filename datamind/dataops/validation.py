@@ -116,6 +116,22 @@ def validate_plan(
         )
 
     for op in plan.operations:
+        if not op.signature.accepts_count(len(op.inputs)):
+            issues.append(
+                PlanValidationIssue(
+                    "input_count_mismatch",
+                    "operation expects {}..{} inputs, received {}".format(
+                        op.signature.min_inputs,
+                        (
+                            "unbounded"
+                            if op.signature.max_inputs is None
+                            else op.signature.max_inputs
+                        ),
+                        len(op.inputs),
+                    ),
+                    op.op_id,
+                )
+            )
         for ref in op.inputs:
             if ref.op_id not in operations:
                 issues.append(
@@ -135,6 +151,30 @@ def validate_plan(
                         op.op_id,
                     )
                 )
+            else:
+                upstream = operations[ref.op_id]
+                if not op.signature.accepts_kind(upstream.output_kind):
+                    issues.append(
+                        PlanValidationIssue(
+                            "incompatible_input_kind",
+                            "{} cannot consume {} from {!r}".format(
+                                op.operation,
+                                upstream.output_kind.value,
+                                upstream.op_id,
+                            ),
+                            op.op_id,
+                        )
+                    )
+                if ref.path and not op.signature.allow_input_paths:
+                    issues.append(
+                        PlanValidationIssue(
+                            "unsupported_input_path",
+                            "{} requires the complete upstream result".format(
+                                op.operation
+                            ),
+                            op.op_id,
+                        )
+                    )
 
         if op.effect.level > plan.max_effect:
             issues.append(

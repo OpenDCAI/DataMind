@@ -33,9 +33,15 @@ from datamind.kernel import (
 from .base import OutputRef
 from .operations import (
     ApplyMutation,
+    BindingPredicate,
+    ComparisonOperator,
     Compose,
     Describe,
     Discover,
+    Filter,
+    Fuse,
+    Join,
+    Project,
     ProposeMutation,
     Query,
     Recall,
@@ -377,6 +383,43 @@ def operation_to_dict(op: Any) -> dict:
                 "proposal": _proposal_to_dict(op.proposal),
             }
         )
+    elif isinstance(op, Project):
+        common.update(
+            {
+                "inputs": [_output_to_dict(ref) for ref in op.inputs],
+                "fields": list(op.fields),
+            }
+        )
+    elif isinstance(op, Filter):
+        common.update(
+            {
+                "inputs": [_output_to_dict(ref) for ref in op.inputs],
+                "predicate": {
+                    "field": op.predicate.field,
+                    "operator": op.predicate.operator.value,
+                    "value": thaw_json(op.predicate.value),
+                },
+            }
+        )
+    elif isinstance(op, Join):
+        common.update(
+            {
+                "inputs": [_output_to_dict(ref) for ref in op.inputs],
+                "left_on": list(op.left_on),
+                "right_on": list(op.right_on),
+                "left_alias": op.left_alias,
+                "right_alias": op.right_alias,
+            }
+        )
+    elif isinstance(op, Fuse):
+        common.update(
+            {
+                "inputs": [_output_to_dict(ref) for ref in op.inputs],
+                "strategy": op.strategy,
+                "limit": op.limit,
+                "rank_constant": op.rank_constant,
+            }
+        )
     elif isinstance(op, Compose):
         common.update(
             {
@@ -451,6 +494,60 @@ def operation_from_dict(payload: Mapping[str, Any]) -> Any:
                 op_id=op_id,
                 source=_source_from_dict(payload["source"]),
                 proposal=_proposal_from_dict(payload["proposal"]),
+            )
+        if op_type == "project":
+            return Project(
+                op_id=op_id,
+                inputs=tuple(
+                    _output_from_dict(item)
+                    for item in payload.get("inputs", ())
+                ),
+                fields=tuple(
+                    str(item) for item in payload.get("fields", ())
+                ),
+            )
+        if op_type == "filter":
+            predicate = payload["predicate"]
+            return Filter(
+                op_id=op_id,
+                inputs=tuple(
+                    _output_from_dict(item)
+                    for item in payload.get("inputs", ())
+                ),
+                predicate=BindingPredicate(
+                    field=str(predicate["field"]),
+                    operator=ComparisonOperator(
+                        str(predicate["operator"])
+                    ),
+                    value=predicate.get("value"),
+                ),
+            )
+        if op_type == "join":
+            return Join(
+                op_id=op_id,
+                inputs=tuple(
+                    _output_from_dict(item)
+                    for item in payload.get("inputs", ())
+                ),
+                left_on=tuple(
+                    str(item) for item in payload.get("left_on", ())
+                ),
+                right_on=tuple(
+                    str(item) for item in payload.get("right_on", ())
+                ),
+                left_alias=str(payload.get("left_alias", "left")),
+                right_alias=str(payload.get("right_alias", "right")),
+            )
+        if op_type == "fuse":
+            return Fuse(
+                op_id=op_id,
+                inputs=tuple(
+                    _output_from_dict(item)
+                    for item in payload.get("inputs", ())
+                ),
+                strategy=str(payload.get("strategy", "rrf")),
+                limit=int(payload.get("limit", 20)),
+                rank_constant=int(payload.get("rank_constant", 60)),
             )
         if op_type == "compose":
             return Compose(

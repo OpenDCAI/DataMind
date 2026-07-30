@@ -12,6 +12,8 @@ from urllib.parse import quote
 
 from datamind.dataops import (
     ApplyMutation,
+    BindingRow,
+    BindingSet,
     Evidence,
     MemoryRecallResult,
     ProposeMutation,
@@ -224,6 +226,7 @@ class InMemoryMemorySource:
         returned_ids = {item.memory_id for item in returned_records}
         conflicts = self._conflicts(returned_records, returned_ids)
         evidence = []
+        binding_rows = []
         provenance = []
         for score, record in matches:
             origin = Provenance(
@@ -240,22 +243,60 @@ class InMemoryMemorySource:
                     item.evidence_id for item in record.evidence
                 ),
             )
-            evidence.append(
-                Evidence(
-                    kind=SourceKind.MEMORY,
-                    content=record.content,
-                    provenance=origin,
-                    score=score,
-                    metadata={
+            evidence_item = Evidence(
+                kind=SourceKind.MEMORY,
+                content=record.content,
+                provenance=origin,
+                score=score,
+                metadata={
+                    "memory_id": record.memory_id,
+                    "memory_kind": record.kind.value,
+                    "scope_kind": record.scope.kind.value,
+                    "origin_channel": record.origin.channel.value,
+                },
+            )
+            evidence.append(evidence_item)
+            binding_rows.append(
+                BindingRow(
+                    values={
                         "memory_id": record.memory_id,
-                        "memory_kind": record.kind.value,
+                        "kind": record.kind.value,
                         "scope_kind": record.scope.kind.value,
+                        "scope_id": record.scope.scope_id,
+                        "recorded_from": record.recorded_from.isoformat(),
+                        "recorded_to": (
+                            record.recorded_to.isoformat()
+                            if record.recorded_to is not None
+                            else None
+                        ),
+                        "valid_from": (
+                            record.valid_from.isoformat()
+                            if record.valid_from is not None
+                            else None
+                        ),
+                        "valid_to": (
+                            record.valid_to.isoformat()
+                            if record.valid_to is not None
+                            else None
+                        ),
                         "origin_channel": record.origin.channel.value,
                     },
+                    evidence_ids=(evidence_item.evidence_id,),
                 )
             )
             provenance.append(origin)
 
+        binding_fields = (
+            "memory_id",
+            "kind",
+            "scope_kind",
+            "scope_id",
+            "recorded_from",
+            "recorded_to",
+            "valid_from",
+            "valid_to",
+            "origin_channel",
+        )
         return SourceResult(
             value=MemoryRecallResult(
                 records=returned_records,
@@ -263,6 +304,10 @@ class InMemoryMemorySource:
             ),
             result_kind=ResultKind.MEMORY_RECORDS,
             evidence=tuple(evidence),
+            bindings=BindingSet(
+                fields=binding_fields,
+                rows=tuple(binding_rows),
+            ),
             provenance=tuple(provenance),
             snapshots=(snapshot,),
         )

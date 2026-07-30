@@ -124,6 +124,7 @@ class ExecutionRecorder:
         *,
         topological_order: Tuple[str, ...],
         static_actions: int,
+        max_parallelism: int,
     ) -> None:
         await self._append(
             trace_id,
@@ -131,6 +132,7 @@ class ExecutionRecorder:
             details={
                 "topological_order": list(topological_order),
                 "static_actions": static_actions,
+                "max_parallelism": max_parallelism,
             },
         )
 
@@ -223,6 +225,8 @@ class ExecutionRecorder:
                 "status": result.status.value,
                 "usage": self._usage_details(result.usage),
                 "evidence_count": len(result.evidence),
+                "binding_field_count": len(result.bindings.fields),
+                "binding_row_count": len(result.bindings.rows),
                 "evidence_ids": [
                     item.evidence_id for item in result.evidence
                 ],

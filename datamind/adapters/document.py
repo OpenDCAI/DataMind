@@ -7,7 +7,13 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, Mapping, Tuple
 from urllib.parse import quote
 
-from datamind.dataops import Evidence, ResultKind, Search
+from datamind.dataops import (
+    BindingRow,
+    BindingSet,
+    Evidence,
+    ResultKind,
+    Search,
+)
 from datamind.kernel import (
     ArtifactRef,
     ChangeKind,
@@ -246,6 +252,7 @@ class InMemoryDocumentSource:
         snapshot = selected.snapshot
         hits = []
         evidence = []
+        binding_values = []
         provenance = []
         for score, record in matches:
             locator = "document://{}/{}".format(
@@ -264,24 +271,59 @@ class InMemoryDocumentSource:
                 metadata=record.metadata,
             )
             hits.append(hit)
-            evidence.append(
-                Evidence(
-                    kind=SourceKind.DOCUMENT,
-                    content=record.content,
-                    provenance=origin,
-                    score=score,
-                    metadata={
-                        "document_id": record.document_id,
-                        **dict(record.metadata),
-                    },
-                )
+            evidence_item = Evidence(
+                kind=SourceKind.DOCUMENT,
+                content=record.content,
+                provenance=origin,
+                score=score,
+                metadata={
+                    "document_id": record.document_id,
+                    **dict(record.metadata),
+                },
             )
+            evidence.append(evidence_item)
+            values = {
+                "document_id": record.document_id,
+                "score": score,
+            }
+            values.update(
+                {
+                    "metadata.{}".format(key): value
+                    for key, value in record.metadata.items()
+                }
+            )
+            binding_values.append((values, evidence_item.evidence_id))
             provenance.append(origin)
 
+        metadata_fields = sorted(
+            {
+                "metadata.{}".format(key)
+                for record in selected.documents
+                for key in record.metadata
+            }
+        )
+        binding_fields = (
+            "document_id",
+            "score",
+        ) + tuple(metadata_fields)
+        bindings = BindingSet(
+            fields=binding_fields,
+            rows=tuple(
+                BindingRow(
+                    values={
+                        field: values.get(field)
+                        for field in binding_fields
+                    },
+                    evidence_ids=(evidence_id,),
+                )
+                for values, evidence_id in binding_values
+            ),
+        )
         return SourceResult(
             value=tuple(hits),
             result_kind=ResultKind.DOCUMENT_HITS,
             evidence=tuple(evidence),
+            bindings=bindings,
             provenance=tuple(provenance),
             snapshots=(snapshot,),
         )

@@ -5,7 +5,6 @@ from dataclasses import replace
 from typing import Any, Dict
 
 from datamind.dataops import (
-    Compose,
     ResultEnvelope,
     plan_to_dict,
     validate_plan,
@@ -19,7 +18,11 @@ from datamind.kernel import (
 from datamind.ports import ReplayArtifactStore, TraceStore
 
 from .fingerprint import fingerprint
-from .runtime import compose_results, select_path
+from .runtime import (
+    execute_dataflow_operation,
+    is_dataflow_operation,
+    select_path,
+)
 
 
 class ReplayEngine:
@@ -105,8 +108,8 @@ class ReplayEngine:
                     )
                 )
 
-            if isinstance(operation, Compose):
-                source_result = compose_results(
+            if is_dataflow_operation(operation):
+                source_result = execute_dataflow_operation(
                     operation,
                     prior_results=results,
                 )
@@ -116,6 +119,7 @@ class ReplayEngine:
                     result_kind=source_result.result_kind,
                     trace_id=trace_id,
                     evidence=source_result.evidence,
+                    bindings=source_result.bindings,
                     provenance=source_result.provenance,
                     snapshots=source_result.snapshots,
                     usage=source_result.usage + Usage(actions=1),

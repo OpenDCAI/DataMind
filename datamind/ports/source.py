@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, Mapping, Protocol, Tuple, TypeVar
 
 from datamind.dataops import (
+    BindingSet,
     DataOp,
     Evidence,
     ResultKind,
@@ -31,6 +32,7 @@ class SourceResult(Generic[T]):
     value: T
     result_kind: ResultKind
     evidence: Tuple[Evidence, ...] = ()
+    bindings: BindingSet = field(default_factory=BindingSet)
     provenance: Tuple[Provenance, ...] = ()
     snapshots: Tuple[SnapshotRef, ...] = ()
     usage: Usage = field(default_factory=Usage)
@@ -47,6 +49,10 @@ class SourceResult(Generic[T]):
                 "source result status must be a ResultStatus"
             )
         object.__setattr__(self, "evidence", tuple(self.evidence))
+        if not isinstance(self.bindings, BindingSet):
+            raise KernelValidationError(
+                "source bindings must be a BindingSet"
+            )
         object.__setattr__(self, "provenance", tuple(self.provenance))
         object.__setattr__(self, "snapshots", tuple(self.snapshots))
         object.__setattr__(self, "warnings", tuple(self.warnings))
@@ -70,6 +76,26 @@ class SourceResult(Generic[T]):
             )
         if not isinstance(self.usage, Usage):
             raise KernelValidationError("source usage must be Usage")
+        evidence_ids_in_order = tuple(
+            item.evidence_id for item in self.evidence
+        )
+        if len(set(evidence_ids_in_order)) != len(evidence_ids_in_order):
+            raise KernelValidationError(
+                "source evidence ids cannot contain duplicates"
+            )
+        evidence_ids = set(evidence_ids_in_order)
+        referenced_ids = {
+            evidence_id
+            for row in self.bindings.rows
+            for evidence_id in row.evidence_ids
+        }
+        unknown_ids = sorted(referenced_ids - evidence_ids)
+        if unknown_ids:
+            raise KernelValidationError(
+                "source bindings reference unknown evidence ids: {}".format(
+                    unknown_ids
+                )
+            )
         if any(
             not isinstance(warning, str) or not warning.strip()
             for warning in self.warnings
