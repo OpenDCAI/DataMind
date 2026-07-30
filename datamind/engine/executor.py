@@ -308,8 +308,15 @@ class Executor:
         context: ExecutionContext,
     ) -> ResultEnvelope[Any]:
         if isinstance(operation, Discover):
+            descriptors = self._catalog.discover(operation.kinds)
+            if context.allowed_resources:
+                descriptors = tuple(
+                    item
+                    for item in descriptors
+                    if item.ref.source_id in context.allowed_resources
+                )
             source_result = SourceResult(
-                value=self._catalog.discover(operation.kinds),
+                value=descriptors,
                 result_kind=ResultKind.SOURCE_LIST,
             )
         elif isinstance(operation, Describe):

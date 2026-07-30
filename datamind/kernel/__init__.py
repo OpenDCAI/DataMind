@@ -19,6 +19,7 @@ from .errors import (
     MemoryIdempotencyConflictError,
     MemoryMutationError,
     MemoryVersionConflictError,
+    PlanCompilationError,
     PlanValidationError,
     ReplayError,
     ScopePolicyError,
@@ -30,6 +31,7 @@ from .errors import (
     TraceError,
     TraceNotFoundError,
     UnsupportedSyncError,
+    UnsupportedPlanningError,
     VersionConflictError,
 )
 from .lifecycle import (
@@ -43,6 +45,7 @@ from .lifecycle import (
     sha256_checksum,
 )
 from .graph import GraphEdge, GraphNode, GraphPath, GraphPathSet
+from .json_schema import json_object_violations
 from .memory import (
     EvidenceRef,
     MemoryConflict,
@@ -136,6 +139,7 @@ __all__ = [
     "MemoryRecord",
     "MemoryVersionConflictError",
     "PlanValidationError",
+    "PlanCompilationError",
     "Provenance",
     "ReplayError",
     "RetractMemory",
@@ -165,6 +169,7 @@ __all__ = [
     "TraceEventKind",
     "TraceNotFoundError",
     "UnsupportedSyncError",
+    "UnsupportedPlanningError",
     "Usage",
     "VersionConflictError",
     "effect_violations",
@@ -172,6 +177,7 @@ __all__ = [
     "freeze_json_object",
     "new_id",
     "memory_write_requires_approval",
+    "json_object_violations",
     "require_effect_allowed",
     "require_aware",
     "sha256_checksum",

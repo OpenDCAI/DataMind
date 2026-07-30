@@ -44,6 +44,20 @@ class PlanValidationError(KernelError, ValueError):
         super().__init__("; ".join(self.violations) or "invalid data plan")
 
 
+class PlanCompilationError(KernelError, ValueError):
+    """A model could not produce a valid DataPlan within its attempt bound."""
+
+    def __init__(self, violations: Iterable[str]) -> None:
+        self.violations: Tuple[str, ...] = tuple(violations)
+        super().__init__(
+            "; ".join(self.violations) or "data plan compilation failed"
+        )
+
+
+class UnsupportedPlanningError(KernelError):
+    """A planning API was called without a configured plan compiler."""
+
+
 class SerializationError(KernelError, ValueError):
     """A versioned Core object cannot be encoded or decoded."""
 

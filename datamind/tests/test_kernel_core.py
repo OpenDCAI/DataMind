@@ -90,6 +90,28 @@ class BudgetTests(unittest.TestCase):
         with self.assertRaises(KernelValidationError):
             Budget(max_cost_usd="NaN")
 
+    def test_remaining_budget_accounts_for_prior_stage_usage(self) -> None:
+        budget = Budget(
+            max_tokens=100,
+            max_latency_ms=1000,
+            max_cost_usd="2.50",
+            max_actions=5,
+        )
+
+        remaining = budget.remaining(
+            Usage(
+                tokens=30,
+                latency_ms=250,
+                cost_usd="0.75",
+                actions=2,
+            )
+        )
+
+        self.assertEqual(remaining.max_tokens, 70)
+        self.assertEqual(remaining.max_latency_ms, 750)
+        self.assertEqual(remaining.max_cost_usd, Decimal("1.75"))
+        self.assertEqual(remaining.max_actions, 3)
+
 
 class EffectTests(unittest.TestCase):
     def test_external_write_requires_idempotency_key(self) -> None:

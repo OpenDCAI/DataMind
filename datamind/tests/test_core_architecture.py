@@ -127,6 +127,29 @@ class CoreArchitectureTests(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
+    def test_intelligence_depends_on_ports_not_runtime_or_adapters(
+        self,
+    ) -> None:
+        forbidden = (
+            "datamind.adapters",
+            "datamind.agent",
+            "datamind.capabilities",
+            "datamind.engine",
+            "datamind.lifecycle",
+        )
+        violations = []
+        for path in sorted((CORE_ROOT / "intelligence").glob("*.py")):
+            for module in imported_modules(path):
+                if module.startswith(forbidden):
+                    violations.append(
+                        "{} imports {}".format(
+                            path.relative_to(CORE_ROOT),
+                            module,
+                        )
+                    )
+
+        self.assertEqual(violations, [])
+
     def test_catalog_and_ports_do_not_import_adapters_or_legacy(self) -> None:
         forbidden = (
             "datamind.adapters",

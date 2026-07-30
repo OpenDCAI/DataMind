@@ -7,6 +7,7 @@ from .document import (
     InMemoryDocumentSource,
 )
 from .memory import InMemoryMemorySource
+from .model import AnthropicStructuredModel, ScriptedModel
 from .graph import InMemoryGraphSource
 from .sqlite import SQLiteReadSource, SQLiteTable
 from .skill import (
@@ -28,4 +29,6 @@ __all__ = [
     "SQLiteTable",
     "SkillHandler",
     "SkillRegistration",
+    "AnthropicStructuredModel",
+    "ScriptedModel",
 ]

@@ -34,6 +34,7 @@ from datamind.kernel import (
     SourceKind,
     SourceRef,
     freeze_json,
+    json_object_violations,
     sha256_checksum,
     thaw_json,
 )
@@ -154,6 +155,17 @@ class InMemorySkillSource:
                         "digest": item.spec.digest,
                         "kind": item.spec.kind.value,
                         "effect": item.spec.effect_level.name,
+                        "description": item.spec.description,
+                        "input_schema": thaw_json(
+                            item.spec.input_schema
+                        ),
+                        "output_schema": thaw_json(
+                            item.spec.output_schema
+                        ),
+                        "reversible": item.spec.reversible,
+                        "requires_approval": (
+                            item.spec.requires_approval
+                        ),
                     }
                     for item in ordered
                 ],
@@ -335,11 +347,13 @@ class InMemorySkillSource:
                 "InvokeSkill policy does not match trusted registration"
             )
         arguments = thaw_json(operation.arguments)
-        self._validate_object(
+        input_violations = json_object_violations(
             arguments,
             spec.input_schema,
             label="Skill input",
         )
+        if input_violations:
+            raise SourceExecutionError("; ".join(input_violations))
         try:
             output = registration.handler(arguments, context)
             if inspect.isawaitable(output):
@@ -353,11 +367,13 @@ class InMemorySkillSource:
             ) from exc
         frozen_output = freeze_json(output)
         plain_output = thaw_json(frozen_output)
-        self._validate_object(
+        output_violations = json_object_violations(
             plain_output,
             spec.output_schema,
             label="Skill output",
         )
+        if output_violations:
+            raise SourceExecutionError("; ".join(output_violations))
         result = SkillInvocationResult(
             skill=spec.ref,
             output=frozen_output,
@@ -434,76 +450,6 @@ class InMemorySkillSource:
             for item in _TOKEN_PATTERN.findall(value)
             if item.strip()
         }
-
-    @classmethod
-    def _validate_object(
-        cls,
-        value: Any,
-        schema: Mapping[str, Any],
-        *,
-        label: str,
-    ) -> None:
-        if not isinstance(value, Mapping):
-            raise SourceExecutionError(
-                "{} must be a JSON object".format(label)
-            )
-        properties = schema.get("properties", {})
-        required = tuple(schema.get("required", ()))
-        missing = sorted(set(required) - set(value))
-        if missing:
-            raise SourceExecutionError(
-                "{} is missing required fields: {}".format(label, missing)
-            )
-        if schema.get("additionalProperties") is False:
-            extra = sorted(set(value) - set(properties))
-            if extra:
-                raise SourceExecutionError(
-                    "{} contains undeclared fields: {}".format(label, extra)
-                )
-        for name, item in value.items():
-            item_schema = properties.get(name)
-            if not isinstance(item_schema, Mapping):
-                continue
-            cls._validate_type(
-                item,
-                item_schema.get("type"),
-                label="{}.{}".format(label, name),
-            )
-
-    @staticmethod
-    def _validate_type(value: Any, expected: Any, *, label: str) -> None:
-        if expected is None:
-            return
-        expected_types = (
-            tuple(expected)
-            if isinstance(expected, (list, tuple))
-            else (expected,)
-        )
-        checks = {
-            "null": lambda item: item is None,
-            "boolean": lambda item: isinstance(item, bool),
-            "integer": lambda item: (
-                isinstance(item, int) and not isinstance(item, bool)
-            ),
-            "number": lambda item: (
-                isinstance(item, (int, float))
-                and not isinstance(item, bool)
-            ),
-            "string": lambda item: isinstance(item, str),
-            "array": lambda item: isinstance(item, (list, tuple)),
-            "object": lambda item: isinstance(item, Mapping),
-        }
-        if not any(
-            name in checks and checks[name](value)
-            for name in expected_types
-        ):
-            raise SourceExecutionError(
-                "{} does not match declared type {}".format(
-                    label,
-                    expected_types,
-                )
-            )
-
 
 __all__ = [
     "InMemorySkillSource",

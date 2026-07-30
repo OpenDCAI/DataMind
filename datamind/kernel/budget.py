@@ -109,3 +109,38 @@ class Budget:
         violations = self.violations(usage)
         if violations:
             raise BudgetExceeded(violations)
+
+    def remaining(self, usage: Usage) -> "Budget":
+        """Return the unspent request budget after observed usage.
+
+        The method first enforces the current budget, so callers never
+        receive a negative residual allowance.
+        """
+
+        if not isinstance(usage, Usage):
+            raise KernelValidationError(
+                "remaining budget requires a Usage value"
+            )
+        self.require(usage)
+        return Budget(
+            max_tokens=(
+                self.max_tokens - usage.tokens
+                if self.max_tokens is not None
+                else None
+            ),
+            max_latency_ms=(
+                self.max_latency_ms - usage.latency_ms
+                if self.max_latency_ms is not None
+                else None
+            ),
+            max_cost_usd=(
+                self.max_cost_usd - usage.cost_usd
+                if self.max_cost_usd is not None
+                else None
+            ),
+            max_actions=(
+                self.max_actions - usage.actions
+                if self.max_actions is not None
+                else None
+            ),
+        )

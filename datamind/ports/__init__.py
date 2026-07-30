@@ -10,6 +10,21 @@ from .source import (
     SourceCatalogPort,
     SourceResult,
 )
+from .model import (
+    ModelError,
+    ModelInvocationError,
+    ModelOutputError,
+    ModelPort,
+    StructuredModelRequest,
+    StructuredModelResponse,
+)
+from .planning import (
+    CompilationAttempt,
+    CompilationIssue,
+    CompiledPlan,
+    PlanCompilerPort,
+    PlanningRequest,
+)
 from .trace import (
     RecordedPlan,
     RecordedResult,
@@ -21,6 +36,17 @@ __all__ = [
     "ArtifactStore",
     "DataSource",
     "LifecyclePort",
+    "ModelError",
+    "ModelInvocationError",
+    "ModelOutputError",
+    "ModelPort",
+    "StructuredModelRequest",
+    "StructuredModelResponse",
+    "CompilationAttempt",
+    "CompilationIssue",
+    "CompiledPlan",
+    "PlanCompilerPort",
+    "PlanningRequest",
     "RecordedPlan",
     "RecordedResult",
     "ReplayArtifactStore",

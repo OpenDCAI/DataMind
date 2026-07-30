@@ -55,6 +55,10 @@ from .serde import (
     plan_to_dict,
     plan_to_json,
 )
+from .schema import (
+    RESOLVABLE_OPERATION_TYPES,
+    data_plan_draft_schema,
+)
 from .validation import (
     PlanValidationIssue,
     PlanValidationReport,
@@ -96,6 +100,7 @@ __all__ = [
     "Project",
     "Query",
     "Recall",
+    "RESOLVABLE_OPERATION_TYPES",
     "ResolveSkill",
     "ResultEnvelope",
     "ResultKind",
@@ -112,5 +117,6 @@ __all__ = [
     "plan_to_json",
     "require_valid_plan",
     "validate_plan",
+    "data_plan_draft_schema",
     "ValueBinding",
 ]
