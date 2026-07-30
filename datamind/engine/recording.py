@@ -148,6 +148,12 @@ class ExecutionRecorder:
         draft = getattr(operation, "draft", None)
         if draft is None and proposal is not None:
             draft = proposal.draft
+        operation_idempotency_key = (
+            draft.idempotency_key
+            if draft is not None
+            else getattr(operation, "idempotency_key", None)
+        )
+        skill = getattr(operation, "skill", None)
         origin_channel = (
             proposal.origin.channel.value
             if proposal is not None
@@ -158,6 +164,28 @@ class ExecutionRecorder:
                 else None
             )
         )
+        runtime_bindings = []
+        start_binding = getattr(operation, "start_binding", None)
+        if start_binding is not None:
+            runtime_bindings.append(
+                {
+                    "target": "starts",
+                    "source_op_id": start_binding.ref.op_id,
+                    "field": start_binding.field,
+                    "cardinality": start_binding.cardinality.value,
+                    "max_items": start_binding.max_items,
+                }
+            )
+        for item in getattr(operation, "argument_bindings", ()):
+            runtime_bindings.append(
+                {
+                    "target": item.argument,
+                    "source_op_id": item.value.ref.op_id,
+                    "field": item.value.field,
+                    "cardinality": item.value.cardinality.value,
+                    "max_items": item.value.max_items,
+                }
+            )
         await self._append(
             trace_id,
             TraceEventKind.OP_STARTED,
@@ -171,6 +199,7 @@ class ExecutionRecorder:
                     else None
                 ),
                 "inputs": [ref.op_id for ref in operation.inputs],
+                "runtime_bindings": runtime_bindings,
                 "scope_fingerprints": sorted(
                     fingerprint(item) for item in scopes
                 ),
@@ -180,9 +209,18 @@ class ExecutionRecorder:
                     if proposal is not None
                     else None
                 ),
+                "skill_identity": (
+                    {
+                        "name": skill.name,
+                        "version": skill.version,
+                        "digest": skill.digest,
+                    }
+                    if skill is not None
+                    else None
+                ),
                 "idempotency_key_fingerprint": (
-                    fingerprint(draft.idempotency_key)
-                    if draft is not None
+                    fingerprint(operation_idempotency_key)
+                    if operation_idempotency_key is not None
                     else None
                 ),
                 "valid_at": (

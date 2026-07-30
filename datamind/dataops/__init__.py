@@ -6,6 +6,11 @@ from .base import (
     OutputRef,
     ResultKind,
 )
+from .bindings import (
+    ArgumentBinding,
+    BindingCardinality,
+    ValueBinding,
+)
 from .operations import (
     INITIAL_DATA_OP_TYPES,
     ApplyMutation,
@@ -16,13 +21,17 @@ from .operations import (
     Discover,
     Filter,
     Fuse,
+    GraphDirection,
     InitialDataOp,
     Join,
+    InvokeSkill,
     Project,
     ProposeMutation,
     Query,
     Recall,
+    ResolveSkill,
     Search,
+    Traverse,
 )
 from .plan import DataPlan
 from .results import (
@@ -55,6 +64,8 @@ from .validation import (
 
 __all__ = [
     "ApplyMutation",
+    "ArgumentBinding",
+    "BindingCardinality",
     "BindingPredicate",
     "BindingRow",
     "BindingSet",
@@ -72,8 +83,10 @@ __all__ = [
     "EvidenceSet",
     "Filter",
     "Fuse",
+    "GraphDirection",
     "INITIAL_DATA_OP_TYPES",
     "InitialDataOp",
+    "InvokeSkill",
     "OperationMixin",
     "OperationSignature",
     "OutputRef",
@@ -83,10 +96,12 @@ __all__ = [
     "Project",
     "Query",
     "Recall",
+    "ResolveSkill",
     "ResultEnvelope",
     "ResultKind",
     "ResultStatus",
     "Search",
+    "Traverse",
     "Join",
     "MemoryRecallResult",
     "operation_from_dict",
@@ -97,4 +112,5 @@ __all__ = [
     "plan_to_json",
     "require_valid_plan",
     "validate_plan",
+    "ValueBinding",
 ]

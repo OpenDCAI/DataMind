@@ -38,6 +38,7 @@ from datamind.ports import (
 )
 
 from .recording import ExecutionRecorder
+from .bindings import resolve_bound_operation
 from .runtime import (
     execute_dataflow_operation,
     is_dataflow_operation,
@@ -323,7 +324,10 @@ class Executor:
             )
         else:
             source_result = await self._execute_source(
-                operation,
+                resolve_bound_operation(
+                    operation,
+                    prior_results=prior_results,
+                ),
                 context=context,
             )
 

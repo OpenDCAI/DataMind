@@ -42,6 +42,7 @@ from .lifecycle import (
     SyncReceipt,
     sha256_checksum,
 )
+from .graph import GraphEdge, GraphNode, GraphPath, GraphPathSet
 from .memory import (
     EvidenceRef,
     MemoryConflict,
@@ -67,6 +68,14 @@ from .memory_mutation import (
 )
 from .provenance import Provenance
 from .source import SourceDescriptor
+from .skills import (
+    SkillInvocationResult,
+    SkillKind,
+    SkillMatch,
+    SkillRef,
+    SkillResolution,
+    SkillSpec,
+)
 from .trace import ExecutionTrace, TraceEvent, TraceEventKind
 from .types import (
     JsonObject,
@@ -101,6 +110,10 @@ __all__ = [
     "ExecutionContext",
     "ExecutionError",
     "ExecutionTrace",
+    "GraphEdge",
+    "GraphNode",
+    "GraphPath",
+    "GraphPathSet",
     "IdempotencyConflictError",
     "JsonObject",
     "JsonScalar",
@@ -133,6 +146,12 @@ __all__ = [
     "SnapshotRef",
     "SnapshotSet",
     "SnapshotUnavailableError",
+    "SkillInvocationResult",
+    "SkillKind",
+    "SkillMatch",
+    "SkillRef",
+    "SkillResolution",
+    "SkillSpec",
     "SourceDescriptor",
     "SourceExecutionError",
     "SourceKind",

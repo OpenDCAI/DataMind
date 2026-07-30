@@ -15,6 +15,7 @@ from datamind.kernel import (
     MemoryMutationDraft,
     MemoryMutationProposal,
     ScopeRef,
+    SkillRef,
     SourceKind,
     SourceRef,
     freeze_json_object,
@@ -28,6 +29,7 @@ from .base import (
     OutputRef,
     ResultKind,
 )
+from .bindings import ArgumentBinding, ValueBinding
 
 
 _ALL_RESULT_KINDS = frozenset(ResultKind)
@@ -174,6 +176,112 @@ class Query(OperationMixin):
         self._validate_common()
 
 
+class GraphDirection(str, Enum):
+    OUT = "out"
+    IN = "in"
+    BOTH = "both"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True)
+class Traverse(OperationMixin):
+    """Read bounded simple paths from a property-graph source."""
+
+    source: SourceRef
+    starts: Tuple[str, ...] = ()
+    start_binding: Optional[ValueBinding] = None
+    direction: GraphDirection = GraphDirection.OUT
+    relations: Tuple[str, ...] = ()
+    min_hops: int = 1
+    max_hops: int = 2
+    limit: int = 100
+    simple_paths: bool = True
+    op_id: str = field(default_factory=lambda: new_id("traverse"))
+    inputs: Tuple[OutputRef[Any], ...] = field(default=(), init=False)
+
+    operation: ClassVar[str] = "traverse"
+    output_kind: ClassVar[ResultKind] = ResultKind.GRAPH_PATHS
+    signature: ClassVar[OperationSignature] = OperationSignature(
+        output_kind=output_kind,
+        accepted_input_kinds=_BINDING_CAPABLE_RESULT_KINDS,
+        min_inputs=0,
+        max_inputs=1,
+    )
+    effect_level: ClassVar[EffectLevel] = EffectLevel.READ
+    allowed_source_kinds: ClassVar[FrozenSet[SourceKind]] = frozenset(
+        (SourceKind.GRAPH,)
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "starts", tuple(self.starts))
+        object.__setattr__(self, "relations", tuple(self.relations))
+        if bool(self.starts) == bool(self.start_binding):
+            raise KernelValidationError(
+                "traverse requires exactly one of starts or start_binding"
+            )
+        if any(
+            not isinstance(item, str) or not item.strip()
+            for item in self.starts
+        ):
+            raise KernelValidationError(
+                "traverse starts must contain non-empty strings"
+            )
+        if len(set(self.starts)) != len(self.starts):
+            raise KernelValidationError(
+                "traverse starts cannot contain duplicates"
+            )
+        if self.start_binding is not None:
+            if not isinstance(self.start_binding, ValueBinding):
+                raise KernelValidationError(
+                    "traverse start_binding must be a ValueBinding"
+                )
+            object.__setattr__(
+                self,
+                "inputs",
+                (self.start_binding.ref,),
+            )
+        if not isinstance(self.direction, GraphDirection):
+            raise KernelValidationError(
+                "traverse direction must be a GraphDirection"
+            )
+        if any(
+            not isinstance(item, str) or not item.strip()
+            for item in self.relations
+        ):
+            raise KernelValidationError(
+                "traverse relations must contain non-empty strings"
+            )
+        if len(set(self.relations)) != len(self.relations):
+            raise KernelValidationError(
+                "traverse relations cannot contain duplicates"
+            )
+        for name in ("min_hops", "max_hops", "limit"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise KernelValidationError(
+                    "traverse {} must be an integer".format(name)
+                )
+        if self.min_hops <= 0:
+            raise KernelValidationError(
+                "traverse min_hops must be positive"
+            )
+        if self.max_hops < self.min_hops:
+            raise KernelValidationError(
+                "traverse max_hops cannot be below min_hops"
+            )
+        if self.limit <= 0:
+            raise KernelValidationError(
+                "traverse limit must be positive"
+            )
+        if self.simple_paths is not True:
+            raise KernelValidationError(
+                "DataMind 0.8 supports only simple graph paths"
+            )
+        self._validate_common()
+
+
 @dataclass(frozen=True)
 class Recall(OperationMixin):
     """Recall typed memory records from explicit scopes and time slices."""
@@ -242,6 +350,136 @@ class Recall(OperationMixin):
                 "recall limit must be positive"
             )
         self._validate_common()
+
+
+@dataclass(frozen=True)
+class ResolveSkill(OperationMixin):
+    """Retrieve governed Skill specifications and instruction evidence."""
+
+    source: SourceRef
+    query: str
+    limit: int = 5
+    op_id: str = field(default_factory=lambda: new_id("resolve_skill"))
+    inputs: Tuple[OutputRef[Any], ...] = field(default=(), init=False)
+
+    operation: ClassVar[str] = "resolve_skill"
+    output_kind: ClassVar[ResultKind] = ResultKind.SKILL_SPECS
+    signature: ClassVar[OperationSignature] = OperationSignature(
+        output_kind=output_kind,
+    )
+    effect_level: ClassVar[EffectLevel] = EffectLevel.READ
+    allowed_source_kinds: ClassVar[FrozenSet[SourceKind]] = frozenset(
+        (SourceKind.SKILL,)
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.query, str) or not self.query.strip():
+            raise KernelValidationError(
+                "resolve_skill query must be a non-empty string"
+            )
+        if isinstance(self.limit, bool) or not isinstance(self.limit, int):
+            raise KernelValidationError(
+                "resolve_skill limit must be an integer"
+            )
+        if self.limit <= 0:
+            raise KernelValidationError(
+                "resolve_skill limit must be positive"
+            )
+        self._validate_common()
+
+
+@dataclass(frozen=True)
+class InvokeSkill(OperationMixin):
+    """Invoke one exact, trusted Skill version with governed effects."""
+
+    source: SourceRef
+    skill: SkillRef
+    governed_effect: EffectLevel
+    arguments: JsonObject = field(default_factory=freeze_json_object)
+    argument_bindings: Tuple[ArgumentBinding, ...] = ()
+    reversible: bool = True
+    requires_approval: bool = False
+    approval_key: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    op_id: str = field(default_factory=lambda: new_id("invoke_skill"))
+    inputs: Tuple[OutputRef[Any], ...] = field(default=(), init=False)
+
+    operation: ClassVar[str] = "invoke_skill"
+    output_kind: ClassVar[ResultKind] = ResultKind.SKILL_RESULT
+    signature: ClassVar[OperationSignature] = OperationSignature(
+        output_kind=output_kind,
+        accepted_input_kinds=_BINDING_CAPABLE_RESULT_KINDS,
+        min_inputs=0,
+        max_inputs=None,
+    )
+    effect_level: ClassVar[EffectLevel] = EffectLevel.PURE
+    allowed_source_kinds: ClassVar[FrozenSet[SourceKind]] = frozenset(
+        (SourceKind.SKILL,)
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.skill, SkillRef):
+            raise KernelValidationError(
+                "invoke_skill skill must be a SkillRef"
+            )
+        if not isinstance(self.governed_effect, EffectLevel):
+            raise KernelValidationError(
+                "invoke_skill governed_effect must be an EffectLevel"
+            )
+        object.__setattr__(
+            self,
+            "arguments",
+            freeze_json_object(self.arguments),
+        )
+        object.__setattr__(
+            self,
+            "argument_bindings",
+            tuple(self.argument_bindings),
+        )
+        if any(
+            not isinstance(item, ArgumentBinding)
+            for item in self.argument_bindings
+        ):
+            raise KernelValidationError(
+                "invoke_skill bindings must contain ArgumentBinding values"
+            )
+        names = tuple(item.argument for item in self.argument_bindings)
+        if len(set(names)) != len(names):
+            raise KernelValidationError(
+                "invoke_skill argument bindings cannot contain duplicates"
+            )
+        overlap = sorted(set(names).intersection(self.arguments))
+        if overlap:
+            raise KernelValidationError(
+                "invoke_skill arguments cannot be both literal and bound: "
+                "{}".format(overlap)
+            )
+        refs = []
+        seen_refs = set()
+        for binding in self.argument_bindings:
+            ref = binding.value.ref
+            if ref not in seen_refs:
+                seen_refs.add(ref)
+                refs.append(ref)
+        object.__setattr__(self, "inputs", tuple(refs))
+        for name in ("reversible", "requires_approval"):
+            if not isinstance(getattr(self, name), bool):
+                raise KernelValidationError(
+                    "invoke_skill {} must be a boolean".format(name)
+                )
+        self._validate_common()
+        self.effect
+
+    @property
+    def effect(self) -> EffectSpec:
+        return EffectSpec(
+            level=self.governed_effect,
+            resource=self.source,
+            reversible=self.reversible,
+            requires_approval=self.requires_approval,
+            approval_key=self.approval_key,
+            idempotency_key=self.idempotency_key,
+        )
 
 
 @dataclass(frozen=True)
@@ -574,7 +812,10 @@ InitialDataOp = Union[
     Describe,
     Search,
     Query,
+    Traverse,
     Recall,
+    ResolveSkill,
+    InvokeSkill,
     ProposeMutation,
     ApplyMutation,
     Project,
@@ -588,7 +829,10 @@ INITIAL_DATA_OP_TYPES: Tuple[Type[OperationMixin], ...] = (
     Describe,
     Search,
     Query,
+    Traverse,
     Recall,
+    ResolveSkill,
+    InvokeSkill,
     ProposeMutation,
     ApplyMutation,
     Project,
@@ -607,12 +851,16 @@ __all__ = [
     "Discover",
     "Filter",
     "Fuse",
+    "GraphDirection",
     "INITIAL_DATA_OP_TYPES",
     "InitialDataOp",
     "Join",
+    "InvokeSkill",
     "Project",
     "ProposeMutation",
     "Query",
     "Recall",
+    "ResolveSkill",
     "Search",
+    "Traverse",
 ]

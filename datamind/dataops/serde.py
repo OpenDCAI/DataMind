@@ -23,6 +23,7 @@ from datamind.kernel import (
     ScopeKind,
     ScopeRef,
     SerializationError,
+    SkillRef,
     SnapshotRef,
     SourceKind,
     SourceRef,
@@ -31,6 +32,11 @@ from datamind.kernel import (
 )
 
 from .base import OutputRef
+from .bindings import (
+    ArgumentBinding,
+    BindingCardinality,
+    ValueBinding,
+)
 from .operations import (
     ApplyMutation,
     BindingPredicate,
@@ -40,12 +46,16 @@ from .operations import (
     Discover,
     Filter,
     Fuse,
+    GraphDirection,
+    InvokeSkill,
     Join,
     Project,
     ProposeMutation,
     Query,
     Recall,
+    ResolveSkill,
     Search,
+    Traverse,
 )
 from .plan import DataPlan
 
@@ -72,6 +82,60 @@ def _output_from_dict(payload: Mapping[str, Any]) -> OutputRef:
     return OutputRef(
         op_id=str(payload["op_id"]),
         path=tuple(payload.get("path", ())),
+    )
+
+
+def _value_binding_to_dict(binding: ValueBinding) -> dict:
+    return {
+        "ref": _output_to_dict(binding.ref),
+        "field": binding.field,
+        "cardinality": binding.cardinality.value,
+        "max_items": binding.max_items,
+    }
+
+
+def _value_binding_from_dict(
+    payload: Mapping[str, Any],
+) -> ValueBinding:
+    return ValueBinding(
+        ref=_output_from_dict(payload["ref"]),
+        field=str(payload["field"]),
+        cardinality=BindingCardinality(
+            str(payload.get("cardinality", "single"))
+        ),
+        max_items=int(payload.get("max_items", 1)),
+    )
+
+
+def _argument_binding_to_dict(binding: ArgumentBinding) -> dict:
+    return {
+        "argument": binding.argument,
+        "value": _value_binding_to_dict(binding.value),
+    }
+
+
+def _argument_binding_from_dict(
+    payload: Mapping[str, Any],
+) -> ArgumentBinding:
+    return ArgumentBinding(
+        argument=str(payload["argument"]),
+        value=_value_binding_from_dict(payload["value"]),
+    )
+
+
+def _skill_ref_to_dict(skill: SkillRef) -> dict:
+    return {
+        "name": skill.name,
+        "version": skill.version,
+        "digest": skill.digest,
+    }
+
+
+def _skill_ref_from_dict(payload: Mapping[str, Any]) -> SkillRef:
+    return SkillRef(
+        name=str(payload["name"]),
+        version=str(payload["version"]),
+        digest=str(payload["digest"]),
     )
 
 
@@ -355,6 +419,24 @@ def operation_to_dict(op: Any) -> dict:
                 "parameters": thaw_json(op.parameters),
             }
         )
+    elif isinstance(op, Traverse):
+        common.update(
+            {
+                "source": _source_to_dict(op.source),
+                "starts": list(op.starts),
+                "start_binding": (
+                    _value_binding_to_dict(op.start_binding)
+                    if op.start_binding is not None
+                    else None
+                ),
+                "direction": op.direction.value,
+                "relations": list(op.relations),
+                "min_hops": op.min_hops,
+                "max_hops": op.max_hops,
+                "limit": op.limit,
+                "simple_paths": op.simple_paths,
+            }
+        )
     elif isinstance(op, Recall):
         common.update(
             {
@@ -367,6 +449,31 @@ def operation_to_dict(op: Any) -> dict:
                 "valid_at": _datetime_to_json(op.valid_at),
                 "known_at": _datetime_to_json(op.known_at),
                 "limit": op.limit,
+            }
+        )
+    elif isinstance(op, ResolveSkill):
+        common.update(
+            {
+                "source": _source_to_dict(op.source),
+                "query": op.query,
+                "limit": op.limit,
+            }
+        )
+    elif isinstance(op, InvokeSkill):
+        common.update(
+            {
+                "source": _source_to_dict(op.source),
+                "skill": _skill_ref_to_dict(op.skill),
+                "governed_effect": op.governed_effect.name,
+                "arguments": thaw_json(op.arguments),
+                "argument_bindings": [
+                    _argument_binding_to_dict(item)
+                    for item in op.argument_bindings
+                ],
+                "reversible": op.reversible,
+                "requires_approval": op.requires_approval,
+                "approval_key": op.approval_key,
+                "idempotency_key": op.idempotency_key,
             }
         )
     elif isinstance(op, ProposeMutation):
@@ -466,6 +573,31 @@ def operation_from_dict(payload: Mapping[str, Any]) -> Any:
                 language=str(payload.get("language", "sql")),
                 parameters=payload.get("parameters", {}),
             )
+        if op_type == "traverse":
+            start_binding = payload.get("start_binding")
+            return Traverse(
+                op_id=op_id,
+                source=_source_from_dict(payload["source"]),
+                starts=tuple(
+                    str(item) for item in payload.get("starts", ())
+                ),
+                start_binding=(
+                    _value_binding_from_dict(start_binding)
+                    if start_binding is not None
+                    else None
+                ),
+                direction=GraphDirection(
+                    str(payload.get("direction", "out"))
+                ),
+                relations=tuple(
+                    str(item)
+                    for item in payload.get("relations", ())
+                ),
+                min_hops=int(payload.get("min_hops", 1)),
+                max_hops=int(payload.get("max_hops", 2)),
+                limit=int(payload.get("limit", 100)),
+                simple_paths=payload.get("simple_paths", True),
+            )
         if op_type == "recall":
             return Recall(
                 op_id=op_id,
@@ -482,6 +614,33 @@ def operation_from_dict(payload: Mapping[str, Any]) -> Any:
                 valid_at=_datetime_from_json(payload.get("valid_at")),
                 known_at=_datetime_from_json(payload.get("known_at")),
                 limit=int(payload.get("limit", 10)),
+            )
+        if op_type == "resolve_skill":
+            return ResolveSkill(
+                op_id=op_id,
+                source=_source_from_dict(payload["source"]),
+                query=str(payload["query"]),
+                limit=int(payload.get("limit", 5)),
+            )
+        if op_type == "invoke_skill":
+            return InvokeSkill(
+                op_id=op_id,
+                source=_source_from_dict(payload["source"]),
+                skill=_skill_ref_from_dict(payload["skill"]),
+                governed_effect=EffectLevel[
+                    str(payload["governed_effect"])
+                ],
+                arguments=payload.get("arguments", {}),
+                argument_bindings=tuple(
+                    _argument_binding_from_dict(item)
+                    for item in payload.get("argument_bindings", ())
+                ),
+                reversible=payload.get("reversible", True),
+                requires_approval=payload.get(
+                    "requires_approval", False
+                ),
+                approval_key=payload.get("approval_key"),
+                idempotency_key=payload.get("idempotency_key"),
             )
         if op_type == "propose_mutation":
             return ProposeMutation(
