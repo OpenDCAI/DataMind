@@ -15,7 +15,9 @@ never deserialized from task files.
 
 Every task receives a fresh environment. The reference environment contains
 Document, Table, Graph, Memory, and Skill sources and owns its temporary
-artifacts, trace store, replay artifacts, and outcome store.
+database, ArtifactStore, LifecycleManager, trace store, replay artifacts, and
+outcome store. Lifecycle tasks therefore exercise the same public
+`Engine.sync()` contract as external callers.
 
 Plans are checked by semantic constraints:
 

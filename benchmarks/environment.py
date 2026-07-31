@@ -11,7 +11,7 @@ from datamind.adapters.audit import (
 from datamind.engine import Engine
 from datamind.kernel import ExecutionContext
 from datamind.lifecycle import SourceCatalog
-from datamind.ports import PlanCompilerPort
+from datamind.ports import LifecyclePort, PlanCompilerPort
 
 from .schema import TaskSpec
 
@@ -27,6 +27,7 @@ class BenchmarkEnvironment:
     outcome_store: InMemoryOutcomeStore = field(
         default_factory=InMemoryOutcomeStore
     )
+    lifecycle: Optional[LifecyclePort] = None
     state: Dict[str, Any] = field(default_factory=dict)
     cleanup: Optional[Callable[[], None]] = None
 
@@ -37,6 +38,7 @@ class BenchmarkEnvironment:
     ) -> Engine:
         return Engine(
             self.catalog,
+            lifecycle=self.lifecycle,
             compiler=compiler,
             trace_store=self.trace_store,
             replay_artifact_store=self.trace_store,

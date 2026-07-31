@@ -22,8 +22,8 @@ class BenchmarkSchemaTests(unittest.TestCase):
     def test_v01_has_unique_versioned_non_executable_tasks(self) -> None:
         tasks = load_v01_tasks()
 
-        self.assertEqual(len(tasks), 13)
-        self.assertEqual(len({item.task_id for item in tasks}), 13)
+        self.assertEqual(len(tasks), 14)
+        self.assertEqual(len({item.task_id for item in tasks}), 14)
         self.assertTrue(all(item.version == "0.1" for item in tasks))
         task_directory = (
             Path(__file__).resolve().parents[2]
@@ -106,8 +106,8 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_canonical_v01_tasks_pass(self) -> None:
         suite = await run_v01()
 
-        self.assertEqual(len(suite.runs), 13)
-        self.assertEqual(suite.passed, 13)
+        self.assertEqual(len(suite.runs), 14)
+        self.assertEqual(suite.passed, 14)
         self.assertEqual(suite.failed, 0)
 
     async def test_memory_task_is_isolated_across_repeated_runs(self) -> None:

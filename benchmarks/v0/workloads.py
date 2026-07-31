@@ -1,9 +1,11 @@
-"""Handwritten, inspectable workloads for the twelve v0.1 tasks."""
+"""Handwritten, inspectable workloads for DataMind-Bench v0.1."""
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 from benchmarks.runner import WorkloadResult
+from datamind.adapters import DOCUMENT_ARTIFACT_MEDIA_TYPE
 from datamind.dataops import (
     ApplyMutation,
     BindingPredicate,
@@ -25,13 +27,19 @@ from datamind.dataops import (
     ValueBinding,
 )
 from datamind.kernel import (
+    ArtifactChange,
+    ArtifactManifest,
+    ArtifactRef,
     AssertMemory,
     Budget,
+    ChangeKind,
+    ChangeSet,
     EffectLevel,
     MemoryKind,
     MemoryMutationDraft,
     SnapshotSet,
     SupersedeMemory,
+    sha256_checksum,
 )
 
 
@@ -534,6 +542,113 @@ async def replay_composition(environment, engine, task, run_id):
     return await _execute(environment, engine, task, run_id, plan)
 
 
+async def lifecycle_snapshot_transition(
+    environment,
+    engine,
+    task,
+    run_id,
+):
+    source = environment.state["documents"]
+    artifacts = environment.state["artifacts"]
+    previous = await source.current_snapshot()
+    content = json.dumps(
+        {
+            "document_id": "travel-policy",
+            "content": (
+                "Travel reimbursement policy: the current sales meal "
+                "limit is 50 dollars."
+            ),
+            "metadata": {"department": "sales"},
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    artifact_ref = ArtifactRef("travel-policy", "artifact-v2")
+    manifest = ArtifactManifest(
+        ref=artifact_ref,
+        source=source.descriptor.ref,
+        checksum=sha256_checksum(content),
+        locator="memory://policy-kb/travel-policy/artifact-v2",
+        media_type=DOCUMENT_ARTIFACT_MEDIA_TYPE,
+    )
+    artifacts.put(manifest, content)
+    change_set = ChangeSet(
+        source=source.descriptor.ref,
+        base_version=previous.version,
+        changes=(
+            ArtifactChange(
+                ChangeKind.UPDATE,
+                artifact_ref,
+                manifest,
+            ),
+        ),
+        idempotency_key="bench-policy-sync-v2",
+        change_set_id="bench-change-policy-v2",
+    )
+    first_receipt = await engine.sync(change_set)
+    second_receipt = await engine.sync(change_set)
+
+    latest = Search(
+        source=source.descriptor.ref,
+        query="current sales meal limit",
+        filters={"department": "sales"},
+        op_id="search-current-policy",
+    )
+    latest_plan = _plan(
+        latest,
+        plan_id="bench-current-policy-snapshot",
+    )
+    latest_run = await _execute(
+        environment,
+        engine,
+        task,
+        run_id,
+        latest_plan,
+        "latest",
+    )
+    if latest_run.error is not None:
+        return latest_run
+
+    historical = Search(
+        source=source.descriptor.ref,
+        query="reimbursable 100 dollars",
+        filters={"department": "sales"},
+        op_id="search-historical-policy",
+    )
+    historical_plan = _plan(
+        historical,
+        plan_id="bench-historical-policy-snapshot",
+    )
+    historical_context = replace(
+        environment.context(task, run_id, suffix="historical"),
+        snapshots=SnapshotSet((previous,)),
+    )
+    try:
+        historical_result = await engine.execute(
+            historical_plan,
+            context=historical_context,
+        )
+        historical_error = None
+    except Exception as error:
+        historical_result = None
+        historical_error = error
+    environment.state.update(
+        {
+            "lifecycle_first_receipt": first_receipt,
+            "lifecycle_second_receipt": second_receipt,
+            "lifecycle_historical_result": historical_result,
+        }
+    )
+    return WorkloadResult(
+        plans=(latest_plan, historical_plan),
+        result=latest_run.result,
+        error=historical_error,
+        trace_ids=latest_run.trace_ids + (historical_context.trace_id,),
+        replay_trace_id=latest_run.replay_trace_id,
+    )
+
+
 WORKLOADS = {
     "document-search": document_search,
     "table-query": table_query,
@@ -547,4 +662,5 @@ WORKLOADS = {
     "governed-skill-denied": governed_skill_denied,
     "terminal-source-failure": terminal_source_failure,
     "replay-composition": replay_composition,
+    "lifecycle-snapshot-transition": lifecycle_snapshot_transition,
 }

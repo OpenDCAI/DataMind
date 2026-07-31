@@ -1,0 +1,59 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "state.lifecycle_snapshot_transition",
+  "title": "Synchronize a ChangeSet while retaining historical snapshots",
+  "layer": "state_shift",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "lifecycle-snapshot-transition",
+  "supported_modes": ["oracle_plan"],
+  "replay": "equivalent",
+  "context": {
+    "budget": {"max_actions": 3}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["document"],
+    "required_source_ids": ["policy-kb"],
+    "required_operations": ["search"],
+    "allowed_operations": ["search"],
+    "max_effect": "READ",
+    "max_actions": 2
+  },
+  "assertions": [
+    {
+      "name": "state.latest_value",
+      "oracle": "value_path_equals",
+      "params": {
+        "path": [0, "content"],
+        "expected": "Travel reimbursement policy: the current sales meal limit is 50 dollars."
+      }
+    },
+    {
+      "name": "state.historical_value",
+      "oracle": "state_value_path_equals",
+      "params": {
+        "key": "lifecycle_historical_result",
+        "path": ["value", 0, "content"],
+        "expected": "Travel reimbursement policy: sales meals are reimbursable up to 100 dollars."
+      }
+    },
+    {
+      "name": "state.previous_snapshot",
+      "oracle": "state_value_path_equals",
+      "params": {
+        "key": "lifecycle_first_receipt",
+        "path": ["previous_snapshot", "version"],
+        "expected": "policy-v1"
+      }
+    },
+    {
+      "name": "state.idempotent_retry",
+      "oracle": "state_value_path_equals",
+      "params": {
+        "key": "lifecycle_second_receipt",
+        "path": ["reused"],
+        "expected": true
+      }
+    }
+  ]
+}

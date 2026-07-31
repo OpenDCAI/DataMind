@@ -7,14 +7,19 @@ each Core capability works in a complete, inspectable task.
 Run the canonical suite from the repository root:
 
 ```bash
-python3 -m benchmarks.run_v01
+python3.11 -m benchmarks.run_v01
 ```
 
-The command runs 13 deterministic tasks:
+The Core acceptance path uses only the Python standard library and the
+repository source tree. The `Core Runtime` workflow runs it on Python 3.11 and
+3.12 without installing the legacy application stack.
+
+The command runs 14 deterministic tasks:
 
 - five single-surface contracts for Document, Table, Graph, Memory, and Skill;
 - two cross-surface tasks for typed Join and runtime binding;
 - two state-shift tasks for governed Memory write and bi-temporal history;
+- one lifecycle task for idempotent ChangeSet sync and historical snapshots;
 - four failure/replay tasks for Effect denial, terminal source failure,
   equivalent Replay, and bounded runtime replanning.
 

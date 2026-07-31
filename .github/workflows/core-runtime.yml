@@ -1,0 +1,35 @@
+name: Core Runtime
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-core:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Test dependency-free Core
+        run: |
+          python -m unittest discover -s datamind/tests -p 'test_*_core.py'
+          python -m unittest \
+            datamind.tests.test_trace_replay \
+            datamind.tests.test_benchmark_v01
+
+      - name: Run DataMind-Bench v0.1
+        run: python -m benchmarks.run_v01

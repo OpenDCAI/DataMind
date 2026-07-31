@@ -10,6 +10,7 @@ from benchmarks.environment import BenchmarkEnvironment
 from benchmarks.faults import FaultInjectingSource, FaultRule
 from datamind.adapters import (
     DocumentRecord,
+    InMemoryArtifactStore,
     InMemoryDocumentSource,
     InMemoryGraphSource,
     InMemoryMemorySource,
@@ -28,7 +29,7 @@ from datamind.kernel import (
     SkillKind,
     SkillSpec,
 )
-from datamind.lifecycle import SourceCatalog
+from datamind.lifecycle import LifecycleManager, SourceCatalog
 
 BASE_TIME = datetime(2026, 1, 1, tzinfo=timezone.utc)
 PRINCIPAL_SCOPE = ScopeRef(ScopeKind.PRINCIPAL, "alice")
@@ -192,6 +193,9 @@ def _build(*, faulty: bool) -> BenchmarkEnvironment:
     for source in (documents, table, graph, memory, skills):
         catalog.register(source)
 
+    artifacts = InMemoryArtifactStore()
+    lifecycle = LifecycleManager(catalog, artifacts)
+
     failing = None
     if faulty:
         raw_failing = InMemoryDocumentSource(
@@ -217,7 +221,9 @@ def _build(*, faulty: bool) -> BenchmarkEnvironment:
 
     return BenchmarkEnvironment(
         catalog=catalog,
+        lifecycle=lifecycle,
         state={
+            "artifacts": artifacts,
             "documents": documents,
             "table": table,
             "graph": graph,
