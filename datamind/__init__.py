@@ -1,8 +1,7 @@
-"""DataMind Python package.
+"""Typed and stateful inference data plane for enterprise agents."""
 
-New agent stack built on claude-agent-sdk. The legacy `modules/`, `core/`,
-`main.py`, `server.py` files remain untouched and continue to work — both
-stacks coexist during the migration. Prefer `datamind.*` for new code.
-"""
+from .engine import Engine
 
-__version__ = "0.3.0"
+__version__ = "0.7.0"
+
+__all__ = ["Engine", "__version__"]

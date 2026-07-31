@@ -1,3 +1,0 @@
-{"text": "LlamaIndex 是一个用于构建大语言模型应用的 Python 框架，它提供了数据连接器、索引结构和查询接口，帮助开发者快速构建 RAG（检索增强生成）系统。", "metadata": {"source": "技术概述.md", "chapter": "框架介绍"}}
-{"text": "DataMind 是一个基于 LlamaIndex 的一体化智能助手系统，集成了 RAG 向量检索、GraphRAG 图谱检索、NL2SQL 数据库查询、对话记忆和自定义技能五大模块。", "metadata": {"source": "项目介绍.md", "chapter": "系统概述"}}
-{"text": "向量检索（RAG）的核心原理是将文本转换为高维向量，通过余弦相似度计算找到与查询语义最接近的文档片段，然后将这些片段作为上下文传递给大语言模型进行回答。", "metadata": {"source": "技术概述.md", "chapter": "RAG原理"}}

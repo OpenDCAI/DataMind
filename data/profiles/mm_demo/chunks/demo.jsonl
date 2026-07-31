@@ -1,5 +1,0 @@
-{"text": "DataMind 是一个基于 LlamaIndex 的一体化智能助手，集成 RAG、GraphRAG、Database、Skills 和 Memory 五大模块。", "metadata": {"source": "readme"}, "modality": "text"}
-{"text": "系统架构如图所示，分为数据层、索引层和查询层三部分。", "image_path": "images/arch.png", "modality": "text_image", "metadata": {"source": "architecture"}}
-{"text": "", "image_path": "images/chart.png", "modality": "image", "image_description": "一张柱状图展示了不同检索策略的召回率对比：Simple 为 72%，MultiQuery 为 85%，HyDE 为 81%。", "metadata": {"source": "benchmark"}}
-{"text": "CLIP 模型通过对比学习将图片和文本映射到共享向量空间，实现跨模态检索。", "metadata": {"source": "clip_intro"}, "modality": "text"}
-{"text": "下图是知识图谱的可视化结果。", "image_path": "images/graph.png", "modality": "text_image", "image_description": "知识图谱包含 15 个实体节点和 23 条关系边，以力导向图布局展示。", "metadata": {"source": "graphrag"}}

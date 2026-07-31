@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from datamind.adapters import (
@@ -50,7 +51,7 @@ class ExecutionFixture(unittest.IsolatedAsyncioTestCase):
         self.database_path = (
             Path(self._temporary_directory.name) / "expenses.sqlite3"
         )
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute(
                 "CREATE TABLE expenses "
                 "(employee_id INTEGER, category TEXT, amount REAL)"
@@ -63,6 +64,7 @@ class ExecutionFixture(unittest.IsolatedAsyncioTestCase):
                     (8, "meal", 50.0),
                 ),
             )
+            connection.commit()
 
         self.document_source = InMemoryDocumentSource(
             source_id="policy-kb",
@@ -265,10 +267,11 @@ class SQLiteSafetyTests(ExecutionFixture):
         )
         self.assertTrue(result.snapshots[0].same_version_as(snapshot))
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute(
                 "INSERT INTO expenses VALUES (9, 'meal', 25.0)"
             )
+            connection.commit()
         with self.assertRaises(SnapshotUnavailableError):
             await self.executor.execute(
                 operation,
@@ -286,7 +289,7 @@ class SQLiteSafetyTests(ExecutionFixture):
         with self.assertRaises(SourceExecutionError):
             await self.executor.execute(operation, context=self.context())
 
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection:
             count = connection.execute(
                 "SELECT COUNT(*) FROM expenses"
             ).fetchone()[0]

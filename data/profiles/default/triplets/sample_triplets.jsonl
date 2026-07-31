@@ -1,7 +1,0 @@
-{"subject": "DataMind", "relation": "基于", "object": "LlamaIndex", "subject_type": "Product", "object_type": "Framework"}
-{"subject": "LlamaIndex", "relation": "是", "object": "Python框架", "subject_type": "Framework", "object_type": "Technology"}
-{"subject": "DataMind", "relation": "包含模块", "object": "RAG向量检索", "subject_type": "Product", "object_type": "Module"}
-{"subject": "DataMind", "relation": "包含模块", "object": "GraphRAG图谱检索", "subject_type": "Product", "object_type": "Module"}
-{"subject": "DataMind", "relation": "包含模块", "object": "NL2SQL数据库查询", "subject_type": "Product", "object_type": "Module"}
-{"subject": "RAG向量检索", "relation": "使用技术", "object": "Chroma", "subject_type": "Module", "object_type": "Technology"}
-{"subject": "GraphRAG图谱检索", "relation": "使用技术", "object": "NetworkX", "subject_type": "Module", "object_type": "Technology"}

@@ -1,4 +1,4 @@
-"""Dependency-free domain kernel for DataMind Core 1.0."""
+"""Dependency-free domain kernel for DataMind Core."""
 from .budget import Budget, Usage
 from .context import ExecutionContext
 from .effects import (

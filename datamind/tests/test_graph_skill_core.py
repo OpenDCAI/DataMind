@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from datamind.adapters import (
@@ -53,7 +54,7 @@ class GraphSkillCoreTests(unittest.IsolatedAsyncioTestCase):
         self.database_path = (
             Path(self._temporary_directory.name) / "projects.sqlite3"
         )
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute(
                 "CREATE TABLE projects "
                 "(project_id TEXT, entity TEXT, risk TEXT)"
@@ -65,6 +66,7 @@ class GraphSkillCoreTests(unittest.IsolatedAsyncioTestCase):
                     ("p2", "Ann", "low"),
                 ),
             )
+            connection.commit()
 
         self.table_source = SQLiteReadSource(
             source_id="projects-db",

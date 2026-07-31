@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -55,7 +56,7 @@ async def _record_approval(arguments, context):
 
 
 def _database(path: Path) -> None:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             "CREATE TABLE expenses "
             "(employee_id INTEGER, department TEXT, category TEXT, amount REAL)"
@@ -79,6 +80,7 @@ def _database(path: Path) -> None:
                 ("p2", "Ann", "low"),
             ),
         )
+        connection.commit()
 
 
 def _build(*, faulty: bool) -> BenchmarkEnvironment:

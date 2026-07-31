@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datamind"
-description = "Composable inference-time data framework for LLM agents — KB / Graph / DB / Skills / Memory / Hooks behind one tool registry"
+description = "Typed and stateful inference data plane for enterprise agents"
 requires-python = ">=3.11"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = {text = "Apache-2.0"}
@@ -13,11 +13,18 @@ authors = [
     {name = "Wentao Zhang", email = "wentao.zhang@pku.edu.cn"},
 ]
 keywords = [
-    "AI", "agent", "RAG", "GraphRAG", "Text2SQL",
-    "knowledge-graph", "memory", "MCP", "data-agent", "claude",
+    "AI",
+    "agent",
+    "inference-data-plane",
+    "dataops",
+    "dataplan",
+    "provenance",
+    "replay",
+    "agent-memory",
+    "knowledge-graph",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
@@ -30,99 +37,28 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dynamic = ["version"]
-dependencies = [
-    # Model client — we drive the agent loop ourselves via the Anthropic
-    # Messages API (/v1/messages). This keeps us decoupled from the `claude`
-    # CLI, which on some installs is a vendor-rebranded binary that ignores
-    # ANTHROPIC_API_KEY.
-    "anthropic>=0.40",
-    "httpx[http2]>=0.27",
-
-    # Config / validation / logging primitives
-    "pydantic>=2.6",
-    "pydantic-settings>=2.2",
-
-    # KB
-    "chromadb>=1.0",
-    "rank-bm25>=0.2",
-
-    # Graph
-    "networkx>=3.0",
-
-    # DB abstraction (dialect providers pluggable)
-    "sqlalchemy>=2.0",
-
-    # SQL parsing for hooks (DestructiveSqlHook)
-    "sqlglot>=22",
-
-    # Server + CLI
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.27",
-    "typer>=0.12",
-    "rich>=13",
-
-    # Async primitives
-    "anyio>=4.2",
-]
+dependencies = []
 
 [project.urls]
-Homepage      = "https://github.com/OpenDCAI/DataMind"
-Documentation = "https://haolpku.github.io/DataMind-Doc/"
-Repository    = "https://github.com/OpenDCAI/DataMind"
-Issues        = "https://github.com/OpenDCAI/DataMind/issues"
+Homepage = "https://github.com/OpenDCAI/DataMind"
+Repository = "https://github.com/OpenDCAI/DataMind"
+Issues = "https://github.com/OpenDCAI/DataMind/issues"
 
 [project.optional-dependencies]
-# Legacy v0.1 stack — kept so the old main.py / server.py / modules/* keep
-# working side-by-side with the new datamind/ package.
-legacy = [
-    "llama-index>=0.11",
-]
-
-# Dialect / provider extras — installed on demand, no hard requirement
-mysql = ["pymysql>=1.1", "cryptography>=42"]
-postgres = ["psycopg[binary]>=3.1"]
-voyage = ["voyageai>=0.2"]
-huggingface = ["sentence-transformers>=2.5"]
+anthropic = ["anthropic>=0.40"]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
     "build>=1.0",
+    "pytest>=8.0",
     "twine>=4.0",
 ]
-
-[project.scripts]
-datamind = "datamind.cli:app"
 
 [tool.setuptools.dynamic]
 version = {attr = "datamind.__version__"}
 
-# Explicit include + exclude. `data*` was a foot-gun: it matches `datamind`
-# itself and silently produced empty wheels. We keep the include narrow
-# (only the `datamind` package and its sub-packages) and exclude only the
-# in-package test directory.
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["datamind", "datamind.*"]
 exclude = ["datamind.tests", "datamind.tests.*"]
 
-# Bundle non-Python resources so `pip install datamind` ships a working
-# server (browser UI under datamind/static/) and a default skill catalog
-# (datamind/skills/<name>/SKILL.md). Repo-side static/ and .claude/skills/
-# remain authoritative for development; server.py / config.py prefer them
-# when running from a checkout.
-[tool.setuptools.package-data]
-datamind = [
-    "static/*.html",
-    "static/*.css",
-    "static/*.js",
-    "skills/*/SKILL.md",
-    "skills/*/*.md",
-    "skills/*/*.py",
-    "skills/*/*.yaml",
-    "skills/*/*.yml",
-    "skills/*/*.json",
-]
-
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 testpaths = ["datamind/tests"]

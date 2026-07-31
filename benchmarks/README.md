@@ -12,7 +12,7 @@ python3.11 -m benchmarks.run_v01
 
 The Core acceptance path uses only the Python standard library and the
 repository source tree. The `Core Runtime` workflow runs it on Python 3.11 and
-3.12 without installing the legacy application stack.
+3.12 without provider or application dependencies.
 
 The command runs 14 deterministic tasks:
 

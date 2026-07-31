@@ -1,4 +1,4 @@
-"""Typed, serializable DataOps instruction set for DataMind Core 1.0."""
+"""Typed, serializable DataOps instruction set for DataMind Core."""
 from .base import (
     DataOp,
     OperationMixin,
