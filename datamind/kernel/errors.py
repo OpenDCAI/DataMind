@@ -58,6 +58,22 @@ class UnsupportedPlanningError(KernelError):
     """A planning API was called without a configured plan compiler."""
 
 
+class OutcomeError(KernelError):
+    """Base error for append-only external evaluation records."""
+
+
+class OutcomeConflictError(OutcomeError):
+    """An outcome identity or idempotency key conflicts with prior intent."""
+
+
+class OutcomeNotFoundError(OutcomeError, LookupError):
+    """A requested outcome record does not exist."""
+
+
+class UnsupportedOutcomeError(OutcomeError):
+    """Outcome recording was requested without a configured store."""
+
+
 class SerializationError(KernelError, ValueError):
     """A versioned Core object cannot be encoded or decoded."""
 

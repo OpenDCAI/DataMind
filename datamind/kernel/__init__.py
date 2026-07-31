@@ -20,6 +20,9 @@ from .errors import (
     MemoryIdempotencyConflictError,
     MemoryMutationError,
     MemoryVersionConflictError,
+    OutcomeConflictError,
+    OutcomeError,
+    OutcomeNotFoundError,
     PlanCompilationError,
     PlanValidationError,
     ReplayError,
@@ -32,6 +35,7 @@ from .errors import (
     TraceError,
     TraceNotFoundError,
     UnsupportedSyncError,
+    UnsupportedOutcomeError,
     UnsupportedPlanningError,
     VersionConflictError,
 )
@@ -72,6 +76,13 @@ from .memory_mutation import (
     memory_write_requires_approval,
 )
 from .provenance import Provenance
+from .outcome import (
+    EvaluatorKind,
+    OutcomeAssertion,
+    OutcomeRecord,
+    OutcomeTarget,
+    OutcomeTargetKind,
+)
 from .source import SourceDescriptor
 from .skills import (
     SkillInvocationResult,
@@ -118,6 +129,7 @@ __all__ = [
     "EffectPolicyError",
     "EffectSpec",
     "EvidenceRef",
+    "EvaluatorKind",
     "ExecutionContext",
     "ExecutionError",
     "ExecutionFailure",
@@ -148,6 +160,13 @@ __all__ = [
     "MemoryOriginChannel",
     "MemoryRecord",
     "MemoryVersionConflictError",
+    "OutcomeAssertion",
+    "OutcomeConflictError",
+    "OutcomeError",
+    "OutcomeNotFoundError",
+    "OutcomeRecord",
+    "OutcomeTarget",
+    "OutcomeTargetKind",
     "PlanValidationError",
     "PlanCompilationError",
     "Provenance",
@@ -182,6 +201,7 @@ __all__ = [
     "TraceEventKind",
     "TraceNotFoundError",
     "UnsupportedSyncError",
+    "UnsupportedOutcomeError",
     "UnsupportedPlanningError",
     "Usage",
     "VersionConflictError",

@@ -13,11 +13,13 @@ from datamind.kernel import (
     MemoryMutationProposal,
     MemoryMutationReceipt,
     MemoryOriginChannel,
+    OutcomeRecord,
     ScopeKind,
     SourceDescriptor,
     SourceKind,
     SyncReceipt,
     UnsupportedPlanningError,
+    UnsupportedOutcomeError,
     UnsupportedSyncError,
     Usage,
     new_id,
@@ -25,6 +27,7 @@ from datamind.kernel import (
 )
 from datamind.ports import (
     LifecyclePort,
+    OutcomeStore,
     PlanCompilerPort,
     PlanningRequest,
     ReplanningContext,
@@ -55,11 +58,13 @@ class Engine:
         replay_artifact_store: Optional[ReplayArtifactStore] = None,
         compiler: Optional[PlanCompilerPort] = None,
         resolution_trace_store: Optional[ResolutionTraceStore] = None,
+        outcome_store: Optional[OutcomeStore] = None,
         max_parallelism: int = 4,
     ) -> None:
         self._catalog = catalog
         self._lifecycle = lifecycle
         self._compiler = compiler
+        self._outcome_store = outcome_store
         self._executor = Executor(
             catalog,
             trace_store=trace_store,
@@ -259,6 +264,18 @@ class Engine:
 
     async def replay(self, trace_id: str) -> ResultEnvelope[Any]:
         return await self._executor.replay(trace_id)
+
+    async def record_outcome(
+        self,
+        outcome: OutcomeRecord,
+    ) -> OutcomeRecord:
+        """Append an external verdict without interpreting or learning from it."""
+
+        if self._outcome_store is None:
+            raise UnsupportedOutcomeError(
+                "engine.record_outcome() requires a configured OutcomeStore"
+            )
+        return await self._outcome_store.record(outcome)
 
     def _planning_sources(
         self,

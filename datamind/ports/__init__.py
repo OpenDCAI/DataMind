@@ -27,6 +27,7 @@ from .planning import (
     ReplanningContext,
 )
 from .resolution import ResolutionTraceStore
+from .outcome import OutcomeStore
 from .trace import (
     RecordedPlan,
     RecordedResult,
@@ -42,6 +43,7 @@ __all__ = [
     "ModelInvocationError",
     "ModelOutputError",
     "ModelPort",
+    "OutcomeStore",
     "StructuredModelRequest",
     "StructuredModelResponse",
     "CompilationAttempt",
