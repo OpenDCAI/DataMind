@@ -21,14 +21,25 @@ from datamind.engine import Engine
 from datamind.intelligence import DataPlanCompiler
 from datamind.kernel import (
     Budget,
+    BudgetExceeded,
     EffectLevel,
+    ExecutionFailureKind,
     ExecutionContext,
     GraphEdge,
     GraphNode,
     MemoryOriginChannel,
     PlanCompilationError,
+    ReplayError,
+    ResolutionEventKind,
     ScopeKind,
     ScopeRef,
+    SnapshotRef,
+    SnapshotSet,
+    SnapshotUnavailableError,
+    SourceDescriptor,
+    SourceExecutionError,
+    SourceKind,
+    SourceRef,
     SkillKind,
     SkillSpec,
     UnsupportedPlanningError,
@@ -180,7 +191,9 @@ class ResolveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolution.usage.tokens, 12)
         self.assertEqual(resolution.plan.max_effect, EffectLevel.READ)
         self.assertTrue(resolution.compilation_attempts[-1].successful)
-        replayed = await engine.replay(context.trace_id)
+        replayed = await engine.replay(
+            resolution.final_attempt.trace_id
+        )
         self.assertEqual(replayed, resolution.result)
         self.assertEqual(len(model.requests), 1)
 
@@ -293,6 +306,296 @@ class ResolveExecutionTests(unittest.IsolatedAsyncioTestCase):
                 for item in compiler_input["catalog"]
             ],
             ["policy-docs"],
+        )
+
+    async def test_recoverable_source_failure_gets_one_new_plan(self) -> None:
+        class FailingDocumentSource:
+            descriptor = SourceDescriptor(
+                ref=SourceRef("failing-docs", SourceKind.DOCUMENT),
+                display_name="Failing documents",
+                capabilities=frozenset(("search",)),
+            )
+
+            async def execute(self, operation, *, context):
+                del operation, context
+                raise RuntimeError("provider payload must remain private")
+
+        failing_source = FailingDocumentSource()
+        self.catalog.register(failing_source)
+        partial_failure_draft = {
+            "description": "Read two sources before composition.",
+            "operations": [
+                {
+                    "type": "search",
+                    "op_id": "search-healthy",
+                    "source": "policy-docs",
+                    "query": "Acme retention policy",
+                    "limit": 5,
+                    "filters_json": "{}",
+                },
+                {
+                    "type": "search",
+                    "op_id": "search-failing",
+                    "source": "failing-docs",
+                    "query": "Acme retention policy",
+                    "limit": 5,
+                    "filters_json": "{}",
+                },
+                {
+                    "type": "compose",
+                    "op_id": "compose",
+                    "inputs": [
+                        {"op_id": "search-healthy", "path": []},
+                        {"op_id": "search-failing", "path": []},
+                    ],
+                    "strategy": "evidence_union",
+                },
+            ],
+            "output": {"op_id": "compose", "path": []},
+        }
+        model = ScriptedModel(
+            (
+                model_response(
+                    partial_failure_draft,
+                    tokens=3,
+                    response_id="first-plan",
+                ),
+                model_response(
+                    search_draft("policy-docs"),
+                    tokens=4,
+                    response_id="replacement-plan",
+                ),
+            )
+        )
+        store = InMemoryTraceStore()
+        engine = Engine(
+            self.catalog,
+            compiler=DataPlanCompiler(model),
+            trace_store=store,
+            replay_artifact_store=store,
+        )
+        context = ExecutionContext.new(
+            budget=Budget(max_tokens=100, max_actions=5),
+        )
+
+        resolution = await engine.resolve(
+            "查找 Acme 留存政策。",
+            context=context,
+        )
+
+        self.assertEqual(resolution.resolution_id, context.trace_id)
+        self.assertEqual(len(resolution.plan_attempts), 2)
+        first, second = resolution.plan_attempts
+        self.assertFalse(first.successful)
+        self.assertTrue(second.successful)
+        self.assertEqual(
+            first.failure.kind,
+            ExecutionFailureKind.SOURCE,
+        )
+        self.assertTrue(first.failure.recoverable)
+        self.assertEqual(first.failure.failed_op_id, "search-failing")
+        self.assertEqual(first.failure.source_id, "failing-docs")
+        self.assertEqual(
+            first.failure.completed_op_ids,
+            ("search-healthy",),
+        )
+        self.assertEqual(first.execution_usage.actions, 2)
+        self.assertNotEqual(first.trace_id, second.trace_id)
+        self.assertNotEqual(context.trace_id, second.trace_id)
+        self.assertEqual(resolution.usage.actions, 5)
+
+        recovery_input = json.loads(model.requests[1].input_text)
+        recovery = recovery_input["runtime_recovery"]
+        self.assertEqual(recovery["attempt_number"], 2)
+        self.assertEqual(
+            recovery["failure"]["kind"],
+            ExecutionFailureKind.SOURCE.value,
+        )
+        self.assertEqual(
+            recovery["failure"]["source_id"],
+            "failing-docs",
+        )
+        self.assertNotIn(
+            "provider payload must remain private",
+            json.dumps(recovery, ensure_ascii=False),
+        )
+
+        parent = await store.get_resolution(context.trace_id)
+        self.assertTrue(parent.completed)
+        parent_payload = json.dumps(
+            [thaw_json(event.details) for event in parent.events],
+            ensure_ascii=False,
+        )
+        self.assertNotIn(
+            "provider payload must remain private",
+            parent_payload,
+        )
+        self.assertEqual(
+            tuple(event.kind for event in parent.events),
+            (
+                ResolutionEventKind.RESOLUTION_STARTED,
+                ResolutionEventKind.PLAN_ATTEMPT_STARTED,
+                ResolutionEventKind.PLAN_ATTEMPT_FAILED,
+                ResolutionEventKind.PLAN_ATTEMPT_STARTED,
+                ResolutionEventKind.PLAN_ATTEMPT_COMPLETED,
+                ResolutionEventKind.RESOLUTION_COMPLETED,
+            ),
+        )
+        failed_trace = await store.get(first.trace_id)
+        final_trace = await store.get(second.trace_id)
+        self.assertTrue(failed_trace.failed)
+        self.assertTrue(final_trace.completed)
+        with self.assertRaises(ReplayError):
+            await engine.replay(first.trace_id)
+        replayed = await engine.replay(second.trace_id)
+        self.assertEqual(replayed, resolution.result)
+
+    async def test_snapshot_failure_is_terminal_and_not_replanned(
+        self,
+    ) -> None:
+        model = ScriptedModel(
+            (
+                model_response(search_draft(), response_id="only-plan"),
+                model_response(
+                    search_draft(),
+                    response_id="must-not-be-used",
+                ),
+            )
+        )
+        store = InMemoryTraceStore()
+        engine = Engine(
+            self.catalog,
+            compiler=DataPlanCompiler(model),
+            trace_store=store,
+            replay_artifact_store=store,
+        )
+        unavailable = SnapshotRef(
+            source=self.document_source.descriptor.ref,
+            version="missing",
+            observed_at=datetime(2026, 7, 31, tzinfo=timezone.utc),
+        )
+        context = ExecutionContext.new(
+            snapshots=SnapshotSet((unavailable,)),
+            budget=Budget(max_actions=4),
+        )
+
+        with self.assertRaises(SnapshotUnavailableError):
+            await engine.resolve(
+                "查找 Acme 留存政策。",
+                context=context,
+            )
+
+        self.assertEqual(len(model.requests), 1)
+        parent = await store.get_resolution(context.trace_id)
+        self.assertTrue(parent.failed)
+        failure_event = parent.events[-2]
+        self.assertEqual(
+            failure_event.kind,
+            ResolutionEventKind.PLAN_ATTEMPT_FAILED,
+        )
+        self.assertEqual(
+            failure_event.details["failure"]["kind"],
+            ExecutionFailureKind.SNAPSHOT.value,
+        )
+        self.assertFalse(failure_event.details["will_replan"])
+
+    async def test_replanning_cannot_exceed_original_action_budget(
+        self,
+    ) -> None:
+        class FailingDocumentSource:
+            descriptor = SourceDescriptor(
+                ref=SourceRef("failing-docs", SourceKind.DOCUMENT),
+                display_name="Failing documents",
+                capabilities=frozenset(("search",)),
+            )
+
+            async def execute(self, operation, *, context):
+                del operation, context
+                raise RuntimeError("unavailable")
+
+        self.catalog.register(FailingDocumentSource())
+        model = ScriptedModel(
+            (
+                model_response(search_draft("failing-docs")),
+                model_response(search_draft("policy-docs")),
+            )
+        )
+        store = InMemoryTraceStore()
+        engine = Engine(
+            self.catalog,
+            compiler=DataPlanCompiler(model),
+            trace_store=store,
+            replay_artifact_store=store,
+        )
+        context = ExecutionContext.new(
+            budget=Budget(max_actions=2),
+        )
+
+        with self.assertRaises(BudgetExceeded):
+            await engine.resolve(
+                "查找 Acme 留存政策。",
+                context=context,
+            )
+
+        self.assertEqual(len(model.requests), 1)
+        self.assertEqual(model.remaining, 1)
+        parent = await store.get_resolution(context.trace_id)
+        self.assertTrue(parent.failed)
+        self.assertEqual(
+            parent.events[-1].details["usage"]["actions"],
+            2,
+        )
+
+    async def test_runtime_replanning_stops_after_one_replacement(
+        self,
+    ) -> None:
+        class FailingDocumentSource:
+            descriptor = SourceDescriptor(
+                ref=SourceRef("failing-docs", SourceKind.DOCUMENT),
+                display_name="Failing documents",
+                capabilities=frozenset(("search",)),
+            )
+
+            async def execute(self, operation, *, context):
+                del operation, context
+                raise RuntimeError("still unavailable")
+
+        self.catalog.register(FailingDocumentSource())
+        response = model_response(search_draft("failing-docs"))
+        model = ScriptedModel((response, response, response))
+        store = InMemoryTraceStore()
+        engine = Engine(
+            self.catalog,
+            compiler=DataPlanCompiler(model),
+            trace_store=store,
+            replay_artifact_store=store,
+        )
+        context = ExecutionContext.new(
+            budget=Budget(max_actions=5),
+        )
+
+        with self.assertRaises(SourceExecutionError):
+            await engine.resolve(
+                "查找 Acme 留存政策。",
+                context=context,
+            )
+
+        self.assertEqual(len(model.requests), 2)
+        self.assertEqual(model.remaining, 1)
+        parent = await store.get_resolution(context.trace_id)
+        self.assertTrue(parent.failed)
+        failed_attempts = tuple(
+            event
+            for event in parent.events
+            if event.kind
+            is ResolutionEventKind.PLAN_ATTEMPT_FAILED
+        )
+        self.assertEqual(len(failed_attempts), 2)
+        self.assertTrue(
+            failed_attempts[0].details["will_replan"]
+        )
+        self.assertFalse(
+            failed_attempts[1].details["will_replan"]
         )
 
 

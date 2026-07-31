@@ -6,6 +6,9 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 from datamind.kernel import (
     ExecutionTrace,
+    ResolutionEvent,
+    ResolutionEventKind,
+    ResolutionTrace,
     TraceConflictError,
     TraceEvent,
     TraceEventKind,
@@ -19,6 +22,7 @@ class InMemoryTraceStore:
 
     def __init__(self) -> None:
         self._events: Dict[str, list] = {}
+        self._resolution_events: Dict[str, list] = {}
         self._plans: Dict[str, RecordedPlan] = {}
         self._results: Dict[Tuple[str, str], RecordedResult] = {}
         self._lock = RLock()
@@ -79,6 +83,75 @@ class InMemoryTraceStore:
                     "trace {!r} does not exist".format(trace_id)
                 )
             return ExecutionTrace(trace_id=trace_id, events=tuple(events))
+
+    async def start_resolution(
+        self,
+        resolution_id: str,
+        *,
+        details: Mapping[str, Any],
+    ) -> ResolutionEvent:
+        with self._lock:
+            if resolution_id in self._resolution_events:
+                raise TraceConflictError(
+                    "resolution {!r} already exists".format(resolution_id)
+                )
+            event = ResolutionEvent(
+                resolution_id=resolution_id,
+                sequence=0,
+                kind=ResolutionEventKind.RESOLUTION_STARTED,
+                details=details,
+            )
+            self._resolution_events[resolution_id] = [event]
+            return event
+
+    async def append_resolution(
+        self,
+        resolution_id: str,
+        kind: ResolutionEventKind,
+        *,
+        attempt_number: Optional[int] = None,
+        trace_id: Optional[str] = None,
+        details: Mapping[str, Any],
+    ) -> ResolutionEvent:
+        with self._lock:
+            events = self._resolution_events.get(resolution_id)
+            if events is None:
+                raise TraceNotFoundError(
+                    "resolution {!r} does not exist".format(
+                        resolution_id
+                    )
+                )
+            event = ResolutionEvent(
+                resolution_id=resolution_id,
+                sequence=len(events),
+                kind=kind,
+                attempt_number=attempt_number,
+                trace_id=trace_id,
+                details=details,
+            )
+            ResolutionTrace(
+                resolution_id=resolution_id,
+                events=tuple(events) + (event,),
+            )
+            events.append(event)
+            return event
+
+    async def get_resolution(
+        self,
+        resolution_id: str,
+    ) -> ResolutionTrace:
+        with self._lock:
+            events = self._resolution_events.get(resolution_id)
+            if events is None:
+                raise TraceNotFoundError(
+                    "resolution {!r} does not exist".format(
+                        resolution_id
+                    )
+                )
+            return ResolutionTrace(
+                resolution_id=resolution_id,
+                events=tuple(events),
+            )
 
     async def save_plan(
         self,

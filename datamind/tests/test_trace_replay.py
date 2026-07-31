@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from datamind.kernel import (
     ExecutionContext,
     KernelValidationError,
     ReplayError,
+    ResolutionEventKind,
     SourceDescriptor,
     SourceExecutionError,
     SourceKind,
@@ -326,6 +328,46 @@ class TraceStateTests(unittest.IsolatedAsyncioTestCase):
                 TraceEventKind.REPLAY_FAILED,
                 details={"error_type": "test"},
             )
+
+    async def test_jsonl_resolution_trace_survives_reconstruction(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = JsonlTraceStore(Path(directory))
+            await store.start_resolution(
+                "resolution-state",
+                details={"request_id": "request-state"},
+            )
+            await store.append_resolution(
+                "resolution-state",
+                ResolutionEventKind.PLAN_ATTEMPT_STARTED,
+                attempt_number=1,
+                trace_id="child-trace",
+                details={"plan_fingerprint": "plan-fingerprint"},
+            )
+            await store.append_resolution(
+                "resolution-state",
+                ResolutionEventKind.PLAN_ATTEMPT_COMPLETED,
+                attempt_number=1,
+                trace_id="child-trace",
+                details={"result_fingerprint": "result-fingerprint"},
+            )
+            await store.append_resolution(
+                "resolution-state",
+                ResolutionEventKind.RESOLUTION_COMPLETED,
+                details={"attempt_count": 1},
+            )
+
+            reconstructed = await JsonlTraceStore(
+                Path(directory)
+            ).get_resolution("resolution-state")
+
+        self.assertTrue(reconstructed.completed)
+        self.assertEqual(len(reconstructed.events), 4)
+        self.assertEqual(
+            reconstructed.events[1].trace_id,
+            "child-trace",
+        )
 
 
 if __name__ == "__main__":

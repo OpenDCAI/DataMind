@@ -8,11 +8,43 @@ from datamind.dataops import DataPlan
 from datamind.kernel import (
     Budget,
     EffectLevel,
+    ExecutionFailure,
     KernelValidationError,
     ScopeRef,
     SourceDescriptor,
     Usage,
 )
+
+
+@dataclass(frozen=True)
+class ReplanningContext:
+    """Trusted facts supplied for one complete replacement plan."""
+
+    attempt_number: int
+    previous_plan: DataPlan
+    failure: ExecutionFailure
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.attempt_number, bool)
+            or not isinstance(self.attempt_number, int)
+            or self.attempt_number < 2
+        ):
+            raise KernelValidationError(
+                "replanning attempt_number must be at least two"
+            )
+        if not isinstance(self.previous_plan, DataPlan):
+            raise KernelValidationError(
+                "replanning previous_plan must be a DataPlan"
+            )
+        if not isinstance(self.failure, ExecutionFailure):
+            raise KernelValidationError(
+                "replanning failure must be an ExecutionFailure"
+            )
+        if not self.failure.recoverable:
+            raise KernelValidationError(
+                "replanning requires a recoverable execution failure"
+            )
 
 
 @dataclass(frozen=True)
@@ -26,6 +58,7 @@ class PlanningRequest:
     writable_scopes: Tuple[ScopeRef, ...] = ()
     max_effect: EffectLevel = EffectLevel.READ
     budget: Budget = field(default_factory=Budget)
+    replanning: Optional[ReplanningContext] = None
 
     def __post_init__(self) -> None:
         for name in ("intent", "request_id"):
@@ -74,6 +107,13 @@ class PlanningRequest:
         if not isinstance(self.budget, Budget):
             raise KernelValidationError(
                 "planning budget must be a Budget"
+            )
+        if (
+            self.replanning is not None
+            and not isinstance(self.replanning, ReplanningContext)
+        ):
+            raise KernelValidationError(
+                "planning replanning must be a ReplanningContext"
             )
 
 
@@ -201,4 +241,5 @@ __all__ = [
     "CompiledPlan",
     "PlanCompilerPort",
     "PlanningRequest",
+    "ReplanningContext",
 ]

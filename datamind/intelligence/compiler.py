@@ -15,6 +15,7 @@ from datamind.dataops import (
     Recall,
     data_plan_draft_schema,
     plan_from_dict,
+    plan_to_dict,
     validate_plan,
 )
 from datamind.kernel import (
@@ -58,6 +59,9 @@ Independent operations should not depend on each other; express dependencies
 only with output references. Never invent permissions, approvals, effects,
 source kinds, plan budgets, or provider capabilities. Use JSON-encoded strings
 for fields ending in _json. The runtime, not you, executes the plan.
+When runtime_recovery is present, return one complete replacement plan using
+only its sanitized failure facts; do not return a patch or repeat a failed
+source operation unchanged when an authorized alternative can satisfy intent.
 """
 
 
@@ -117,6 +121,9 @@ class DataPlanCompiler:
         previous_issues: Tuple[CompilationIssue, ...] = ()
 
         for number in range(1, self._max_attempts + 1):
+            request.budget.require(
+                total_usage + Usage(actions=1)
+            )
             input_payload = dict(base_input)
             if previous_issues:
                 input_payload["repair"] = {
@@ -569,7 +576,7 @@ class DataPlanCompiler:
         allowed_operations: Iterable[str],
     ) -> dict:
         allowed = frozenset(allowed_operations)
-        return {
+        payload = {
             "intent": request.intent,
             "catalog": [
                 {
@@ -612,6 +619,33 @@ class DataPlanCompiler:
                 "destructive_actions": False,
             },
         }
+        if request.replanning is not None:
+            failure = request.replanning.failure
+            payload["runtime_recovery"] = {
+                "attempt_number": request.replanning.attempt_number,
+                "previous_plan": plan_to_dict(
+                    request.replanning.previous_plan
+                ),
+                "failure": {
+                    "kind": failure.kind.value,
+                    "error_type": failure.error_type,
+                    "error_fingerprint": failure.error_fingerprint,
+                    "failed_op_id": failure.failed_op_id,
+                    "operation": failure.operation,
+                    "source_id": failure.source_id,
+                    "completed_op_ids": list(
+                        failure.completed_op_ids
+                    ),
+                    "recoverable": failure.recoverable,
+                    "usage": {
+                        "tokens": failure.usage.tokens,
+                        "latency_ms": failure.usage.latency_ms,
+                        "cost_usd": str(failure.usage.cost_usd),
+                        "actions": failure.usage.actions,
+                    },
+                },
+            }
+        return payload
 
     @staticmethod
     def _json_value(

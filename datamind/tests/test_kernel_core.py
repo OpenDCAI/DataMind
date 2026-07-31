@@ -12,7 +12,12 @@ from datamind.kernel import (
     EffectLevel,
     EffectPolicyError,
     EffectSpec,
+    ExecutionFailure,
+    ExecutionFailureKind,
     KernelValidationError,
+    ResolutionEvent,
+    ResolutionEventKind,
+    ResolutionTrace,
     SnapshotRef,
     SourceKind,
     SourceRef,
@@ -165,6 +170,48 @@ class EffectTests(unittest.TestCase):
             violations,
             ("resource 'private-kb' is not allowed",),
         )
+
+
+class FailureAndResolutionTraceTests(unittest.TestCase):
+    def test_only_source_failure_can_be_marked_recoverable(self) -> None:
+        with self.assertRaises(KernelValidationError):
+            ExecutionFailure(
+                kind=ExecutionFailureKind.BUDGET,
+                error_type="BudgetExceeded",
+                error_fingerprint="fingerprint",
+                recoverable=True,
+            )
+
+    def test_resolution_cannot_terminate_with_open_plan_attempt(self) -> None:
+        with self.assertRaises(KernelValidationError):
+            ResolutionTrace(
+                resolution_id="resolution",
+                events=(
+                    ResolutionEvent(
+                        resolution_id="resolution",
+                        sequence=0,
+                        kind=(
+                            ResolutionEventKind.RESOLUTION_STARTED
+                        ),
+                    ),
+                    ResolutionEvent(
+                        resolution_id="resolution",
+                        sequence=1,
+                        kind=(
+                            ResolutionEventKind.PLAN_ATTEMPT_STARTED
+                        ),
+                        attempt_number=1,
+                        trace_id="child",
+                    ),
+                    ResolutionEvent(
+                        resolution_id="resolution",
+                        sequence=2,
+                        kind=(
+                            ResolutionEventKind.RESOLUTION_FAILED
+                        ),
+                    ),
+                ),
+            )
 
 
 if __name__ == "__main__":

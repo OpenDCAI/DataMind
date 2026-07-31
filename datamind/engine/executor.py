@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from datamind.dataops import (
@@ -19,12 +19,21 @@ from datamind.dataops import (
 )
 from datamind.kernel import (
     Budget,
+    BudgetExceeded,
+    DeadlineExceeded,
     EffectLevel,
+    EffectPolicyError,
     ExecutionContext,
     ExecutionError,
+    ExecutionFailure,
+    ExecutionFailureKind,
+    KernelValidationError,
+    PlanValidationError,
     ReplayError,
+    ScopePolicyError,
     SnapshotUnavailableError,
     SourceExecutionError,
+    TraceError,
     Usage,
     require_effect_allowed,
     utc_now,
@@ -37,6 +46,7 @@ from datamind.ports import (
     TraceStore,
 )
 
+from .fingerprint import fingerprint
 from .recording import ExecutionRecorder
 from .bindings import resolve_bound_operation
 from .runtime import (
@@ -44,6 +54,50 @@ from .runtime import (
     is_dataflow_operation,
     select_path,
 )
+
+
+class _ExecutionInterrupted(Exception):
+    def __init__(
+        self,
+        cause: Exception,
+        *,
+        completed_op_ids: Tuple[str, ...] = (),
+        usage: Usage = Usage(),
+        failed_op_id: Optional[str] = None,
+    ) -> None:
+        self.cause = cause
+        self.completed_op_ids = completed_op_ids
+        self.usage = usage
+        self.failed_op_id = failed_op_id
+        super().__init__(str(cause))
+
+
+@dataclass(frozen=True)
+class ExecutionAttemptOutcome:
+    """Internal orchestration result preserving failure usage and cause."""
+
+    result: Optional[ResultEnvelope[Any]] = None
+    failure: Optional[ExecutionFailure] = None
+    error: Optional[Exception] = None
+
+    def __post_init__(self) -> None:
+        succeeded = self.result is not None
+        failed = self.failure is not None and self.error is not None
+        if succeeded == failed:
+            raise ExecutionError(
+                "execution attempt must contain one result or one failure"
+            )
+
+    @property
+    def successful(self) -> bool:
+        return self.result is not None
+
+    @property
+    def usage(self) -> Usage:
+        if self.result is not None:
+            return self.result.usage
+        assert self.failure is not None
+        return self.failure.usage
 
 
 class Executor:
@@ -83,6 +137,24 @@ class Executor:
             if isinstance(operation_or_plan, DataPlan)
             else self._single_operation_plan(operation_or_plan)
         )
+        outcome = await self.execute_attempt(plan, context=context)
+        if outcome.result is not None:
+            return outcome.result
+        assert outcome.error is not None
+        raise outcome.error
+
+    async def execute_attempt(
+        self,
+        plan: DataPlan,
+        *,
+        context: ExecutionContext,
+    ) -> ExecutionAttemptOutcome:
+        """Execute one plan while retaining sanitized failure observations."""
+
+        if not isinstance(plan, DataPlan):
+            raise ExecutionError(
+                "execute_attempt() expects a DataPlan"
+            )
         trace_started = False
         try:
             trace_started = await self._recorder.start_plan(
@@ -95,11 +167,28 @@ class Executor:
                 plan,
                 result,
             )
-            return result
-        except Exception as exc:
+            return ExecutionAttemptOutcome(result=result)
+        except _ExecutionInterrupted as interrupted:
+            error = interrupted.cause
             if trace_started:
-                await self._recorder.fail_plan(context.trace_id, exc)
-            raise
+                await self._recorder.fail_plan(context.trace_id, error)
+            return ExecutionAttemptOutcome(
+                failure=self._failure_from(
+                    plan,
+                    error,
+                    completed_op_ids=interrupted.completed_op_ids,
+                    usage=interrupted.usage,
+                    failed_op_id=interrupted.failed_op_id,
+                ),
+                error=error,
+            )
+        except Exception as error:
+            if trace_started:
+                await self._recorder.fail_plan(context.trace_id, error)
+            return ExecutionAttemptOutcome(
+                failure=self._failure_from(plan, error),
+                error=error,
+            )
 
     async def replay(self, trace_id: str) -> ResultEnvelope[Any]:
         """Replay a completed trace without consulting live source adapters."""
@@ -139,81 +228,108 @@ class Executor:
         *,
         context: ExecutionContext,
     ) -> ResultEnvelope[Any]:
-        report = validate_plan(
-            plan,
-            sources=self._catalog.descriptors(),
-        )
-        report.require_valid()
-        await self._preflight(plan, context=context)
-        await self._recorder.plan_validated(
-            context.trace_id,
-            topological_order=report.topological_order,
-            static_actions=len(plan.operations),
-            max_parallelism=self._max_parallelism,
-        )
-
-        operations = {operation.op_id: operation for operation in plan.operations}
         results: Dict[str, ResultEnvelope[Any]] = {}
         total_usage = Usage()
-        remaining = list(report.topological_order)
-        while remaining:
-            self._require_before_deadline(context)
-            batch = self._ready_batch(
-                remaining,
-                operations=operations,
-                results=results,
+        try:
+            report = validate_plan(
+                plan,
+                sources=self._catalog.descriptors(),
             )
-            for op_id in batch:
-                await self._recorder.start_operation(
-                    context.trace_id,
-                    operations[op_id],
-                    context=context,
+            report.require_valid()
+            await self._preflight(plan, context=context)
+            await self._recorder.plan_validated(
+                context.trace_id,
+                topological_order=report.topological_order,
+                static_actions=len(plan.operations),
+                max_parallelism=self._max_parallelism,
+            )
+
+            operations = {
+                operation.op_id: operation
+                for operation in plan.operations
+            }
+            remaining = list(report.topological_order)
+            while remaining:
+                self._require_before_deadline(context)
+                batch = self._ready_batch(
+                    remaining,
+                    operations=operations,
+                    results=results,
                 )
-            outcomes = await asyncio.gather(
-                *(
-                    self._execute_one(
+                for op_id in batch:
+                    await self._recorder.start_operation(
+                        context.trace_id,
                         operations[op_id],
-                        prior_results=results,
                         context=context,
                     )
-                    for op_id in batch
-                ),
-                return_exceptions=True,
-            )
-            first_error = None
-            for op_id, outcome in zip(batch, outcomes):
-                if isinstance(outcome, Exception):
-                    await self._recorder.fail_operation(
-                        context.trace_id,
-                        op_id,
-                        outcome,
-                    )
-                    if first_error is None:
-                        first_error = outcome
-                    continue
-                result = outcome
-                total_usage = total_usage + result.usage
-                await self._recorder.complete_operation(
-                    context.trace_id,
-                    result,
+                outcomes = await asyncio.gather(
+                    *(
+                        self._execute_one(
+                            operations[op_id],
+                            prior_results=results,
+                            context=context,
+                        )
+                        for op_id in batch
+                    ),
+                    return_exceptions=True,
                 )
-                results[op_id] = result
-            if first_error is not None:
-                raise first_error
-            plan.budget.require(total_usage)
-            context.budget.require(total_usage)
-            completed = set(batch)
-            remaining = [
-                op_id for op_id in remaining if op_id not in completed
-            ]
+                failures = []
+                for op_id, outcome in zip(batch, outcomes):
+                    if isinstance(outcome, Exception):
+                        total_usage = total_usage + Usage(actions=1)
+                        await self._recorder.fail_operation(
+                            context.trace_id,
+                            op_id,
+                            outcome,
+                        )
+                        failures.append((op_id, outcome))
+                        continue
+                    result = outcome
+                    total_usage = total_usage + result.usage
+                    await self._recorder.complete_operation(
+                        context.trace_id,
+                        result,
+                    )
+                    results[op_id] = result
 
-        final = results[plan.output.op_id]
-        if plan.output.path:
-            final = replace(
-                final,
-                value=select_path(final.value, plan.output.path),
-            )
-        return replace(final, usage=total_usage)
+                failed_op_id = failures[0][0] if failures else None
+                try:
+                    plan.budget.require(total_usage)
+                    context.budget.require(total_usage)
+                except Exception as budget_error:
+                    raise _ExecutionInterrupted(
+                        budget_error,
+                        completed_op_ids=tuple(results),
+                        usage=total_usage,
+                        failed_op_id=failed_op_id,
+                    ) from budget_error
+                if failures:
+                    raise _ExecutionInterrupted(
+                        failures[0][1],
+                        completed_op_ids=tuple(results),
+                        usage=total_usage,
+                        failed_op_id=failed_op_id,
+                    ) from failures[0][1]
+                completed = set(batch)
+                remaining = [
+                    op_id for op_id in remaining if op_id not in completed
+                ]
+
+            final = results[plan.output.op_id]
+            if plan.output.path:
+                final = replace(
+                    final,
+                    value=select_path(final.value, plan.output.path),
+                )
+            return replace(final, usage=total_usage)
+        except _ExecutionInterrupted:
+            raise
+        except Exception as error:
+            raise _ExecutionInterrupted(
+                error,
+                completed_op_ids=tuple(results),
+                usage=total_usage,
+            ) from error
 
     def _ready_batch(
         self,
@@ -412,4 +528,62 @@ class Executor:
     @staticmethod
     def _require_before_deadline(context: ExecutionContext) -> None:
         if context.deadline is not None and utc_now() >= context.deadline:
-            raise ExecutionError("execution deadline has expired")
+            raise DeadlineExceeded("execution deadline has expired")
+
+    @staticmethod
+    def _failure_kind(error: Exception) -> ExecutionFailureKind:
+        if isinstance(error, SourceExecutionError):
+            return ExecutionFailureKind.SOURCE
+        if isinstance(error, SnapshotUnavailableError):
+            return ExecutionFailureKind.SNAPSHOT
+        if isinstance(error, BudgetExceeded):
+            return ExecutionFailureKind.BUDGET
+        if isinstance(error, (EffectPolicyError, ScopePolicyError)):
+            return ExecutionFailureKind.POLICY
+        if isinstance(error, (PlanValidationError, KernelValidationError)):
+            return ExecutionFailureKind.PLAN
+        if isinstance(error, DeadlineExceeded):
+            return ExecutionFailureKind.DEADLINE
+        if isinstance(error, TraceError):
+            return ExecutionFailureKind.INFRASTRUCTURE
+        return ExecutionFailureKind.EXECUTION
+
+    @classmethod
+    def _failure_from(
+        cls,
+        plan: DataPlan,
+        error: Exception,
+        *,
+        completed_op_ids: Tuple[str, ...] = (),
+        usage: Usage = Usage(),
+        failed_op_id: Optional[str] = None,
+    ) -> ExecutionFailure:
+        operation = None
+        source_id = None
+        if failed_op_id is not None:
+            try:
+                failed_operation = plan.operation(failed_op_id)
+            except KeyError:
+                failed_operation = None
+            if failed_operation is not None:
+                operation = failed_operation.operation
+                if failed_operation.source is not None:
+                    source_id = failed_operation.source.source_id
+        kind = cls._failure_kind(error)
+        return ExecutionFailure(
+            kind=kind,
+            error_type="{}.{}".format(
+                type(error).__module__,
+                type(error).__qualname__,
+            ),
+            error_fingerprint=fingerprint(str(error)),
+            usage=usage,
+            failed_op_id=failed_op_id,
+            operation=operation,
+            source_id=source_id,
+            completed_op_ids=completed_op_ids,
+            recoverable=kind is ExecutionFailureKind.SOURCE,
+        )
+
+
+__all__ = ["ExecutionAttemptOutcome", "Executor"]

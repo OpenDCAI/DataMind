@@ -66,6 +66,10 @@ class ExecutionError(KernelError):
     """Base class for future deterministic executor failures."""
 
 
+class DeadlineExceeded(ExecutionError):
+    """Execution cannot continue within the caller's fixed deadline."""
+
+
 class SourceExecutionError(ExecutionError):
     """A source adapter failed while executing a DataOp."""
 

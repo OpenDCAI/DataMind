@@ -2,6 +2,12 @@
 from .api import Engine
 from .executor import Executor
 from .replay import ReplayEngine
-from .resolution import Resolution
+from .resolution import PlanAttempt, Resolution
 
-__all__ = ["Engine", "Executor", "ReplayEngine", "Resolution"]
+__all__ = [
+    "Engine",
+    "Executor",
+    "PlanAttempt",
+    "ReplayEngine",
+    "Resolution",
+]

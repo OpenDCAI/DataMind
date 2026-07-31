@@ -11,6 +11,7 @@ from .errors import (
     ArtifactIntegrityError,
     ArtifactNotFoundError,
     BudgetExceeded,
+    DeadlineExceeded,
     EffectPolicyError,
     ExecutionError,
     IdempotencyConflictError,
@@ -34,6 +35,7 @@ from .errors import (
     UnsupportedPlanningError,
     VersionConflictError,
 )
+from .execution import ExecutionFailure, ExecutionFailureKind
 from .lifecycle import (
     ArtifactChange,
     ArtifactManifest,
@@ -80,6 +82,11 @@ from .skills import (
     SkillSpec,
 )
 from .trace import ExecutionTrace, TraceEvent, TraceEventKind
+from .resolution_trace import (
+    ResolutionEvent,
+    ResolutionEventKind,
+    ResolutionTrace,
+)
 from .types import (
     JsonObject,
     JsonScalar,
@@ -104,6 +111,7 @@ __all__ = [
     "AssertMemory",
     "Budget",
     "BudgetExceeded",
+    "DeadlineExceeded",
     "ChangeKind",
     "ChangeSet",
     "EffectLevel",
@@ -112,6 +120,8 @@ __all__ = [
     "EvidenceRef",
     "ExecutionContext",
     "ExecutionError",
+    "ExecutionFailure",
+    "ExecutionFailureKind",
     "ExecutionTrace",
     "GraphEdge",
     "GraphNode",
@@ -142,6 +152,9 @@ __all__ = [
     "PlanCompilationError",
     "Provenance",
     "ReplayError",
+    "ResolutionEvent",
+    "ResolutionEventKind",
+    "ResolutionTrace",
     "RetractMemory",
     "SerializationError",
     "ScopeKind",

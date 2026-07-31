@@ -24,7 +24,9 @@ from .planning import (
     CompiledPlan,
     PlanCompilerPort,
     PlanningRequest,
+    ReplanningContext,
 )
+from .resolution import ResolutionTraceStore
 from .trace import (
     RecordedPlan,
     RecordedResult,
@@ -47,6 +49,8 @@ __all__ = [
     "CompiledPlan",
     "PlanCompilerPort",
     "PlanningRequest",
+    "ReplanningContext",
+    "ResolutionTraceStore",
     "RecordedPlan",
     "RecordedResult",
     "ReplayArtifactStore",
