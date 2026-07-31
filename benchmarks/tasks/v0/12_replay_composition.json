@@ -1,0 +1,42 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "failure.replay_composition",
+  "title": "Replay a fused evidence result without live source access",
+  "layer": "failure_replay",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "replay-composition",
+  "supported_modes": ["oracle_plan"],
+  "replay": "equivalent",
+  "context": {
+    "budget": {"max_actions": 4}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["document"],
+    "required_source_ids": ["policy-kb"],
+    "required_operations": ["search", "fuse"],
+    "allowed_operations": ["search", "fuse"],
+    "precedence": [
+      {"before": "search", "after": "fuse"}
+    ],
+    "max_effect": "READ",
+    "max_actions": 3
+  },
+  "assertions": [
+    {
+      "name": "result.native_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "evidence_set"}
+    },
+    {
+      "name": "evidence.deduplicated",
+      "oracle": "evidence_count",
+      "params": {"expected": 1}
+    },
+    {
+      "name": "trace.completed",
+      "oracle": "trace_terminal",
+      "params": {"expected": "completed"}
+    }
+  ]
+}

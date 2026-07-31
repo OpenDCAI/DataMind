@@ -1,0 +1,44 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "surface.memory_recall",
+  "title": "Recall memory from an explicit principal scope",
+  "layer": "surface_contract",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "memory-recall",
+  "supported_modes": ["oracle_plan"],
+  "context": {
+    "budget": {"max_actions": 2},
+    "readable_scopes": [
+      {"kind": "principal", "scope_id": "alice"}
+    ]
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["memory"],
+    "required_source_ids": ["agent-memory"],
+    "required_operations": ["recall"],
+    "allowed_operations": ["recall"],
+    "max_effect": "READ",
+    "max_actions": 1
+  },
+  "assertions": [
+    {
+      "name": "result.native_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "memory_records"}
+    },
+    {
+      "name": "result.preference",
+      "oracle": "value_path_equals",
+      "params": {
+        "path": ["records", 0, "content"],
+        "expected": "Communication preference is email."
+      }
+    },
+    {
+      "name": "state.snapshot_bound",
+      "oracle": "snapshot_count",
+      "params": {"expected": 1}
+    }
+  ]
+}

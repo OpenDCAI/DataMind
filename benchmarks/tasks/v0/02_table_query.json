@@ -1,0 +1,44 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "surface.table_query",
+  "title": "Preserve a native relational query result",
+  "layer": "surface_contract",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "table-query",
+  "supported_modes": ["oracle_plan"],
+  "context": {
+    "budget": {"max_actions": 2}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["table"],
+    "required_source_ids": ["warehouse"],
+    "required_operations": ["query"],
+    "allowed_operations": ["query"],
+    "max_effect": "READ",
+    "max_actions": 1
+  },
+  "assertions": [
+    {
+      "name": "result.native_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "table"}
+    },
+    {
+      "name": "result.columns",
+      "oracle": "value_path_equals",
+      "params": {
+        "path": ["columns"],
+        "expected": ["category", "amount"]
+      }
+    },
+    {
+      "name": "result.rows",
+      "oracle": "value_path_equals",
+      "params": {
+        "path": ["rows"],
+        "expected": [["hotel", 600.0], ["meal", 80.0]]
+      }
+    }
+  ]
+}

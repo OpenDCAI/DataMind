@@ -1,0 +1,41 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "surface.document_search",
+  "title": "Retrieve a scoped enterprise policy document",
+  "layer": "surface_contract",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "document-search",
+  "supported_modes": ["oracle_plan"],
+  "context": {
+    "budget": {"max_actions": 2}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["document"],
+    "required_source_ids": ["policy-kb"],
+    "required_operations": ["search"],
+    "allowed_operations": ["search"],
+    "max_effect": "READ",
+    "max_actions": 1
+  },
+  "assertions": [
+    {
+      "name": "result.native_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "document_hits"}
+    },
+    {
+      "name": "result.policy_identity",
+      "oracle": "value_path_equals",
+      "params": {
+        "path": [0, "document_id"],
+        "expected": "travel-policy"
+      }
+    },
+    {
+      "name": "evidence.policy_source",
+      "oracle": "provenance_sources",
+      "params": {"expected": ["policy-kb"]}
+    }
+  ]
+}

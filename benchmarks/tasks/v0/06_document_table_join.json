@@ -1,0 +1,51 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "cross.document_table_join",
+  "title": "Join policy evidence with native expense data",
+  "layer": "cross_surface",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "document-table-join",
+  "supported_modes": ["oracle_plan"],
+  "context": {
+    "budget": {"max_actions": 7}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["document", "table"],
+    "required_source_ids": ["policy-kb", "warehouse"],
+    "required_operations": ["search", "query", "project", "filter", "join"],
+    "allowed_operations": ["search", "query", "project", "filter", "join"],
+    "precedence": [
+      {"before": "search", "after": "join"},
+      {"before": "query", "after": "join"}
+    ],
+    "max_effect": "READ",
+    "max_actions": 6
+  },
+  "assertions": [
+    {
+      "name": "result.native_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "binding_set"}
+    },
+    {
+      "name": "result.joined_row",
+      "oracle": "binding_rows_equals",
+      "params": {
+        "expected": [
+          {
+            "policy.document_id": "travel-policy",
+            "policy.metadata.department": "sales",
+            "expense.department": "sales",
+            "expense.amount": 680.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "evidence.cross_surface",
+      "oracle": "provenance_sources",
+      "params": {"expected": ["policy-kb", "warehouse"]}
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "state.memory_assert_read",
+  "title": "Propose, apply, and recall a governed memory assertion",
+  "layer": "state_shift",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "memory-assert-read",
+  "supported_modes": ["oracle_plan"],
+  "context": {
+    "max_effect": "INTERNAL_WRITE",
+    "budget": {"max_actions": 4},
+    "readable_scopes": [
+      {"kind": "principal", "scope_id": "alice"}
+    ],
+    "writable_scopes": [
+      {"kind": "principal", "scope_id": "alice"}
+    ],
+    "memory_origin": "user_explicit"
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["memory"],
+    "required_source_ids": ["agent-memory"],
+    "required_operations": ["propose_mutation", "apply_mutation", "recall"],
+    "allowed_operations": ["propose_mutation", "apply_mutation", "recall"],
+    "max_effect": "INTERNAL_WRITE",
+    "max_actions": 3
+  },
+  "assertions": [
+    {
+      "name": "result.native_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "memory_records"}
+    },
+    {
+      "name": "state.new_preference",
+      "oracle": "value_path_equals",
+      "params": {
+        "path": ["records", 0, "content"],
+        "expected": "Travel seat preference is window."
+      }
+    },
+    {
+      "name": "state.new_snapshot",
+      "oracle": "snapshot_count",
+      "params": {"expected": 1}
+    }
+  ]
+}

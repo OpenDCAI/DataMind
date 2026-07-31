@@ -1,0 +1,44 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "failure.source_failure_replan",
+  "title": "Replace one failed read plan and preserve resolution lineage",
+  "layer": "failure_replay",
+  "fixture_id": "enterprise-faulty-v0",
+  "workload_id": "terminal-source-failure",
+  "supported_modes": ["scripted_compiler"],
+  "request": "Find the available travel policy despite a source outage.",
+  "script_id": "recover-document-source",
+  "replay": "equivalent",
+  "context": {
+    "budget": {"max_tokens": 20, "max_actions": 8}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["document"],
+    "required_source_ids": ["policy-kb", "policy-failing"],
+    "required_operations": ["search", "compose"],
+    "allowed_operations": ["search", "compose"],
+    "precedence": [
+      {"before": "search", "after": "compose"}
+    ],
+    "max_effect": "READ",
+    "max_actions": 4
+  },
+  "assertions": [
+    {
+      "name": "resolution.two_attempts",
+      "oracle": "resolution_attempts",
+      "params": {"expected": 2}
+    },
+    {
+      "name": "result.recovered_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "document_hits"}
+    },
+    {
+      "name": "evidence.recovered_source",
+      "oracle": "provenance_sources",
+      "params": {"expected": ["policy-kb"]}
+    }
+  ]
+}

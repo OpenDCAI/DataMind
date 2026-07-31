@@ -1,0 +1,41 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "surface.skill_resolve",
+  "title": "Resolve and invoke an immutable governed Skill",
+  "layer": "surface_contract",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "skill-resolve",
+  "supported_modes": ["oracle_plan"],
+  "context": {
+    "budget": {"max_actions": 3}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["skill"],
+    "required_source_ids": ["enterprise-skills"],
+    "required_operations": ["resolve_skill", "invoke_skill"],
+    "allowed_operations": ["resolve_skill", "invoke_skill"],
+    "max_effect": "READ",
+    "max_actions": 2
+  },
+  "assertions": [
+    {
+      "name": "result.native_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "skill_result"}
+    },
+    {
+      "name": "result.normalized_label",
+      "oracle": "value_path_equals",
+      "params": {
+        "path": ["output", "label"],
+        "expected": "CRITICAL"
+      }
+    },
+    {
+      "name": "evidence.skill_source",
+      "oracle": "provenance_sources",
+      "params": {"expected": ["enterprise-skills"]}
+    }
+  ]
+}

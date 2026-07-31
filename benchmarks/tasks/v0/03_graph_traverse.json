@@ -1,0 +1,41 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "surface.graph_traverse",
+  "title": "Traverse bounded enterprise graph paths",
+  "layer": "surface_contract",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "graph-traverse",
+  "supported_modes": ["oracle_plan"],
+  "context": {
+    "budget": {"max_actions": 2}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["graph"],
+    "required_source_ids": ["enterprise-graph"],
+    "required_operations": ["traverse"],
+    "allowed_operations": ["traverse"],
+    "max_effect": "READ",
+    "max_actions": 1
+  },
+  "assertions": [
+    {
+      "name": "result.native_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "graph_paths"}
+    },
+    {
+      "name": "result.country_path",
+      "oracle": "value_path_equals",
+      "params": {
+        "path": ["paths", 1, "nodes", 2, "node_id"],
+        "expected": "China"
+      }
+    },
+    {
+      "name": "evidence.path_count",
+      "oracle": "evidence_count",
+      "params": {"expected": 2}
+    }
+  ]
+}

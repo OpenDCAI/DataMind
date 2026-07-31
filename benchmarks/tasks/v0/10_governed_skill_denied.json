@@ -1,0 +1,35 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "failure.governed_skill_denied",
+  "title": "Reject an unapproved state-changing Skill before execution",
+  "layer": "failure_replay",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "governed-skill-denied",
+  "supported_modes": ["oracle_plan"],
+  "expected_error": "EffectPolicyError",
+  "context": {
+    "max_effect": "INTERNAL_WRITE",
+    "budget": {"max_actions": 2}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["skill"],
+    "required_source_ids": ["enterprise-skills"],
+    "required_operations": ["invoke_skill"],
+    "allowed_operations": ["invoke_skill"],
+    "max_effect": "INTERNAL_WRITE",
+    "max_actions": 1
+  },
+  "assertions": [
+    {
+      "name": "effect.denied_type",
+      "oracle": "error_type",
+      "params": {"expected": "EffectPolicyError"}
+    },
+    {
+      "name": "trace.failed",
+      "oracle": "trace_terminal",
+      "params": {"expected": "failed"}
+    }
+  ]
+}

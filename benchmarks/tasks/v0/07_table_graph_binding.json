@@ -1,0 +1,44 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "cross.table_graph_binding",
+  "title": "Bind a table entity into graph traversal",
+  "layer": "cross_surface",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "table-graph-binding",
+  "supported_modes": ["oracle_plan"],
+  "context": {
+    "budget": {"max_actions": 4}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["table", "graph"],
+    "required_source_ids": ["warehouse", "enterprise-graph"],
+    "required_operations": ["query", "project", "traverse"],
+    "allowed_operations": ["query", "project", "traverse"],
+    "precedence": [
+      {"before": "query", "after": "traverse"}
+    ],
+    "max_effect": "READ",
+    "max_actions": 3
+  },
+  "assertions": [
+    {
+      "name": "result.native_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "graph_paths"}
+    },
+    {
+      "name": "result.bound_location",
+      "oracle": "value_path_equals",
+      "params": {
+        "path": ["paths", 0, "nodes", 1, "node_id"],
+        "expected": "Shanghai"
+      }
+    },
+    {
+      "name": "evidence.graph_result",
+      "oracle": "provenance_sources",
+      "params": {"expected": ["enterprise-graph"]}
+    }
+  ]
+}

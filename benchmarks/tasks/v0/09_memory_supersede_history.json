@@ -1,0 +1,53 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "state.memory_supersede_history",
+  "title": "Supersede memory without erasing historical belief",
+  "layer": "state_shift",
+  "fixture_id": "enterprise-v0",
+  "workload_id": "memory-supersede-history",
+  "supported_modes": ["oracle_plan"],
+  "context": {
+    "max_effect": "INTERNAL_WRITE",
+    "budget": {"max_actions": 5},
+    "readable_scopes": [
+      {"kind": "principal", "scope_id": "alice"}
+    ],
+    "writable_scopes": [
+      {"kind": "principal", "scope_id": "alice"}
+    ],
+    "memory_origin": "user_explicit"
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["memory"],
+    "required_source_ids": ["agent-memory"],
+    "required_operations": ["propose_mutation", "apply_mutation", "recall"],
+    "allowed_operations": ["propose_mutation", "apply_mutation", "recall"],
+    "max_effect": "INTERNAL_WRITE",
+    "max_actions": 4
+  },
+  "assertions": [
+    {
+      "name": "state.current_value",
+      "oracle": "value_path_equals",
+      "params": {
+        "path": ["records", 0, "content"],
+        "expected": "Communication preference is phone."
+      }
+    },
+    {
+      "name": "state.historical_value",
+      "oracle": "state_value_path_equals",
+      "params": {
+        "key": "historical_result",
+        "path": ["value", "records", 0, "content"],
+        "expected": "Communication preference is email."
+      }
+    },
+    {
+      "name": "result.native_kind",
+      "oracle": "result_kind",
+      "params": {"expected": "memory_records"}
+    }
+  ]
+}

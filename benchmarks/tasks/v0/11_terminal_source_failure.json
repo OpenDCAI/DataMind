@@ -1,0 +1,35 @@
+{
+  "schema": "datamind.benchmark_task",
+  "version": "0.1",
+  "task_id": "failure.terminal_source_failure",
+  "title": "Record a deterministic source failure and forbid replay",
+  "layer": "failure_replay",
+  "fixture_id": "enterprise-faulty-v0",
+  "workload_id": "terminal-source-failure",
+  "supported_modes": ["oracle_plan"],
+  "expected_error": "SourceExecutionError",
+  "replay": "forbidden",
+  "context": {
+    "budget": {"max_actions": 2}
+  },
+  "plan_constraints": {
+    "required_source_kinds": ["document"],
+    "required_source_ids": ["policy-failing"],
+    "required_operations": ["search"],
+    "allowed_operations": ["search"],
+    "max_effect": "READ",
+    "max_actions": 1
+  },
+  "assertions": [
+    {
+      "name": "failure.source_type",
+      "oracle": "error_type",
+      "params": {"expected": "SourceExecutionError"}
+    },
+    {
+      "name": "trace.failed",
+      "oracle": "trace_terminal",
+      "params": {"expected": "failed"}
+    }
+  ]
+}
