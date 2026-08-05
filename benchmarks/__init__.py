@@ -1,5 +1,6 @@
 """Executable acceptance benchmark for the typed DataMind runtime."""
 
+from .diagnostics import diagnostic_report, task_catalog
 from .environment import BenchmarkEnvironment
 from .faults import FaultInjectingSource, FaultRule
 from .oracle import AssertionVerdict, OracleRegistry
@@ -39,6 +40,7 @@ __all__ = [
     "BenchmarkSuiteResult",
     "BenchmarkValidationError",
     "ContextSpec",
+    "diagnostic_report",
     "FaultInjectingSource",
     "FaultRule",
     "OracleRegistry",
@@ -49,6 +51,7 @@ __all__ = [
     "RunnerMode",
     "TaskLayer",
     "TaskSpec",
+    "task_catalog",
     "WorkloadResult",
     "load_task",
     "load_tasks",

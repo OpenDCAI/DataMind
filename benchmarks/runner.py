@@ -11,12 +11,15 @@ from datamind.engine import Engine, Resolution
 from datamind.intelligence import DataPlanCompiler
 from datamind.kernel import (
     EffectLevel,
+    ExecutionTrace,
     EvaluatorKind,
     OutcomeAssertion,
     OutcomeRecord,
     OutcomeTarget,
     OutcomeTargetKind,
     ReplayError,
+    ResolutionTrace,
+    TraceNotFoundError,
     Usage,
 )
 from datamind.ports import (
@@ -78,6 +81,8 @@ class WorkloadResult:
 
 @dataclass(frozen=True)
 class RunObservation:
+    """Immutable facts captured from one benchmark execution."""
+
     task: TaskSpec
     mode: RunnerMode
     environment: BenchmarkEnvironment
@@ -87,8 +92,46 @@ class RunObservation:
     error: Optional[Exception]
     trace_ids: Tuple[str, ...]
     target_trace_id: Optional[str]
+    execution_traces: Tuple[ExecutionTrace, ...] = ()
+    resolution_trace: Optional[ResolutionTrace] = None
     replayed: Optional[ResultEnvelope[Any]] = None
     replay_error: Optional[Exception] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "plans", tuple(self.plans))
+        object.__setattr__(self, "trace_ids", tuple(self.trace_ids))
+        object.__setattr__(
+            self,
+            "execution_traces",
+            tuple(self.execution_traces),
+        )
+        if any(
+            not isinstance(item, ExecutionTrace)
+            for item in self.execution_traces
+        ):
+            raise BenchmarkValidationError(
+                "observation execution_traces must contain ExecutionTrace "
+                "values"
+            )
+        if self.resolution_trace is not None and not isinstance(
+            self.resolution_trace,
+            ResolutionTrace,
+        ):
+            raise BenchmarkValidationError(
+                "observation resolution_trace must be a ResolutionTrace"
+            )
+
+    def trace(self, trace_id: str) -> Optional[ExecutionTrace]:
+        """Return a captured trace without consulting the live environment."""
+
+        return next(
+            (
+                trace
+                for trace in self.execution_traces
+                if trace.trace_id == trace_id
+            ),
+            None,
+        )
 
 
 @dataclass(frozen=True)
@@ -203,6 +246,7 @@ class BenchmarkRunner:
         environment = self._registry.environment(task.fixture_id)
         engine = environment.engine()
         resolution = None
+        resolution_id = None
         workload = None
         try:
             if mode is RunnerMode.ORACLE_PLAN:
@@ -224,6 +268,7 @@ class BenchmarkRunner:
                     )
                 engine = environment.engine(compiler=compiler)
                 context = environment.context(task, run_id)
+                resolution_id = context.trace_id
                 try:
                     resolution = await engine.resolve(
                         task.request or "",
@@ -243,6 +288,7 @@ class BenchmarkRunner:
                             resolution.final_attempt.trace_id
                         ),
                     )
+                    resolution_id = resolution.resolution_id
                 except Exception as error:
                     workload = WorkloadResult(
                         error=error,
@@ -263,6 +309,15 @@ class BenchmarkRunner:
                     except Exception as error:
                         replay_error = error
 
+            execution_traces = await self._capture_execution_traces(
+                environment,
+                workload.trace_ids,
+            )
+            resolution_trace = await self._capture_resolution_trace(
+                environment,
+                resolution_id,
+            )
+
             observation = RunObservation(
                 task=task,
                 mode=mode,
@@ -273,6 +328,8 @@ class BenchmarkRunner:
                 error=workload.error,
                 trace_ids=workload.trace_ids,
                 target_trace_id=workload.replay_trace_id,
+                execution_traces=execution_traces,
+                resolution_trace=resolution_trace,
                 replayed=replayed,
                 replay_error=replay_error,
             )
@@ -323,6 +380,43 @@ class BenchmarkRunner:
             )
         finally:
             environment.close()
+
+    @staticmethod
+    async def _capture_execution_traces(
+        environment: BenchmarkEnvironment,
+        trace_ids: Tuple[str, ...],
+    ) -> Tuple[ExecutionTrace, ...]:
+        """Snapshot content-safe execution traces before environment close."""
+
+        captured = []
+        seen = set()
+        for trace_id in trace_ids:
+            if trace_id in seen:
+                continue
+            seen.add(trace_id)
+            try:
+                captured.append(
+                    await environment.trace_store.get(trace_id)
+                )
+            except TraceNotFoundError:
+                continue
+        return tuple(captured)
+
+    @staticmethod
+    async def _capture_resolution_trace(
+        environment: BenchmarkEnvironment,
+        resolution_id: Optional[str],
+    ) -> Optional[ResolutionTrace]:
+        """Snapshot the parent resolution trace when planning was used."""
+
+        if resolution_id is None:
+            return None
+        try:
+            return await environment.trace_store.get_resolution(
+                resolution_id
+            )
+        except TraceNotFoundError:
+            return None
 
     async def run_suite(
         self,

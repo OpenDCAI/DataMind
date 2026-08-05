@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,9 +15,11 @@ from benchmarks import (
     PlanConstraints,
     RunnerMode,
     TaskSpec,
+    diagnostic_report,
 )
-from benchmarks.run_v01 import run_v01
+from benchmarks.run_v01 import main, run_v01
 from benchmarks.v0 import default_registry, load_v01_tasks
+from datamind.adapters.audit import InMemoryTraceStore
 
 
 class BenchmarkSchemaTests(unittest.TestCase):
@@ -197,6 +201,120 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("Travel reimbursement policy", serialized)
         self.assertNotIn("result_payload", serialized)
+
+    async def test_observation_captures_traces_before_environment_close(
+        self,
+    ) -> None:
+        task = load_v01_tasks()[0]
+        run = await BenchmarkRunner(default_registry()).run(
+            task,
+            run_id="captured-trace",
+        )
+
+        self.assertEqual(
+            tuple(
+                trace.trace_id
+                for trace in run.observation.execution_traces
+            ),
+            run.observation.trace_ids,
+        )
+        run.observation.environment.trace_store = InMemoryTraceStore()
+        report = diagnostic_report(run, show_trace=True)
+
+        self.assertEqual(
+            len(report["traces"]["executions"]),
+            len(run.observation.trace_ids),
+        )
+        self.assertEqual(report["traces"]["missing_trace_ids"], [])
+
+    async def test_diagnostic_report_is_structural_and_content_safe(
+        self,
+    ) -> None:
+        task = load_v01_tasks()[0]
+        run = await BenchmarkRunner(default_registry()).run(
+            task,
+            run_id="diagnostic-summary",
+        )
+
+        report = diagnostic_report(
+            run,
+            show_plan=True,
+            show_trace=True,
+            show_result=True,
+        )
+        serialized = json.dumps(report, sort_keys=True)
+
+        operation = report["plans"][0]["operations"][0]
+        self.assertEqual(operation["operation"], "search")
+        self.assertEqual(report["result"]["result_kind"], "document_hits")
+        self.assertEqual(report["result"]["native_type"], "tuple")
+        self.assertEqual(
+            report["result"]["native_shape"],
+            {
+                "python_type": "tuple",
+                "item_count": 1,
+                "item_types": ["DocumentHit"],
+            },
+        )
+        self.assertNotIn("Travel reimbursement policy", serialized)
+        self.assertNotIn("travel reimbursement policy", serialized)
+
+    async def test_single_task_selection_preserves_canonical_run_identity(
+        self,
+    ) -> None:
+        suite = await run_v01("surface.graph_traverse")
+
+        self.assertEqual(len(suite.runs), 1)
+        self.assertEqual(suite.runs[0].task_id, "surface.graph_traverse")
+        self.assertEqual(suite.runs[0].run_id, "v01-003")
+
+
+class BenchmarkDiagnosticCliTests(unittest.TestCase):
+    def test_list_describes_tasks_without_run_output(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["--list"])
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(payload["tasks"]), 14)
+        self.assertEqual(
+            payload["tasks"][0]["task_id"],
+            "surface.document_search",
+        )
+        self.assertNotIn("runs", payload)
+
+    def test_single_task_can_project_plan_trace_and_result(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--task",
+                    "surface.document_search",
+                    "--show-plan",
+                    "--show-trace",
+                    "--show-result",
+                ]
+            )
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["tasks"], 1)
+        self.assertEqual(payload["passed"], 1)
+        self.assertEqual(len(payload["diagnostics"]), 1)
+        diagnostic = payload["diagnostics"][0]
+        self.assertIn("plans", diagnostic)
+        self.assertIn("traces", diagnostic)
+        self.assertIn("result", diagnostic)
+
+    def test_diagnostic_view_requires_task_isolation(self) -> None:
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                main(["--show-plan"])
+
+        self.assertEqual(raised.exception.code, 2)
 
 
 if __name__ == "__main__":

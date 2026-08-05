@@ -263,9 +263,8 @@ async def _trace_terminal(
     trace_id = observation.target_trace_id
     if trace_id is None:
         return AssertionVerdict.boolean(False)
-    try:
-        trace = await observation.environment.trace_store.get(trace_id)
-    except Exception:
+    trace = observation.trace(trace_id)
+    if trace is None:
         return AssertionVerdict.boolean(False)
     expected = params.get("expected")
     if expected == "completed":
