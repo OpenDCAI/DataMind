@@ -31,10 +31,8 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    # Model client — we drive the agent loop ourselves via the Anthropic
-    # Messages API (/v1/messages). This keeps us decoupled from the `claude`
-    # CLI, which on some installs is a vendor-rebranded binary that ignores
-    # ANTHROPIC_API_KEY.
+    # Model clients — the native loop supports Anthropic Messages and OpenAI
+    # Chat Completions; httpx also drives the OpenAI-compatible path directly.
     "anthropic>=0.40",
     "httpx[http2]>=0.27",
 

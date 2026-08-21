@@ -20,6 +20,14 @@ def build_embedding(cfg: EmbeddingConfig, *, fallback_llm: LLMConfig | None = No
         "model": cfg.model,
         "batch_size": cfg.batch_size,
     }
+    if cfg.provider in {"openai", "openai_compatible"}:
+        kwargs.update({
+            "timeout_s": cfg.timeout_s,
+            "connect_timeout_s": cfg.connect_timeout_s,
+            "max_retries": cfg.max_retries,
+            "backoff_base_s": cfg.backoff_base_s,
+            "max_batch_tokens": cfg.max_batch_tokens,
+        })
 
     api_key = cfg.api_key
     api_base = cfg.api_base

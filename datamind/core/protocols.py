@@ -10,9 +10,92 @@ in provider-specific config, not in the protocol.
 """
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol, Sequence, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Literal, Protocol, Sequence, runtime_checkable
 
 from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# Model protocol DTOs
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ModelUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_create_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class ModelResponse:
+    """Vendor-neutral assistant response.
+
+    Blocks use the small common subset understood by the agent loop:
+    ``{"type": "text", "text": ...}`` and
+    ``{"type": "tool_use", "id": ..., "name": ..., "input": {...}}``.
+    """
+
+    content: list[dict[str, Any]]
+    stop_reason: str
+    usage: ModelUsage = field(default_factory=ModelUsage)
+    resolved_model: str | None = None
+
+
+@dataclass(frozen=True)
+class ModelStreamEvent:
+    type: Literal["text", "done"]
+    delta: str = ""
+    response: ModelResponse | None = None
+
+
+@runtime_checkable
+class TextModelClient(Protocol):
+    """Protocol-neutral text generation used by internal capabilities."""
+
+    protocol: str
+
+    async def generate_text(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        max_tokens: int = 512,
+        temperature: float = 0.0,
+    ) -> str: ...
+
+    async def aclose(self) -> None: ...
+
+
+@runtime_checkable
+class ToolCallingModelClient(TextModelClient, Protocol):
+    """Common contract for Anthropic and OpenAI tool calling."""
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+        tool_choice: str | None = None,
+    ) -> ModelResponse: ...
+
+    def stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+        tool_choice: str | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +288,7 @@ class GraphStore(Protocol):
         *,
         max_hops: int = 2,
         relation_filter: list[str] | None = None,
+        max_results: int = 100,
     ) -> list[GraphPath]: ...
 
     async def neighbors(
@@ -212,6 +296,8 @@ class GraphStore(Protocol):
         entity: str,
         *,
         direction: str = "both",
+        relation_filter: list[str] | None = None,
+        limit: int = 100,
     ) -> list[Edge]: ...
 
 

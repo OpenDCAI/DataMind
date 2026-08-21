@@ -13,9 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from anthropic import AsyncAnthropic
-
 from datamind.capabilities.db import DBService, build_db_service, build_db_tools
+from datamind.capabilities.embedding import build_embedding
 from datamind.capabilities.graph import GraphService, build_graph_service, build_graph_tools
 from datamind.capabilities.hooks import AuditLogHook, DestructiveSqlHook, PathAllowlistHook
 from datamind.capabilities.ingest import (
@@ -37,10 +36,15 @@ from datamind.config import Settings
 from datamind.core.contracts import ToolAccess
 from datamind.core.hooks import HookChain
 from datamind.core.logging import get_logger
+from datamind.core.logging import bind_context, current_context
+from datamind.core.context import RequestContext
+from datamind.core.model_clients import build_model_client
+from datamind.core.protocols import EmbeddingProvider, TextModelClient, ToolCallingModelClient
 from datamind.core.tools import ToolRegistry
 
 from .base import AgentLoopConfig, AgentLoopProtocol
 from .loop_native import NativeAgentLoop
+from .loop_openai import OpenAICompatibleAgentLoop
 from .prompts import build_retrieve_system_prompt, build_store_system_prompt
 
 _log = get_logger("agent.assemble")
@@ -50,13 +54,15 @@ _log = get_logger("agent.assemble")
 class AgentServices:
     """Long-lived services shared by both agents."""
 
-    client: AsyncAnthropic
-    kb: KBService
-    db: DBService
-    graph: GraphService
-    skills: SkillsService
-    memory: MemoryService
-    ingest: IngestService
+    client: ToolCallingModelClient
+    fallback_client: TextModelClient
+    embedding: EmbeddingProvider | None = None
+    kb: KBService | None = None
+    db: DBService | None = None
+    graph: GraphService | None = None
+    skills: SkillsService | None = None
+    memory: MemoryService | None = None
+    ingest: IngestService | None = None
 
 
 @dataclass
@@ -70,27 +76,37 @@ class RetrieveAgent:
     ledger: IngestLedger | None = None
 
     @property
-    def client(self) -> AsyncAnthropic:
+    def client(self) -> ToolCallingModelClient:
         return self.services.client
 
     @property
     def kb(self) -> KBService:
+        if self.services.kb is None:
+            raise RuntimeError("KB surface is disabled")
         return self.services.kb
 
     @property
     def db(self) -> DBService:
+        if self.services.db is None:
+            raise RuntimeError("DB surface is disabled")
         return self.services.db
 
     @property
     def graph(self) -> GraphService:
+        if self.services.graph is None:
+            raise RuntimeError("Graph surface is disabled")
         return self.services.graph
 
     @property
     def skills(self) -> SkillsService:
+        if self.services.skills is None:
+            raise RuntimeError("Skills surface is disabled")
         return self.services.skills
 
     @property
     def memory(self) -> MemoryService:
+        if self.services.memory is None:
+            raise RuntimeError("Memory surface is disabled")
         return self.services.memory
 
     @property
@@ -99,9 +115,15 @@ class RetrieveAgent:
 
     async def warmup(self) -> dict[str, Any]:
         info: dict[str, Any] = {}
-        info["skills"] = await self.skills.load()
-        info["graph"] = await self.graph.load_from_profile()
-        info["kb_chunks"] = await self.kb.count()
+        info["skills"] = (
+            await self.services.skills.load() if self.services.skills else
+            {"manifests": 0, "indexed": 0, "code_tools": 0}
+        )
+        info["graph"] = (
+            await self.services.graph.load_from_profile() if self.services.graph else
+            {"triples_loaded": 0}
+        )
+        info["kb_chunks"] = await self.services.kb.count() if self.services.kb else 0
         info["revision"] = self.revision
         info["hooks"] = self.hooks.names() if self.hooks else []
         _log.info("retrieve_agent_warmup", extra=info)
@@ -112,8 +134,11 @@ class RetrieveAgent:
         message: str,
         *,
         history: list[dict] | None = None,
+        final_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return await self.loop.run_turn(user_message=message, history=history)
+        return await self.loop.run_turn(
+            user_message=message, history=history, final_contract=final_contract,
+        )
 
 
 @dataclass
@@ -127,7 +152,7 @@ class StoreAgent:
     hooks: HookChain | None = None
 
     @property
-    def client(self) -> AsyncAnthropic:
+    def client(self) -> ToolCallingModelClient:
         return self.services.client
 
     @property
@@ -150,6 +175,8 @@ class DataMind:
     store_agent: StoreAgent
     retrieve_agent: RetrieveAgent
     services: AgentServices
+    profile: str = "default"
+    _closed: bool = False
 
     @property
     def store(self) -> StoreAgent:
@@ -158,6 +185,12 @@ class DataMind:
     @property
     def retrieve(self) -> RetrieveAgent:
         return self.retrieve_agent
+
+    async def __aenter__(self) -> "DataMind":
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await self.aclose()
 
     async def warmup(self) -> dict[str, Any]:
         return await self.retrieve_agent.warmup()
@@ -168,15 +201,48 @@ class DataMind:
         *,
         history: list[dict] | None = None,
     ) -> dict[str, Any]:
-        return await self.store_agent.store(message, history=history)
+        if current_context() is not None:
+            return await self.store_agent.store(message, history=history)
+        with bind_context(RequestContext.new(profile=self.profile)):
+            return await self.store_agent.store(message, history=history)
 
     async def query(
         self,
         message: str,
         *,
         history: list[dict] | None = None,
+        final_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return await self.retrieve_agent.query(message, history=history)
+        if current_context() is not None:
+            return await self.retrieve_agent.query(
+                message, history=history, final_contract=final_contract,
+            )
+        with bind_context(RequestContext.new(profile=self.profile)):
+            return await self.retrieve_agent.query(
+                message, history=history, final_contract=final_contract,
+            )
+
+    async def aclose(self) -> None:
+        """Idempotently close clients, engines, stores, and providers."""
+        if self._closed:
+            return
+        self._closed = True
+        resources = [
+            self.services.db,
+            self.services.graph,
+            self.services.kb,
+            self.services.embedding,
+            self.services.fallback_client,
+            self.services.client,
+        ]
+        seen: set[int] = set()
+        for resource in resources:
+            if resource is None or id(resource) in seen:
+                continue
+            seen.add(id(resource))
+            close = getattr(resource, "aclose", None)
+            if callable(close):
+                await close()
 
 
 def _build_hook_chain(settings: Settings) -> HookChain | None:
@@ -199,7 +265,7 @@ def _build_hook_chain(settings: Settings) -> HookChain | None:
 def _build_loop(
     *,
     settings: Settings,
-    client: AsyncAnthropic,
+    client: ToolCallingModelClient,
     tools: ToolRegistry,
     system_prompt: str,
     hooks: HookChain | None,
@@ -210,6 +276,11 @@ def _build_loop(
         temperature=settings.llm.temperature,
         system_prompt=system_prompt,
         max_tool_turns=settings.agent.max_turns,
+        max_tool_calls=settings.agent.max_tool_calls,
+        max_input_tokens=settings.agent.max_input_tokens,
+        max_tool_result_chars=settings.agent.max_tool_result_chars,
+        max_tool_result_rows=settings.agent.max_tool_result_rows,
+        wall_clock_timeout_s=settings.agent.wall_clock_timeout_s,
     )
     if settings.agent.backend == "sdk":
         from .loop_sdk import SdkAgentLoop  # noqa: PLC0415
@@ -221,7 +292,12 @@ def _build_loop(
             ccr_api_key=settings.agent.ccr_api_key.get_secret_value(),
             hooks=hooks,
         )
-    return NativeAgentLoop(client=client, tools=tools, config=config, hooks=hooks)
+    loop_type = (
+        OpenAICompatibleAgentLoop
+        if settings.llm.protocol == "openai_chat_completions"
+        else NativeAgentLoop
+    )
+    return loop_type(client=client, tools=tools, config=config, hooks=hooks)
 
 
 async def build_datamind(
@@ -230,28 +306,57 @@ async def build_datamind(
     enable: set[str] | None = None,
 ) -> DataMind:
     """Build both agents over one shared set of capability services."""
-    active = enable or {"kb", "db", "graph", "skills", "memory"}
+    defaults = {"kb", "db", "graph", "skills", "memory"}
+    active = defaults if enable is None else set(enable)
+    unknown = active - defaults
+    if unknown:
+        raise ValueError(f"Unknown DataMind surfaces: {sorted(unknown)}")
     settings.ensure_dirs()
 
-    client = AsyncAnthropic(
-        base_url=str(settings.llm.api_base),
-        api_key=settings.llm.api_key.get_secret_value(),
-        timeout=settings.llm.timeout_s,
+    client = build_model_client(settings.llm)
+    fallback_protocol = settings.llm.fallback_protocol or settings.llm.protocol
+    fallback_client = (
+        client if fallback_protocol == settings.llm.protocol
+        else build_model_client(settings.llm, protocol=fallback_protocol)
     )
-    kb = build_kb_service(settings, llm_client=client)
-    db = build_db_service(settings, llm_client=client)
-    graph = build_graph_service(settings)
-    skills = build_skills_service(settings)
-    memory = build_memory_service(settings, llm_client=client)
-    ingest = build_ingest_service(
-        settings=settings,
-        kb=kb,
-        db=db,
-        graph=graph,
-        llm_client=client,
+
+    embedding: EmbeddingProvider | None = None
+    needs_embedding = bool(active & {"kb", "skills"}) or (
+        "memory" in active and settings.memory.long_term_enabled
+    )
+    if needs_embedding:
+        embedding = build_embedding(settings.embedding, fallback_llm=settings.llm)
+
+    kb = (
+        build_kb_service(settings, llm_client=fallback_client, embedding=embedding)
+        if "kb" in active else None
+    )
+    db = build_db_service(settings, llm_client=client) if "db" in active else None
+    graph = build_graph_service(settings) if "graph" in active else None
+    skills = (
+        build_skills_service(settings, embedding=embedding)
+        if "skills" in active else None
+    )
+    memory = (
+        build_memory_service(
+            settings, llm_client=fallback_client, embedding=embedding,
+        )
+        if "memory" in active else None
+    )
+    ingest = (
+        build_ingest_service(
+            settings=settings,
+            kb=kb,
+            db=db,
+            graph=graph,
+            llm_client=fallback_client,
+        )
+        if active & {"kb", "db", "graph"} else None
     )
     services = AgentServices(
         client=client,
+        fallback_client=fallback_client,
+        embedding=embedding,
         kb=kb,
         db=db,
         graph=graph,
@@ -261,20 +366,25 @@ async def build_datamind(
     )
 
     catalogue = ToolRegistry()
-    ingest_tools = build_ingest_tools(ingest)
+    ingest_tools = build_ingest_tools(ingest) if ingest is not None else []
     if "kb" in active:
+        assert kb is not None
         catalogue.extend(build_kb_tools(kb))
         catalogue.extend([t for t in ingest_tools if t.surface and t.surface.value == "kb"])
     if "db" in active:
+        assert db is not None
         catalogue.extend(build_db_tools(db))
         catalogue.extend([t for t in ingest_tools if t.surface and t.surface.value == "db"])
     if "graph" in active:
+        assert graph is not None
         catalogue.extend(build_graph_tools(graph))
         catalogue.extend([t for t in ingest_tools if t.surface and t.surface.value == "graph"])
     if "skills" in active:
+        assert skills is not None
         catalogue.extend(build_skills_tools(skills))
         catalogue.extend(build_skills_store_tools(skills))
     if "memory" in active:
+        assert memory is not None
         catalogue.extend(build_memory_tools(memory))
 
     retrieve_tools = catalogue.select(access={ToolAccess.READ, ToolAccess.UTILITY})
@@ -334,6 +444,7 @@ async def build_datamind(
         store_agent=store_agent,
         retrieve_agent=retrieve_agent,
         services=services,
+        profile=settings.data.profile,
     )
 
 

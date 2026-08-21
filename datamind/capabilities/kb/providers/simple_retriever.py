@@ -9,6 +9,7 @@ from typing import Any
 from datamind.core.logging import get_logger
 from datamind.core.protocols import EmbeddingProvider, RetrievedChunk, VectorStore
 from datamind.core.registry import retriever_registry
+from datamind.capabilities.kb.filters import validate_metadata_filter
 
 _log = get_logger("retriever.simple")
 
@@ -33,6 +34,7 @@ class SimpleRetriever:
         top_k: int = 5,
         filters: dict[str, Any] | None = None,
     ) -> list[RetrievedChunk]:
+        validate_metadata_filter(filters)
         vec = await self._embed.embed_query(query)
         chunks = await self._store.query(vec, top_k=top_k, where=filters)
         _log.info(

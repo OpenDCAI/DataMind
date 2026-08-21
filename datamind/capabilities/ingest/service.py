@@ -15,8 +15,8 @@ Design notes:
   repeated calls don't multiply rows.
 - Path safety: `_resolve_safe_path` guards against ".." traversal AND
   enforces an allow-list of roots (profile data_dir + cwd by default).
-- LLM triple extraction uses the same `anthropic` AsyncAnthropic client
-  the rest of DataMind already shares — no new dependencies.
+- LLM triple extraction uses the same protocol-neutral model client as the
+  rest of DataMind — no hidden provider-specific endpoint.
 """
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from anthropic import AsyncAnthropic
 from sqlalchemy import text as sql_text
 
 from datamind.capabilities.kb.indexer import (
@@ -41,7 +40,7 @@ from datamind.capabilities.db.service import DBService
 from datamind.capabilities.graph.service import GraphService
 from datamind.core.errors import CapabilityError
 from datamind.core.logging import get_logger
-from datamind.core.protocols import GraphTriple
+from datamind.core.protocols import GraphTriple, TextModelClient
 
 _log = get_logger("ingest")
 
@@ -81,10 +80,10 @@ class IngestService:
     def __init__(
         self,
         *,
-        kb: KBService,
-        db: DBService,
-        graph: GraphService,
-        llm_client: AsyncAnthropic,
+        kb: KBService | None,
+        db: DBService | None,
+        graph: GraphService | None,
+        llm_client: TextModelClient,
         llm_model: str,
         profile_data_dir: Path,
         chunk_size: int,
@@ -166,6 +165,8 @@ class IngestService:
         persist: bool = True,
     ) -> dict[str, Any]:
         """Ingest inline text and optionally persist it under the profile."""
+        if self._kb is None:
+            raise CapabilityError("ingest", "KB surface is disabled")
         content = text.strip()
         if not content:
             raise CapabilityError("ingest", "text is required")
@@ -325,6 +326,8 @@ class IngestService:
         Chunks are frozen dataclasses, so we keep the embedding vectors in
         a parallel list and pass them straight into the store's `add` API.
         """
+        if self._kb is None:
+            raise CapabilityError("ingest", "KB surface is disabled")
         provider = self._kb.embedding
         store = self._kb.vector_store
         texts = [c.text for c in chunks]
@@ -355,6 +358,8 @@ class IngestService:
         - if_exists: "append" (default) | "replace" | "fail"
         - table name is validated to prevent SQL injection.
         """
+        if self._db is None:
+            raise CapabilityError("ingest", "DB surface is disabled")
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", table):
             raise CapabilityError("ingest", f"invalid table name '{table}'. Use letters/digits/underscore only.")
         if if_exists not in ("append", "replace", "fail"):
@@ -424,6 +429,7 @@ class IngestService:
             "file": str(resolved), "table": table,
             "rows": len(rows), "cols": len(safe_cols),
         })
+        self._db.invalidate_schema_cache()
         return {
             "table": table,
             "columns": safe_cols,
@@ -440,6 +446,8 @@ class IngestService:
         if_exists: str = "append",
     ) -> dict[str, Any]:
         """Import inline JSON-like records into a table as TEXT columns."""
+        if self._db is None:
+            raise CapabilityError("ingest", "DB surface is disabled")
         if not records:
             raise CapabilityError("ingest", "records must be a non-empty array")
         if not all(isinstance(row, dict) for row in records):
@@ -502,6 +510,7 @@ class IngestService:
                 sql_text(f'INSERT INTO "{table}" ({insert_cols}) VALUES ({placeholders})'),
                 rows,
             )
+        self._db.invalidate_schema_cache()
         return {
             "table": table,
             "columns": safe_cols,
@@ -525,6 +534,8 @@ class IngestService:
         deviations (markdown fence wrappers etc.) but reject anything that
         doesn't parse.
         """
+        if self._graph is None:
+            raise CapabilityError("ingest", "Graph surface is disabled")
         if not text or not text.strip():
             raise CapabilityError("ingest", f"text is required")
 
@@ -542,13 +553,9 @@ class IngestService:
             "Text:\n---\n" + text.strip() + "\n---"
         )
 
-        msg = await self._client.messages.create(
-            model=self._model,
-            max_tokens=2048,
-            temperature=0.0,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text").strip()
+        raw = (await self._client.generate_text(
+            prompt, model=self._model, max_tokens=2048, temperature=0.0,
+        )).strip()
 
         triples = self._parse_triples_json(raw)
         if not triples:
@@ -619,10 +626,10 @@ class IngestService:
 def build_ingest_service(
     *,
     settings,
-    kb: KBService,
-    db: DBService,
-    graph: GraphService,
-    llm_client: AsyncAnthropic,
+    kb: KBService | None,
+    db: DBService | None,
+    graph: GraphService | None,
+    llm_client: TextModelClient,
 ) -> IngestService:
     return IngestService(
         kb=kb,

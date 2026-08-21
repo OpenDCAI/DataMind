@@ -35,8 +35,21 @@ def _tokenize(text: str) -> list[str]:
 
 
 def exact_match(prediction: str, reference: str) -> bool:
-    """标准答案的文本（normalize 后）是否完整出现在生成答案中。"""
-    return _normalize(reference) in _normalize(prediction)
+    """严格比较 normalize 后的完整答案。"""
+    return _normalize(reference) == _normalize(prediction)
+
+
+def load_results(path: str) -> list[dict]:
+    """Accept either the current checkpoint JSONL or legacy JSON arrays."""
+    with open(path, "r", encoding="utf-8") as handle:
+        raw = handle.read()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    if not isinstance(parsed, list) or not all(isinstance(row, dict) for row in parsed):
+        raise ValueError("results must be a JSON array or JSONL objects")
+    return parsed
 
 
 def token_f1(prediction: str, reference: str) -> float:
@@ -206,8 +219,7 @@ def main():
     parser.add_argument("--golden", action="store_true", help="额外计算 golden 指标 (semantic similarity + factual correctness)")
     args = parser.parse_args()
 
-    with open(args.results, "r", encoding="utf-8") as f:
-        results = json.load(f)
+    results = load_results(args.results)
 
     has_ref = sum(1 for r in results if "reference_answer" in r)
     if has_ref == 0:

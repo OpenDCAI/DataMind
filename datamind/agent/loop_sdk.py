@@ -323,6 +323,7 @@ class SdkAgentLoop:
         *,
         user_message: str,
         history: list[dict] | None = None,
+        final_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Non-streaming turn. Collects every event, returns final answer.
 
@@ -332,7 +333,9 @@ class SdkAgentLoop:
         concatenation — good enough for our current use, and swappable
         once we adopt SDK session resume.
         """
-        prompt = self._prompt_with_history(user_message, history)
+        prompt = self._prompt_with_history(
+            self._with_final_contract(user_message, final_contract), history
+        )
         answer_parts: list[str] = []
         tool_trace: list[dict[str, Any]] = []
         pending_trace: dict[str, dict[str, Any]] = {}
@@ -428,9 +431,12 @@ class SdkAgentLoop:
         *,
         user_message: str,
         history: list[dict] | None = None,
+        final_contract: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Stream AgentEvents for one turn. Translates SDK messages on the fly."""
-        prompt = self._prompt_with_history(user_message, history)
+        prompt = self._prompt_with_history(
+            self._with_final_contract(user_message, final_contract), history
+        )
 
         from claude_agent_sdk import (  # noqa: PLC0415
             AssistantMessage,
@@ -538,6 +544,18 @@ class SdkAgentLoop:
                     )
 
     # ---------------------------------------------------------------- util
+
+    @staticmethod
+    def _with_final_contract(
+        user_message: str, final_contract: dict[str, Any] | None,
+    ) -> str:
+        if not final_contract:
+            return user_message
+        return (
+            user_message
+            + "\n\nFinal answer contract (formatting constraints only):\n"
+            + json.dumps(final_contract, ensure_ascii=False, sort_keys=True)
+        )
 
     @staticmethod
     def _prompt_with_history(user_message: str, history: list[dict] | None) -> str:

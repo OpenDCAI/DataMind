@@ -28,21 +28,21 @@ pip install 'datamind[huggingface]'   # 本地 BGE / e5 嵌入
 pip install 'datamind[dev]'           # pytest + build + twine
 ```
 
-指向一个 **Anthropic 兼容**的网关即可开始对话：
+指向 Anthropic 或 OpenAI Chat Completions 兼容网关即可开始对话：
 
 ```bash
 export DATAMIND__LLM__API_BASE=https://your-gateway.example.com
 export DATAMIND__LLM__API_KEY=sk-ant-...
+export DATAMIND__LLM__PROTOCOL=anthropic  # 或 openai_chat_completions
 export DATAMIND__LLM__MODEL=claude-sonnet-4-6
 
 datamind chat                                          # 命令行
 python -m uvicorn datamind.server:app --port 8000      # 浏览器界面 http://127.0.0.1:8000
 ```
 
-> **DataMind 只讲 Anthropic 协议。** 每一次请求都走 Anthropic 的 `/v1/messages`
-> 协议、使用 Anthropic 格式的 key —— 代码里没有任何 OpenAI 客户端路径。如果你手上
-> 唯一的网关/key 只支持 **OpenAI 格式**，不要去改 DataMind：在它前面放一个转换器即可。
-> 详见 [自带 key —— CCR 桥接](#自带-key--ccr-桥接)。
+所选协议会同时用于外层工具循环和内部生成（NL2SQL、multi-query、Memory、Graph
+抽取）；模型名不会隐式决定协议。参见
+[ADR 0001](./docs/adr/0001-protocol-neutral-model-clients.md)。
 
 ---
 
@@ -91,7 +91,8 @@ DATAMIND__DATA__PROFILE=enterprise_demo \
 # → http://127.0.0.1:8000  —— 把任意 .md / .csv / .txt 拖进拖拽区，提问，观察工具触发
 ```
 
-更多细节见 [`GETTING_STARTED.md`](./GETTING_STARTED.md)。
+更多细节见 [`GETTING_STARTED.md`](./GETTING_STARTED.md)；通用长跑评测接口、
+checkpoint 格式与 resume 保证见 [`Benchmark runner`](./docs/BENCHMARK_RUNNER.md)。
 
 ---
 
@@ -104,8 +105,8 @@ RetrieveAgent 判断出需要用 SQL，先尝试 `db_query_nl`，拿到空结果
 两个 agent 都支持下列可互换的 loop 后端，并共享同一套 HookChain、SSE 协议和服务实例：
 
 ```
-DATAMIND__AGENT__BACKEND=native   # 默认 —— 纯 Python 的 anthropic SDK + 自写循环
-                                  # 需要一个 Anthropic 格式的上游
+DATAMIND__AGENT__BACKEND=native   # 默认 —— 内置协议中立 loop
+DATAMIND__LLM__PROTOCOL=anthropic # 或 openai_chat_completions
 DATAMIND__AGENT__BACKEND=sdk      # claude-agent-sdk + claude-code-router (CCR)
                                   # 当你要接 OpenAI 格式的网关时用它（CCR 负责翻译）；
                                   # 额外解锁 Subagents / Compaction
@@ -115,11 +116,13 @@ DataMind 的 `HookChain`（路径白名单、破坏性 SQL 拦截、防篡改审
 
 ---
 
-## 自带 key —— CCR 桥接
+## 协议支持与可选 CCR 桥接
 
-DataMind **只讲 Anthropic，且仅讲 Anthropic**（`/v1/messages` 协议，`sk-ant-...` 这类 key）。这是一个刻意的取舍 —— 只需推理一套协议、一条鉴权路径、一套流式语义。
+native loop 原生支持 Anthropic `/v1/messages` 与 OpenAI
+`/v1/chat/completions`，包括工具调用与真实流式输出。请显式设置
+`DATAMIND__LLM__PROTOCOL`，内部生成路径会复用同一个模型客户端。
 
-但大多数自建网关、以及许多更便宜的 key 中转商，只暴露 **OpenAI** 的 Chat Completions 格式（`/v1/chat/completions`）。与其 fork DataMind 去加一个 OpenAI 客户端，我们选择在上游前面放一个小巧的转换器：
+选择 Claude Agent SDK 后端时仍可使用 CCR，因为该 SDK 使用 Anthropic 协议，而许多网关只暴露 OpenAI Chat Completions：
 
 **[claude-code-router (CCR)](https://github.com/musistudio/claude-code-router)** —— 一个本地代理，接收 Anthropic `/v1/messages` 请求并转发给 OpenAI 格式的上游，双向翻译请求体（以及流式事件）。
 
@@ -128,14 +131,14 @@ DataMind ──Anthropic /v1/messages──▶  CCR（本地）  ──OpenAI /v
    （sdk 后端）                       双向翻译                                     （OpenAI 格式 key）
 ```
 
-于是 DataMind 本身从不改动：它始终以为自己在和 Anthropic 对话。CCR 吸收了格式差异。这正是 `sdk` agent 后端为之设计的用途。
+CCR 只对 `sdk` 后端是必需的；`native` 后端可直连两种协议。
 
 ### 我什么时候需要它？
 
 | 你的上游网关讲的是…… | 该怎么做 |
 |---|---|
 | **Anthropic**（`/v1/messages`，`sk-ant` key） | 什么都不用做。用 `BACKEND=native`，把 `DATAMIND__LLM__API_BASE` 直接指过去。 |
-| **OpenAI**（`/v1/chat/completions`） | 运行 CCR，用 `BACKEND=sdk`，让 DataMind 指向 CCR。 |
+| **OpenAI**（`/v1/chat/completions`） | `BACKEND=native` + `LLM__PROTOCOL=openai_chat_completions`；仅在 `BACKEND=sdk` 时使用 CCR。 |
 
 ### 配置步骤（OpenAI 格式上游）
 
@@ -212,14 +215,15 @@ DataMind/
 │   ├── scripts/                  # hello_*.py + seed_enterprise_demo.py
 │   ├── cli.py                    # `python -m datamind ...`
 │   ├── server.py                 # FastAPI + 真 SSE + /api/upload
-│   └── tests/                    # 95 个通过的测试（无需联网）
+│   └── tests/                    # 无网络单元测试与协议合同测试
 │
 ├── .claude/skills/               # SDK 风格的知识技能（SKILL.md）
 ├── static/app.html               # 浏览器界面（拖拽 + 工具卡片 + 侧边栏）
 ├── scripts/start_ccr.sh          # 一行命令启动 CCR（用于 sdk 后端）
 ├── demo-uploads/                 # 6 个可拖进界面的示例文件
 │
-├── modules/ core/ main.py server.py benchmark/   # ── v0.1 遗留代码 ─
+├── benchmark/                    # 当前栈 checkpoint/resume runner
+├── modules/ core/ main.py server.py              # ── v0.1 遗留代码 ─
 │
 ├── data/profiles/<profile>/      # 每个 profile 的原始输入
 ├── storage/<profile>/            # 每个 profile 的索引与数据库
@@ -245,7 +249,6 @@ DATAMIND__DATA__PROFILE=customer_a python -m datamind chat
 
 ```bash
 pytest datamind/tests/
-# 95 passed in ~0.6s —— 无需联网
 ```
 
 以及若干在线冒烟 + 基准脚本：

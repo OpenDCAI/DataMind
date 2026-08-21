@@ -41,6 +41,7 @@ import sqlite3
 import struct
 import time
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence
 
@@ -133,7 +134,7 @@ class SQLiteMemoryStore:
         return conn
 
     def _init_schema(self) -> None:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS memory_v2 (
@@ -252,7 +253,7 @@ class SQLiteMemoryStore:
             emb = _pack(vec)
 
         def _run() -> None:
-            with self._conn() as conn:
+            with closing(self._conn()) as conn, conn:
                 conn.execute(
                     "INSERT INTO memory_v2 ("
                     "id, scope, profile, session_id, kind, status, content, metadata, "
@@ -366,7 +367,7 @@ class SQLiteMemoryStore:
         ts = time.time()
 
         def _run() -> bool:
-            with self._conn() as conn:
+            with closing(self._conn()) as conn, conn:
                 if hard:
                     cur = conn.execute("DELETE FROM memory_v2 WHERE id=?", (item_id,))
                 else:
@@ -383,7 +384,7 @@ class SQLiteMemoryStore:
 
     async def list_profiles(self) -> list[str]:
         def _run() -> list[str]:
-            with self._conn() as conn:
+            with closing(self._conn()) as conn, conn:
                 cur = conn.execute(
                     "SELECT DISTINCT profile FROM memory_v2 "
                     "WHERE scope='profile' AND status='active' "
@@ -417,7 +418,7 @@ class SQLiteMemoryStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
 
         def _run() -> int:
-            with self._conn() as conn:
+            with closing(self._conn()) as conn, conn:
                 cur = conn.execute(f"SELECT COUNT(*) FROM memory_v2{where}", params)
                 return int(cur.fetchone()[0])
 
@@ -451,7 +452,7 @@ class SQLiteMemoryStore:
             "embedding, created_at, updated_at, archived_at "
             "FROM memory_v2 WHERE " + " AND ".join(clauses)
         )
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             rows = conn.execute(sql, bind).fetchall()
         if not rows:
             return []

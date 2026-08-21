@@ -17,13 +17,36 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
         start: str,
         max_hops: int = 2,
         relation_filter: list[str] | None = None,
+        max_results: int = 100,
     ) -> dict:
-        paths = await graph.traverse(start, max_hops=max_hops, relation_filter=relation_filter)
-        return {"start": start, "max_hops": max_hops, "count": len(paths), "paths": paths}
+        paths = await graph.traverse(
+            start, max_hops=max_hops, relation_filter=relation_filter,
+            max_results=max_results + 1,
+        )
+        truncated = len(paths) > max_results
+        visible = paths[:max_results]
+        return {
+            "start": start, "max_hops": max_hops, "count": len(visible),
+            "total_count": len(paths), "truncated": truncated,
+            "next_cursor": max_results if truncated else None, "paths": visible,
+        }
 
-    async def _neighbors(entity: str, direction: str = "both") -> dict:
-        edges = await graph.neighbors(entity, direction=direction)
-        return {"entity": entity, "direction": direction, "count": len(edges), "edges": edges}
+    async def _neighbors(
+        entity: str,
+        direction: str = "both",
+        relation_filter: list[str] | None = None,
+        limit: int = 100,
+    ) -> dict:
+        edges = await graph.neighbors(
+            entity, direction=direction, relation_filter=relation_filter, limit=limit + 1,
+        )
+        truncated = len(edges) > limit
+        visible = edges[:limit]
+        return {
+            "entity": entity, "direction": direction, "count": len(visible),
+            "total_count": len(edges), "truncated": truncated,
+            "next_cursor": limit if truncated else None, "edges": visible,
+        }
 
     async def _upsert(triples: list[dict]) -> dict:
         return await graph.upsert(triples)
@@ -51,7 +74,7 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
             name="graph_traverse",
             description=(
                 "Walk the knowledge graph from a starting entity, up to N hops. "
-                "Returns all paths sorted by average edge weight. "
+                "Returns a bounded set of paths sorted by average edge weight. "
                 "Optional relation_filter restricts which relations you follow (e.g. [\"works_at\", \"located_in\"])."
             ),
             input_schema={
@@ -64,6 +87,10 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
                         "items": {"type": "string"},
                         "description": "Optional allow-list of relation names.",
                     },
+                    "max_results": {
+                        "type": "integer", "minimum": 1, "maximum": 500, "default": 100,
+                        "description": "Hard cap on returned paths.",
+                    },
                 },
                 "required": ["start"],
             },
@@ -74,7 +101,8 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
             name="graph_neighbors",
             description=(
                 "Return every edge incident to an entity. "
-                "Use direction='out' for what the entity relates TO, 'in' for what relates to it, 'both' for all."
+                "Use direction='out' for what the entity relates TO, 'in' for what relates to it, 'both' for both; "
+                "use relation_filter to preserve relation semantics such as required input versus produced output."
             ),
             input_schema={
                 "type": "object",
@@ -84,6 +112,13 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
                         "type": "string",
                         "enum": ["out", "in", "both"],
                         "default": "both",
+                    },
+                    "relation_filter": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Only return these exact relation types.",
+                    },
+                    "limit": {
+                        "type": "integer", "minimum": 1, "maximum": 500, "default": 100,
                     },
                 },
                 "required": ["entity"],

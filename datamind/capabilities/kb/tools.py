@@ -30,6 +30,9 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
             "top_k": top_k,
             "results": chunks,
             "count": len(chunks),
+            "total_count": None,
+            "truncated": len(chunks) >= top_k,
+            "next_cursor": None,
         }
 
     async def _list_documents() -> dict:

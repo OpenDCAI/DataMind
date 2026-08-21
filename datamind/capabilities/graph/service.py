@@ -49,7 +49,13 @@ class GraphService:
                             )
                             continue
                         try:
-                            batch.append(GraphTriple(**obj))
+                            triple = GraphTriple(**obj)
+                            triple.properties = {
+                                **triple.properties,
+                                "_profile_managed": True,
+                                "profile_source": f"{jsonl.name}:{lineno}",
+                            }
+                            batch.append(triple)
                         except Exception as exc:  # noqa: BLE001
                             _log.warning(
                                 "invalid_triplet_shape",
@@ -57,11 +63,15 @@ class GraphService:
                             )
                             continue
                         count += 1
-                        if len(batch) >= 500:
-                            await self.store.upsert_triples(batch)
-                            batch = []
-        if batch:
-            await self.store.upsert_triples(batch)
+        reconcile = getattr(self.store, "reconcile_profile_triples", None)
+        if callable(reconcile):
+            await reconcile(batch)
+        else:
+            reset = getattr(self.store, "reset", None)
+            if callable(reset):
+                await reset()
+            if batch:
+                await self.store.upsert_triples(batch)
         persist = getattr(self.store, "persist", None)
         if callable(persist):
             await persist()
@@ -77,8 +87,12 @@ class GraphService:
         *,
         max_hops: int = 2,
         relation_filter: list[str] | None = None,
+        max_results: int = 100,
     ) -> list[dict[str, Any]]:
-        paths = await self.store.traverse(start, max_hops=max_hops, relation_filter=relation_filter)
+        paths = await self.store.traverse(
+            start, max_hops=max_hops, relation_filter=relation_filter,
+            max_results=max_results,
+        )
         return [p.model_dump() for p in paths]
 
     async def neighbors(
@@ -86,8 +100,12 @@ class GraphService:
         entity: str,
         *,
         direction: str = "both",
+        relation_filter: list[str] | None = None,
+        limit: int = 100,
     ) -> list[dict[str, Any]]:
-        edges = await self.store.neighbors(entity, direction=direction)
+        edges = await self.store.neighbors(
+            entity, direction=direction, relation_filter=relation_filter, limit=limit,
+        )
         return [e.model_dump() for e in edges]
 
     async def upsert(self, triples: list[dict[str, Any]]) -> dict[str, int]:
@@ -101,6 +119,11 @@ class GraphService:
     def stats(self) -> dict[str, int]:
         stats = getattr(self.store, "stats", None)
         return stats() if callable(stats) else {}
+
+    async def aclose(self) -> None:
+        close = getattr(self.store, "aclose", None)
+        if callable(close):
+            await close()
 
 
 def build_graph_service(settings: Settings) -> GraphService:

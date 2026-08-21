@@ -6,16 +6,16 @@ ephemeral smoke tests just build a fresh one.
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
-from anthropic import AsyncAnthropic
 from sqlalchemy.engine import Engine
 
 from datamind.config import DBConfig, LLMConfig, Settings
 from datamind.core.errors import CapabilityError
 from datamind.core.logging import get_logger
-from datamind.core.protocols import DatabaseDialect, QueryResult, TableSchema
+from datamind.core.protocols import DatabaseDialect, QueryResult, TableSchema, TextModelClient
 from datamind.core.registry import db_registry
 
 # Importing providers populates db_registry.
@@ -32,7 +32,7 @@ class DBService:
         dialect: DatabaseDialect,
         engine: Engine,
         db_cfg: DBConfig,
-        llm_client: AsyncAnthropic | None = None,
+        llm_client: TextModelClient | None = None,
         llm_model: str | None = None,
     ) -> None:
         self.dialect = dialect
@@ -40,6 +40,7 @@ class DBService:
         self.db_cfg = db_cfg
         self._llm = llm_client
         self._model = llm_model
+        self._schema_cache: dict[str, TableSchema] = {}
 
     # --------------------------------------------------------------- public
 
@@ -47,11 +48,23 @@ class DBService:
         return await self.dialect.list_tables(self.engine)
 
     async def describe(self, table: str) -> TableSchema:
-        return await self.dialect.describe(self.engine, table)
+        if table not in self._schema_cache:
+            self._schema_cache[table] = await self.dialect.describe(self.engine, table)
+        return self._schema_cache[table]
 
     async def describe_all(self) -> list[TableSchema]:
         names = await self.list_tables()
-        return [await self.describe(t) for t in names]
+        return list(await asyncio.gather(*(self.describe(t) for t in names)))
+
+    def invalidate_schema_cache(self) -> None:
+        self._schema_cache.clear()
+
+    async def aclose(self) -> None:
+        dispose = getattr(self.engine, "dispose", None)
+        if callable(dispose):
+            result = dispose()
+            if hasattr(result, "__await__"):
+                await result
 
     async def query_sql(self, sql: str) -> QueryResult:
         return await self.dialect.execute_readonly(
@@ -73,12 +86,14 @@ class DBService:
                 "db",
                 "NL2SQL requires llm_client + llm_model; pass them in the service.",
             )
-        schemas = await self.describe_all()
         if tables:
-            wanted = set(tables)
-            schemas = [s for s in schemas if s.name in wanted]
-            if not schemas:
-                raise CapabilityError("db", f"No matching tables: {tables!r}")
+            available = set(await self.list_tables())
+            missing = [table for table in tables if table not in available]
+            if missing:
+                raise CapabilityError("db", f"Unknown tables: {missing!r}")
+            schemas = list(await asyncio.gather(*(self.describe(t) for t in tables)))
+        else:
+            schemas = await self.describe_all()
         sql = await generate_sql(
             client=self._llm,
             model=self._model,
@@ -92,6 +107,9 @@ class DBService:
             "sql": sql,
             "columns": result.columns,
             "rows": result.rows,
+            "returned_count": len(result.rows),
+            "total_count": None,
+            "next_cursor": None,
             "truncated": result.truncated,
             "elapsed_ms": result.elapsed_ms,
         }
@@ -105,7 +123,7 @@ class DBService:
 def build_db_service(
     settings: Settings,
     *,
-    llm_client: AsyncAnthropic | None = None,
+    llm_client: TextModelClient | None = None,
 ) -> DBService:
     dialect_name = settings.db.dialect
     dialect = db_registry.create(dialect_name)

@@ -3,7 +3,7 @@
 Strategy:
 1. Build a compact schema description from the target tables (column names
    + types + primary keys + a small row sample).
-2. Send that to Claude with a tight prompt: "write ONE read-only SQL
+2. Send that to the configured text model with a tight prompt: "write ONE read-only SQL
    statement, output nothing else".
 3. Strip code fences, validate with the dialect's `is_destructive` before
    returning. The caller runs the SQL through `execute_readonly` which
@@ -18,10 +18,8 @@ from __future__ import annotations
 import re
 from typing import Sequence
 
-from anthropic import AsyncAnthropic
-
 from datamind.core.logging import get_logger
-from datamind.core.protocols import TableSchema
+from datamind.core.protocols import TableSchema, TextModelClient
 
 _log = get_logger("db.nl2sql")
 
@@ -50,7 +48,7 @@ def _extract_sql(text: str) -> str:
 
 async def generate_sql(
     *,
-    client: AsyncAnthropic,
+    client: TextModelClient,
     model: str,
     question: str,
     schemas: Sequence[TableSchema],
@@ -72,13 +70,8 @@ async def generate_sql(
         "SQL:"
     )
 
-    resp = await client.messages.create(
-        model=model,
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = "".join(
-        b.text for b in resp.content if getattr(b, "type", None) == "text"
+    text = await client.generate_text(
+        prompt, model=model, max_tokens=512, temperature=0.0,
     )
     sql = _extract_sql(text)
     _log.info("nl2sql_generated", extra={"question": question, "sql": sql[:200]})

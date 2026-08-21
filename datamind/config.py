@@ -36,18 +36,28 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class LLMConfig(BaseModel):
-    """LLM backend — an Anthropic-compatible gateway."""
+    """Protocol-explicit LLM gateway configuration.
+
+    ``protocol`` describes the wire protocol, independently from the model
+    name and from ``agent.backend``.  Internal generation (NL2SQL, query
+    rewriting, memory and ingest) uses the same client as the outer loop.
+    """
 
     api_base: AnyUrl = Field(default=AnyUrl("http://35.220.164.252:3888"))
     api_key: SecretStr
+    protocol: Literal["anthropic", "openai_chat_completions"] = "anthropic"
     model: str = "claude-sonnet-4-6"
     # Used for cheap background tasks (memory extraction, summarisation).
     fallback_model: str = "claude-haiku-4-5-20251001"
+    fallback_protocol: Literal["anthropic", "openai_chat_completions"] | None = None
     # Shared model knobs — individual calls can override.
     max_tokens: int = 4096
     temperature: float = 1.0
     # Request-level timeout applied by the Anthropic client.
     timeout_s: float = 60.0
+    connect_timeout_s: float = 10.0
+    max_retries: int = Field(default=3, ge=0)
+    backoff_base_s: float = Field(default=0.5, gt=0)
 
 
 class EmbeddingConfig(BaseModel):
@@ -60,6 +70,13 @@ class EmbeddingConfig(BaseModel):
     # Leave None to auto-detect at first call / from model defaults.
     dimension: int | None = None
     batch_size: int = 32
+    timeout_s: float = Field(default=30.0, gt=0)
+    connect_timeout_s: float = Field(default=10.0, gt=0)
+    max_retries: int = Field(default=3, ge=0)
+    backoff_base_s: float = Field(default=0.5, gt=0)
+    # Optional conservative split in addition to batch_size.  It uses a
+    # deterministic character estimate (roughly four characters per token).
+    max_batch_tokens: int | None = Field(default=None, gt=0)
 
 
 class RetrievalConfig(BaseModel):
@@ -169,10 +186,9 @@ class AgentConfig(BaseModel):
 
     Two implementations live side-by-side, picked during agent assembly:
 
-    - `native` (default): thin tool-use loop on top of the `anthropic`
-      Python SDK. Talks directly to whatever `LLMConfig.api_base` points
-      at — no local helper process required. ~280 LOC, unit-testable,
-      mirrors exactly what the rest of DataMind's 12 non-loop LLM calls do.
+    - `native` (default): protocol-neutral tool-use loop over the explicit
+      `LLMConfig.protocol`. Talks Anthropic Messages or OpenAI Chat
+      Completions directly — no helper process required.
 
     - `sdk`: uses `claude-agent-sdk` as the loop, which in turn spawns
       the `claude` CLI and speaks Anthropic stdio to it. Best run behind
@@ -196,6 +212,11 @@ class AgentConfig(BaseModel):
 
     # Cap the tool-use loop. Hits for both backends.
     max_turns: int = 12
+    max_tool_calls: int = Field(default=24, ge=0)
+    max_input_tokens: int = Field(default=120_000, gt=0)
+    max_tool_result_chars: int = Field(default=12_000, ge=256)
+    max_tool_result_rows: int = Field(default=100, ge=1)
+    wall_clock_timeout_s: float = Field(default=300.0, gt=0)
 
 
 class HooksConfig(BaseModel):

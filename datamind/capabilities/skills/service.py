@@ -186,20 +186,23 @@ class SkillsService:
         return list(self._code_tools)
 
 
-def build_skills_service(settings: Settings) -> SkillsService:
+def build_skills_service(
+    settings: Settings,
+    *,
+    embedding: EmbeddingProvider | None = None,
+) -> SkillsService:
     """Assemble a SkillsService from the root Settings.
 
     If no embedding API key is provided we still build the service — we
     just skip the semantic index and fall back to exact-name lookup.
     """
     skills_dir = settings.data.skills_dir
-    embedding = None
     store = None
     # Skills indexing only needs creds if we actually want semantic search.
     has_creds = bool(settings.embedding.api_key or settings.llm.api_key)
     if has_creds:
         try:
-            embedding = build_embedding(settings.embedding, fallback_llm=settings.llm)
+            embedding = embedding or build_embedding(settings.embedding, fallback_llm=settings.llm)
             storage = settings.data.storage_dir / "chroma_skills"
             store = vector_store_registry.create(
                 "chroma",

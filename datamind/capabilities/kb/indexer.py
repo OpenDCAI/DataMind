@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -195,6 +197,19 @@ async def build_index(
         batch = chunks[i : i + batch_size]
         texts = [c.text for c in batch]
         vectors = await embedding.embed_texts(texts)
+        if len(vectors) != len(batch):
+            raise ValueError(
+                f"embedding count mismatch: expected {len(batch)}, got {len(vectors)}"
+            )
+        expected_dimension = int(getattr(embedding, "dimension", 0) or 0)
+        for offset, vector in enumerate(vectors):
+            if expected_dimension and len(vector) != expected_dimension:
+                raise ValueError(
+                    f"embedding dimension mismatch at item {i + offset}: "
+                    f"expected {expected_dimension}, got {len(vector)}"
+                )
+            if any(not isinstance(v, (int, float)) or not math.isfinite(float(v)) for v in vector):
+                raise ValueError(f"non-finite embedding at item {i + offset}")
         await vector_store.add(
             ids=[c.id for c in batch],
             texts=texts,
@@ -208,6 +223,60 @@ async def build_index(
 
     _log.info("index_built", extra=stats)
     return stats
+
+
+def corpus_fingerprint(data_dir: Path) -> str:
+    """Hash the indexable corpus deterministically without loading it all."""
+    root = Path(data_dir)
+    digest = hashlib.sha256()
+    if not root.is_dir():
+        return digest.hexdigest()
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root)
+        if path.suffix.lower() not in _TEXT_EXTS | {".jsonl"}:
+            continue
+        if path.suffix.lower() == ".jsonl" and (not rel.parts or rel.parts[0] != "chunks"):
+            continue
+        digest.update(str(rel).encode("utf-8"))
+        digest.update(b"\x00")
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def build_index_manifest(
+    *,
+    data_dir: Path,
+    embedding_provider: str,
+    embedding_model: str,
+    dimension: int,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> dict[str, Any]:
+    fields = {
+        "schema_version": 1,
+        "embedding_provider": embedding_provider,
+        "embedding_model": embedding_model,
+        "dimension": dimension,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "corpus_hash": corpus_fingerprint(data_dir),
+    }
+    canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
+    fields["fingerprint"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return fields
+
+
+def write_manifest_atomic(path: Path, manifest: dict[str, Any]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 async def list_documents(data_dir: Path) -> list[dict[str, Any]]:

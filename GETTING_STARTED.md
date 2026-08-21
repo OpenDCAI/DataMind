@@ -29,7 +29,7 @@ If every step prints `OK`, you're done. The rest of this file explains each step
 ## 0. Prerequisites
 
 - Python **3.11+**. Check: `python3 --version`.
-- An **Anthropic-compatible gateway URL + API key**. The examples use `http://35.220.164.252:3888` with a Claude-family model. Any service speaking `/v1/messages` (streaming + tool_use) works.
+- An **Anthropic or OpenAI Chat Completions compatible gateway URL + API key**. Set `DATAMIND__LLM__PROTOCOL=anthropic` or `openai_chat_completions` explicitly; tool calling and streaming are supported on both native paths.
 - Optional: a MySQL / PostgreSQL instance — only if you want the `db` capability to point at one of them.
 
 ---

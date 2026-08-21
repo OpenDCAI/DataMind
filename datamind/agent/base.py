@@ -58,6 +58,11 @@ class AgentLoopConfig:
     temperature: float = 1.0
     system_prompt: str = ""
     max_tool_turns: int = 10  # hard cap on iterations to prevent runaways
+    max_tool_calls: int = 24
+    max_input_tokens: int = 120_000
+    max_tool_result_chars: int = 12_000
+    max_tool_result_rows: int = 100
+    wall_clock_timeout_s: float = 300.0
 
 
 # ---------------------------------------------------------------- protocol
@@ -77,6 +82,7 @@ class AgentLoopProtocol(Protocol):
         *,
         user_message: str,
         history: list[dict] | None = None,
+        final_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run one user turn to completion.
 
@@ -98,6 +104,7 @@ class AgentLoopProtocol(Protocol):
         *,
         user_message: str,
         history: list[dict] | None = None,
+        final_contract: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Like run_turn but yields AgentEvents as they happen."""
         ...

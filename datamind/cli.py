@@ -62,6 +62,7 @@ def info() -> None:
     t.add_row("data_dir", str(settings.data.data_dir))
     t.add_row("storage_dir", str(settings.data.storage_dir))
     t.add_row("llm.api_base", str(settings.llm.api_base))
+    t.add_row("llm.protocol", settings.llm.protocol)
     t.add_row("llm.model", settings.llm.model)
     t.add_row("llm.fallback_model", settings.llm.fallback_model)
     t.add_row("embedding.provider", settings.embedding.provider)

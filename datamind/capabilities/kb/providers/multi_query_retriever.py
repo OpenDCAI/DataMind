@@ -4,8 +4,8 @@ Uses the LLM to rewrite the user's question into N semantically-diverse
 sub-queries, retrieves top-k for each, then merges with dedup. This helps
 when the user's phrasing doesn't match the corpus vocabulary.
 
-We talk to the gateway via the Anthropic SDK (same client the agent loop
-will use). The model is configurable — small/cheap is fine for rewriting.
+We use the same protocol-neutral client as the agent loop. The model is
+configurable — small/cheap is fine for rewriting.
 """
 from __future__ import annotations
 
@@ -14,10 +14,8 @@ import json
 import re
 from typing import Any
 
-from anthropic import AsyncAnthropic
-
 from datamind.core.logging import get_logger
-from datamind.core.protocols import EmbeddingProvider, RetrievedChunk, VectorStore
+from datamind.core.protocols import EmbeddingProvider, RetrievedChunk, TextModelClient, VectorStore
 from datamind.core.registry import retriever_registry
 
 _log = get_logger("retriever.multi_query")
@@ -37,7 +35,7 @@ class MultiQueryRetriever:
         *,
         vector_store: VectorStore,
         embedding: EmbeddingProvider,
-        llm_client: AsyncAnthropic,
+        llm_client: TextModelClient,
         llm_model: str,
         num_queries: int = 3,
     ) -> None:
@@ -81,14 +79,9 @@ class MultiQueryRetriever:
     async def _rewrite(self, query: str) -> list[str]:
         prompt = _REWRITE_PROMPT.format(n=self._n, query=query)
         try:
-            resp = await self._llm.messages.create(
-                model=self._model,
-                max_tokens=512,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = "".join(
-                b.text for b in resp.content if getattr(b, "type", None) == "text"
-            ).strip()
+            text = (await self._llm.generate_text(
+                prompt, model=self._model, max_tokens=512, temperature=0.0,
+            )).strip()
             # Accept both a raw JSON array and a fenced block.
             m = re.search(r"\[.*\]", text, re.DOTALL)
             raw = m.group(0) if m else text

@@ -60,7 +60,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     st.system = await build_datamind(st.settings)
     await st.system.warmup()
     app.state.datamind = st
-    yield
+    try:
+        yield
+    finally:
+        if st.system is not None:
+            await st.system.aclose()
 
 
 app = FastAPI(title="DataMind", version=__version__, lifespan=_lifespan)
@@ -142,6 +146,7 @@ async def health(st: AppState = Depends(_state)) -> dict:
     return {
         "status": "ok",
         "profile": st.settings.data.profile,
+        "llm_protocol": st.settings.llm.protocol,
         "model": st.settings.llm.model,
         "embedding": st.settings.embedding.model,
         "db_dialect": st.settings.db.dialect,

@@ -18,6 +18,7 @@ from rank_bm25 import BM25Okapi  # type: ignore
 from datamind.core.logging import get_logger
 from datamind.core.protocols import EmbeddingProvider, RetrievedChunk, VectorStore
 from datamind.core.registry import retriever_registry
+from datamind.capabilities.kb.filters import matches_metadata, validate_metadata_filter
 
 _log = get_logger("retriever.hybrid")
 
@@ -98,6 +99,7 @@ class HybridRetriever:
         top_k: int = 5,
         filters: dict[str, Any] | None = None,
     ) -> list[RetrievedChunk]:
+        validate_metadata_filter(filters)
         await self._ensure_lexical()
         k_inner = top_k * self._cm
 
@@ -106,10 +108,16 @@ class HybridRetriever:
         vec_hits = await self._store.query(vec, top_k=k_inner, where=filters)
         vec_ranked = {ch.id: (rank, ch) for rank, ch in enumerate(vec_hits)}
 
-        # BM25 side (ignores filters — pure lexical)
+        # BM25 must use the exact same candidate scope as the vector branch.
+        # Filtering after fusion would allow an out-of-scope lexical hit to
+        # displace a valid vector candidate.
         if self._bm25 is not None and self._ids:
             scores = self._bm25.get_scores(_tokenize(query))
-            order = sorted(range(len(scores)), key=lambda i: -scores[i])[:k_inner]
+            eligible = [
+                i for i in range(len(scores))
+                if matches_metadata(self._metas[i], filters)
+            ]
+            order = sorted(eligible, key=lambda i: -scores[i])[:k_inner]
             bm25_ranked = {
                 self._ids[i]: (
                     rank,

@@ -16,9 +16,8 @@ import json
 import re
 from typing import Any
 
-from anthropic import AsyncAnthropic
-
 from datamind.core.logging import get_logger
+from datamind.core.protocols import TextModelClient
 
 _log = get_logger("memory.extractor")
 
@@ -46,26 +45,19 @@ _JSON_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 async def extract_facts(
     *,
-    client: AsyncAnthropic,
+    client: TextModelClient,
     model: str,
     user_turn: str,
     assistant_turn: str,
     max_facts: int = 6,
 ) -> list[str]:
     try:
-        resp = await client.messages.create(
+        text = (await client.generate_text(
+            _PROMPT.format(user=user_turn, assistant=assistant_turn),
             model=model,
             max_tokens=400,
-            messages=[
-                {
-                    "role": "user",
-                    "content": _PROMPT.format(user=user_turn, assistant=assistant_turn),
-                }
-            ],
-        )
-        text = "".join(
-            b.text for b in resp.content if getattr(b, "type", None) == "text"
-        ).strip()
+            temperature=0.0,
+        )).strip()
         m = _JSON_RE.search(text)
         parsed = json.loads(m.group(0) if m else text)
         if not isinstance(parsed, list):

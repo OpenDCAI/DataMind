@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -70,7 +71,7 @@ class NetworkXGraphStore:
             self._g.add_edge(
                 e["src"],
                 e["dst"],
-                key=e.get("rel"),
+                key=e.get("key") or e.get("rel"),
                 relation=e.get("rel", "related"),
                 weight=float(e.get("w", 1.0)),
                 **(e.get("props") or {}),
@@ -94,6 +95,7 @@ class NetworkXGraphStore:
                     {
                         "src": u,
                         "dst": v,
+                        "key": key,
                         "rel": d.get("relation", "related"),
                         "w": float(d.get("weight", 1.0)),
                         "props": {
@@ -102,13 +104,15 @@ class NetworkXGraphStore:
                             if k not in {"relation", "weight"}
                         },
                     }
-                    for u, v, d in self._g.edges(data=True)
+                    for u, v, key, d in self._g.edges(keys=True, data=True)
                 ],
             }
-            self._path.write_text(
+            temporary = self._path.with_name(f".{self._path.name}.{os.getpid()}.tmp")
+            temporary.write_text(
                 json.dumps(doc, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            os.replace(temporary, self._path)
         await asyncio.to_thread(_run)
         self._dirty = False
 
@@ -127,16 +131,32 @@ class NetworkXGraphStore:
                         label=node_id,
                         type=node_type,
                     )
-            # Edge — keyed by relation, so repeated relations overwrite.
+            # Profile snapshots and runtime writes have separate identities;
+            # exact duplicates within either origin overwrite deterministically.
+            profile_managed = bool((t.properties or {}).get("_profile_managed"))
+            origin = "profile" if profile_managed else (t.source or "runtime")
             self._g.add_edge(
                 t.subject,
                 t.object,
-                key=t.relation,
+                key=f"{t.relation}\x1f{origin}",
                 relation=t.relation,
                 weight=float(t.confidence),
+                source=t.source,
                 **{f"p_{k}": v for k, v in (t.properties or {}).items()},
             )
         self._dirty = True
+
+    async def reconcile_profile_triples(self, triples: Sequence[GraphTriple]) -> None:
+        """Replace only edges managed by the profile snapshot."""
+        stale = [
+            (u, v, key)
+            for u, v, key, data in self._g.edges(keys=True, data=True)
+            if data.get("p__profile_managed") is True
+        ]
+        self._g.remove_edges_from(stale)
+        await self.upsert_triples(triples)
+        # Drop now-orphaned profile nodes without touching runtime nodes.
+        self._g.remove_nodes_from(list(nx.isolates(self._g)))
 
     async def reset(self) -> None:
         self._g = nx.MultiDiGraph()
@@ -181,17 +201,22 @@ class NetworkXGraphStore:
         entity: str,
         *,
         direction: str = "both",
+        relation_filter: list[str] | None = None,
+        limit: int = 100,
     ) -> list[Edge]:
         if not self._g.has_node(entity):
             return []
+        allowed = set(relation_filter) if relation_filter else None
         edges: list[Edge] = []
         if direction in {"out", "both"}:
             for u, v, d in self._g.out_edges(entity, data=True):
-                edges.append(self._edge(u, v, d))
+                if allowed is None or d.get("relation", "related") in allowed:
+                    edges.append(self._edge(u, v, d))
         if direction in {"in", "both"}:
             for u, v, d in self._g.in_edges(entity, data=True):
-                edges.append(self._edge(u, v, d))
-        return edges
+                if allowed is None or d.get("relation", "related") in allowed:
+                    edges.append(self._edge(u, v, d))
+        return edges[:limit]
 
     async def traverse(
         self,
@@ -199,6 +224,7 @@ class NetworkXGraphStore:
         *,
         max_hops: int = 2,
         relation_filter: list[str] | None = None,
+        max_results: int = 100,
     ) -> list[GraphPath]:
         if not self._g.has_node(start):
             return []
@@ -232,12 +258,15 @@ class NetworkXGraphStore:
                             score=sum(e.weight for e in path_edges) / len(path_edges),
                         )
                     )
+                    if len(paths) >= max_results:
+                        paths.sort(key=lambda p: -p.score)
+                        return paths[:max_results]
                     next_frontier.append((v, path_edges, seen | {v}))
             frontier = next_frontier
             depth += 1
         # Highest-weighted paths first.
         paths.sort(key=lambda p: -p.score)
-        return paths
+        return paths[:max_results]
 
     # -------------------------------------------------------------- helpers
 

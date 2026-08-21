@@ -1,6 +1,7 @@
 """Agent layer — loop, assembly, prompts."""
 from .base import AgentEvent, AgentLoopConfig, AgentLoopProtocol
 from .loop_native import NativeAgentLoop
+from .loop_openai import OpenAICompatibleAgentLoop
 from .options import (
     AgentServices,
     DataMind,
@@ -18,6 +19,7 @@ __all__ = [
     "AgentLoopConfig",
     "AgentLoopProtocol",
     "NativeAgentLoop",
+    "OpenAICompatibleAgentLoop",
     "DataMindAgent",
     "AgentServices",
     "RetrieveAgent",

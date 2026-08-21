@@ -28,22 +28,21 @@ pip install 'datamind[huggingface]'   # Local BGE / e5 embeddings
 pip install 'datamind[dev]'           # pytest + build + twine
 ```
 
-Point it at an **Anthropic-compatible** gateway and start chatting:
+Point it at an Anthropic or OpenAI Chat Completions compatible gateway and start chatting:
 
 ```bash
 export DATAMIND__LLM__API_BASE=https://your-gateway.example.com
 export DATAMIND__LLM__API_KEY=sk-ant-...
+export DATAMIND__LLM__PROTOCOL=anthropic  # or openai_chat_completions
 export DATAMIND__LLM__MODEL=claude-sonnet-4-6
 
 datamind chat                                          # CLI
 python -m uvicorn datamind.server:app --port 8000      # browser UI on http://127.0.0.1:8000
 ```
 
-> **DataMind only speaks Anthropic.** Every request goes out over Anthropic's
-> `/v1/messages` protocol with an Anthropic-format key — there is no OpenAI
-> client path in the codebase. If the only gateway/key you have speaks **OpenAI
-> format**, don't rewrite DataMind: put a translator in front of it. See
-> [Bring your own key — the CCR bridge](#bring-your-own-key--the-ccr-bridge).
+The selected protocol is shared by the outer tool loop and internal generation
+(NL2SQL, multi-query retrieval, Memory, and Graph ingest). Model names do not
+implicitly select a protocol. See [ADR 0001](./docs/adr/0001-protocol-neutral-model-clients.md).
 
 ---
 
@@ -92,7 +91,9 @@ DATAMIND__DATA__PROFILE=enterprise_demo \
 # → http://127.0.0.1:8000  — drag any .md / .csv / .txt into the dropzone, ask questions, watch tools fire
 ```
 
-More detail in [`GETTING_STARTED.md`](./GETTING_STARTED.md).
+More detail in [`GETTING_STARTED.md`](./GETTING_STARTED.md). The generic
+long-running evaluation interface, checkpoint format, and resume guarantees are
+documented in [`Benchmark runner`](./docs/BENCHMARK_RUNNER.md).
 
 ---
 
@@ -105,8 +106,8 @@ RetrieveAgent can recover from a failed SQL attempt by inspecting the schema and
 Both agents support the same two interchangeable loop backends and share the SSE protocol, services, and safety HookChain:
 
 ```
-DATAMIND__AGENT__BACKEND=native   # default — pure-Python anthropic SDK + self-written loop
-                                  # requires an Anthropic-format upstream
+DATAMIND__AGENT__BACKEND=native   # default — built-in protocol-neutral loop
+DATAMIND__LLM__PROTOCOL=anthropic # or openai_chat_completions
 DATAMIND__AGENT__BACKEND=sdk      # claude-agent-sdk + claude-code-router (CCR)
                                   # use this to sit on an OpenAI-format gateway
                                   # (CCR translates); adds Subagents / Compaction
@@ -116,15 +117,15 @@ DataMind's `HookChain` (path allow-list, destructive-SQL gate, tamper-evident au
 
 ---
 
-## Bring your own key — the CCR bridge
+## Protocol support and the optional CCR bridge
 
-DataMind talks **Anthropic and only Anthropic** (the `/v1/messages` protocol, an
-`sk-ant-...`-style key). That's a deliberate choice — one protocol, one auth path,
-one set of streaming semantics to reason about.
+The native loop directly supports Anthropic `/v1/messages` and OpenAI
+`/v1/chat/completions`, including tool calls and streaming. Set
+`DATAMIND__LLM__PROTOCOL` explicitly; the same client is injected into internal
+generation paths.
 
-But most self-hosted gateways and many cheaper key resellers only expose the
-**OpenAI** Chat Completions format (`/v1/chat/completions`). Rather than fork
-DataMind to add an OpenAI client, we sit a tiny translator in front of the upstream:
+CCR remains useful when choosing the Claude Agent SDK backend, because that SDK
+speaks Anthropic protocol while many gateways expose OpenAI Chat Completions:
 
 **[claude-code-router (CCR)](https://github.com/musistudio/claude-code-router)** — a
 local proxy that accepts Anthropic `/v1/messages` requests and forwards them to an
@@ -144,7 +145,7 @@ the format mismatch. This is exactly what the `sdk` agent backend is wired for.
 | Your upstream gateway speaks… | What to do |
 |---|---|
 | **Anthropic** (`/v1/messages`, `sk-ant` key) | Nothing. Use `BACKEND=native`, point `DATAMIND__LLM__API_BASE` straight at it. |
-| **OpenAI** (`/v1/chat/completions`) | Run CCR, use `BACKEND=sdk`, point DataMind at CCR. |
+| **OpenAI** (`/v1/chat/completions`) | Use `BACKEND=native` with `LLM__PROTOCOL=openai_chat_completions`; use CCR only with `BACKEND=sdk`. |
 
 ### Setup (OpenAI-format upstream)
 
@@ -222,14 +223,15 @@ DataMind/
 │   ├── scripts/                  # hello_*.py + seed_enterprise_demo.py
 │   ├── cli.py                    # `python -m datamind ...`
 │   ├── server.py                 # FastAPI + real SSE + /api/upload
-│   └── tests/                    # 95 passing tests (no network required)
+│   └── tests/                    # no-network unit and contract tests
 │
 ├── .claude/skills/               # SDK-style knowledge skills (SKILL.md)
 ├── static/app.html               # browser UI (drag-drop + tool cards + sidebar)
 ├── scripts/start_ccr.sh          # one-line CCR launcher (for sdk backend)
 ├── demo-uploads/                 # 6 sample files to drag-drop into the UI
 │
-├── modules/ core/ main.py server.py benchmark/   # ── v0.1 legacy ─
+├── benchmark/                    # current-stack checkpoint/resume runner
+├── modules/ core/ main.py server.py              # ── v0.1 legacy ─
 │
 ├── data/profiles/<profile>/      # per-profile raw inputs
 ├── storage/<profile>/            # per-profile indexes & DBs
@@ -255,7 +257,6 @@ Maps to `data/profiles/customer_a/` and `storage/customer_a/`.
 
 ```bash
 pytest datamind/tests/
-# 95 passed in ~0.6s — no network required
 ```
 
 Plus live smoke + benchmark scripts:

@@ -18,7 +18,11 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
 
     async def _query_sql(sql: str) -> dict:
         result = await db.query_sql(sql)
-        return result.model_dump()
+        payload = result.model_dump()
+        payload["returned_count"] = len(result.rows)
+        payload["total_count"] = None
+        payload["next_cursor"] = None
+        return payload
 
     async def _query_nl(question: str, tables: list[str] | None = None) -> dict:
         return await db.query_nl(question, tables=tables)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -36,6 +37,7 @@ class ChromaVectorStore:
             embedding_function=None,  # type: ignore[arg-type]
             metadata={"hnsw:space": "cosine"},
         )
+        self.existing_count = int(self._collection.count())
         _log.info(
             "chroma_collection_ready",
             extra={
@@ -66,6 +68,7 @@ class ChromaVectorStore:
             embeddings=[list(v) for v in embeddings],
             metadatas=metas,
         )
+        self.existing_count = int(self._collection.count())
 
     async def query(
         self,
@@ -110,6 +113,7 @@ class ChromaVectorStore:
         if not ids:
             return
         await asyncio.to_thread(self._collection.delete, ids=list(ids))
+        self.existing_count = int(self._collection.count())
 
     async def reset(self) -> None:
         await asyncio.to_thread(
@@ -120,6 +124,59 @@ class ChromaVectorStore:
             embedding_function=None,  # type: ignore[arg-type]
             metadata={"hnsw:space": "cosine"},
         )
+        self.existing_count = 0
+
+    def create_staging_store(self) -> "ChromaVectorStore":
+        return ChromaVectorStore(
+            persist_dir=self._persist_dir,
+            collection_name=f"{self._collection_name}__staging_{uuid.uuid4().hex[:10]}",
+            dimension=self.dimension,
+        )
+
+    async def discard(self) -> None:
+        """Delete this collection; used for failed staging builds."""
+        await asyncio.to_thread(
+            self._client.delete_collection, name=self._collection.name
+        )
+
+    async def activate_staging(
+        self,
+        staging: "ChromaVectorStore",
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically swap a fully-built staging collection into service.
+
+        Chroma has no transaction spanning collections, so names are swapped
+        with a rollback guard.  The old collection is deleted only after the
+        staging collection has acquired the canonical name.
+        """
+        if staging._persist_dir.resolve() != self._persist_dir.resolve():
+            raise ValueError("staging collection must use the same Chroma database")
+        main_name = self._collection_name
+        backup_name = f"{main_name}__backup_{uuid.uuid4().hex[:10]}"
+        old = self._collection
+        new = staging._collection
+        await asyncio.to_thread(old.modify, name=backup_name)
+        try:
+            # Distance configuration is immutable in Chroma. Renaming keeps
+            # the staging collection's cosine configuration; user metadata
+            # must not attempt to restate/change it during the swap.
+            await asyncio.to_thread(
+                new.modify, name=main_name, metadata=(metadata or None)
+            )
+        except Exception:
+            await asyncio.to_thread(old.modify, name=main_name)
+            raise
+        self._collection = new
+        self.existing_count = int(new.count())
+        staging._collection = new
+        await asyncio.to_thread(self._client.delete_collection, name=backup_name)
+
+    async def aclose(self) -> None:
+        # chromadb.PersistentClient owns no documented async close method.
+        # Keep the lifecycle contract explicit for interchangeable providers.
+        return None
 
     async def get_all_texts(self) -> list[tuple[str, str, dict[str, Any]]]:
         """Enumerate (id, text, metadata) — used by lexical retrievers."""

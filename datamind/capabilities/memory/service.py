@@ -15,12 +15,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
-from anthropic import AsyncAnthropic
-
 from datamind.capabilities.embedding import build_embedding
 from datamind.config import Settings
 from datamind.core.logging import get_logger
-from datamind.core.protocols import MemoryStore
+from datamind.core.protocols import EmbeddingProvider, MemoryStore, TextModelClient
 from datamind.core.registry import memory_registry
 
 # Import providers so registry is populated on module load.
@@ -48,7 +46,7 @@ class MemoryService:
         short_term: ShortTermMemory,
         long_term: MemoryStore,
         default_profile: str | None = None,
-        llm_client: AsyncAnthropic | None = None,
+        llm_client: TextModelClient | None = None,
         llm_model: str | None = None,
     ) -> None:
         self.short_term = short_term
@@ -157,7 +155,8 @@ class MemoryService:
 def build_memory_service(
     settings: Settings,
     *,
-    llm_client: AsyncAnthropic | None = None,
+    llm_client: TextModelClient | None = None,
+    embedding: EmbeddingProvider | None = None,
 ) -> MemoryService:
     # Short-term
     st = ShortTermMemory(max_turns=settings.memory.short_term_turns)
@@ -172,9 +171,8 @@ def build_memory_service(
         kwargs["db_path"] = str(settings.data.storage_dir / "memory.db")
 
     # Embedding (optional — recall still works lexically without it)
-    embedding = None
     has_creds = bool(settings.embedding.api_key or settings.llm.api_key)
-    if settings.memory.long_term_enabled and has_creds:
+    if embedding is None and settings.memory.long_term_enabled and has_creds:
         try:
             embedding = build_embedding(settings.embedding, fallback_llm=settings.llm)
         except Exception as exc:  # noqa: BLE001
