@@ -45,7 +45,7 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
                 "required": ["query"],
             },
             handler=_search,
-            metadata={"group": "graph"},
+            metadata={"group": "graph", "surface": "graph", "access": "read"},
         ),
         ToolSpec(
             name="graph_traverse",
@@ -68,7 +68,7 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
                 "required": ["start"],
             },
             handler=_traverse,
-            metadata={"group": "graph"},
+            metadata={"group": "graph", "surface": "graph", "access": "read"},
         ),
         ToolSpec(
             name="graph_neighbors",
@@ -89,7 +89,7 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
                 "required": ["entity"],
             },
             handler=_neighbors,
-            metadata={"group": "graph"},
+            metadata={"group": "graph", "surface": "graph", "access": "read"},
         ),
         ToolSpec(
             name="graph_upsert_triples",
@@ -120,7 +120,12 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
                 "required": ["triples"],
             },
             handler=_upsert,
-            metadata={"group": "graph", "destructive": True},
+            metadata={
+                "group": "graph",
+                "surface": "graph",
+                "access": "write",
+                "destructive": True,
+            },
         ),
     ]
 

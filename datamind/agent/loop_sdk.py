@@ -8,10 +8,9 @@ Architecture:
                     └── CCR translates Anthropic ↔ OpenAI protocol
                         └── HTTP to the real upstream (OpenAI-compat gateway)
 
-DataMind's 23 tools bridge into the SDK via an in-process MCP server
-built from our `ToolSpec` catalogue — each handler is wrapped so the
-SDK sees the standard `@tool` shape but the business logic is
-unchanged.
+Each agent's role-scoped tools bridge into the SDK via an in-process MCP
+server built from its `ToolSpec` catalogue. The SDK sees the standard
+`@tool` shape while the business logic and access boundary stay unchanged.
 
 We expose the exact same event shape as `NativeAgentLoop`:
     type=text        → SDK AssistantMessage's TextBlock
@@ -283,6 +282,40 @@ class SdkAgentLoop:
         """Strip the SDK's `mcp__datamind__` prefix for user-visible events."""
         return full.removeprefix("mcp__datamind__")
 
+    @staticmethod
+    def _tool_result_text(raw: Any) -> str:
+        if isinstance(raw, str):
+            return raw
+        if isinstance(raw, list):
+            parts: list[str] = []
+            for part in raw:
+                if isinstance(part, dict):
+                    parts.append(str(part.get("text", "")))
+                else:
+                    parts.append(str(getattr(part, "text", part)))
+            return " ".join(parts)
+        return str(raw)
+
+    @classmethod
+    def _receipt_from_tool_result(cls, raw: Any) -> dict[str, Any] | None:
+        try:
+            parsed = json.loads(cls._tool_result_text(raw))
+        except (TypeError, ValueError):
+            return None
+        if isinstance(parsed, dict) and parsed.get("receipt_id"):
+            return parsed
+        return None
+
+    @staticmethod
+    def _receipt_failed(receipt: dict[str, Any] | None) -> bool:
+        if receipt is None:
+            return False
+        results = receipt.get("results")
+        return isinstance(results, list) and any(
+            isinstance(item, dict) and item.get("status") == "failed"
+            for item in results
+        )
+
     # ---------------------------------------------------------------- API
 
     async def run_turn(
@@ -301,14 +334,19 @@ class SdkAgentLoop:
         """
         prompt = self._prompt_with_history(user_message, history)
         answer_parts: list[str] = []
-        tool_calls: list[tuple[str, dict]] = []
+        tool_trace: list[dict[str, Any]] = []
+        pending_trace: dict[str, dict[str, Any]] = {}
+        receipts: list[dict[str, Any]] = []
+        surfaces_used: list[str] = []
         result_info: dict[str, Any] = {}
 
         from claude_agent_sdk import (  # noqa: PLC0415
             AssistantMessage,
             ResultMessage,
             TextBlock,
+            ToolResultBlock,
             ToolUseBlock,
+            UserMessage,
             query,
         )
 
@@ -318,7 +356,41 @@ class SdkAgentLoop:
                     if isinstance(block, TextBlock):
                         answer_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
-                        tool_calls.append((self._short_tool_name(block.name), block.input))
+                        name = self._short_tool_name(block.name)
+                        try:
+                            spec = self._tools.get(name)
+                            surface = spec.metadata.get("surface")
+                            access = spec.metadata.get("access", "read")
+                        except Exception:
+                            surface = None
+                            access = None
+                        trace = {
+                            "name": name,
+                            "surface": surface,
+                            "access": access,
+                            "input": block.input,
+                            "is_error": False,
+                        }
+                        tool_trace.append(trace)
+                        pending_trace[block.id] = trace
+                        if surface and surface not in surfaces_used:
+                            surfaces_used.append(surface)
+            elif isinstance(msg, UserMessage):
+                content = getattr(msg, "content", [])
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, ToolResultBlock):
+                        continue
+                    trace = pending_trace.pop(block.tool_use_id, None)
+                    receipt = self._receipt_from_tool_result(block.content)
+                    if trace is not None:
+                        trace["is_error"] = (
+                            bool(getattr(block, "is_error", False))
+                            or self._receipt_failed(receipt)
+                        )
+                    if receipt is not None:
+                        receipts.append(receipt)
             elif isinstance(msg, ResultMessage):
                 result_info = {
                     "subtype": msg.subtype,
@@ -339,12 +411,16 @@ class SdkAgentLoop:
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": answer},
             ],
-            "iterations": result_info.get("num_turns") or len(tool_calls) + 1,
+            "iterations": result_info.get("num_turns") or len(tool_trace) + 1,
             "stop_reason": "end_turn" if not result_info.get("is_error") else "error",
             "usage": {
                 "duration_ms": result_info.get("duration_ms"),
                 "cost_usd": result_info.get("cost_usd"),
             },
+            "tool_trace": tool_trace,
+            "surfaces_used": surfaces_used,
+            "evidence": [],
+            "receipts": receipts,
         }
 
     async def stream_turn(
@@ -371,6 +447,10 @@ class SdkAgentLoop:
         # ToolUseBlock in an AssistantMessage and the matching result in a
         # subsequent UserMessage. We match by tool_use_id.
         pending_tools: dict[str, str] = {}  # tool_use_id -> short name
+        pending_trace: dict[str, dict[str, Any]] = {}
+        tool_trace: list[dict[str, Any]] = []
+        receipts: list[dict[str, Any]] = []
+        surfaces_used: list[str] = []
 
         iterations = 0
         async for msg in query(prompt=prompt, options=self._build_options()):
@@ -383,6 +463,24 @@ class SdkAgentLoop:
                     elif isinstance(block, ToolUseBlock):
                         short = self._short_tool_name(block.name)
                         pending_tools[block.id] = short
+                        try:
+                            spec = self._tools.get(short)
+                            surface = spec.metadata.get("surface")
+                            access = spec.metadata.get("access", "read")
+                        except Exception:
+                            surface = None
+                            access = None
+                        trace = {
+                            "name": short,
+                            "surface": surface,
+                            "access": access,
+                            "input": block.input,
+                            "is_error": False,
+                        }
+                        tool_trace.append(trace)
+                        pending_trace[block.id] = trace
+                        if surface and surface not in surfaces_used:
+                            surfaces_used.append(surface)
                         yield AgentEvent(
                             type="tool_use",
                             data={"name": short, "input": block.input, "id": block.id},
@@ -395,19 +493,23 @@ class SdkAgentLoop:
                 for block in content:
                     if isinstance(block, ToolResultBlock):
                         short = pending_tools.pop(block.tool_use_id, "?")
+                        trace = pending_trace.pop(block.tool_use_id, None)
                         raw = block.content
-                        if isinstance(raw, list):
-                            # SDK returns [{type:"text", text:"..."}]
-                            preview = " ".join(
-                                p.get("text", "") for p in raw if isinstance(p, dict)
-                            )
-                        else:
-                            preview = str(raw)
+                        preview = self._tool_result_text(raw)
+                        receipt = self._receipt_from_tool_result(raw)
+                        is_error = (
+                            bool(getattr(block, "is_error", False))
+                            or self._receipt_failed(receipt)
+                        )
+                        if trace is not None:
+                            trace["is_error"] = is_error
+                        if receipt is not None:
+                            receipts.append(receipt)
                         yield AgentEvent(
                             type="tool_result",
                             data={
                                 "name": short,
-                                "is_error": bool(getattr(block, "is_error", False)),
+                                "is_error": is_error,
                                 "preview": preview[:500],
                             },
                         )
@@ -421,6 +523,10 @@ class SdkAgentLoop:
                             "duration_ms": msg.duration_ms,
                             "cost_usd": msg.total_cost_usd,
                         },
+                        "tool_trace": tool_trace,
+                        "surfaces_used": surfaces_used,
+                        "evidence": [],
+                        "receipts": receipts,
                     },
                 )
             elif isinstance(msg, SystemMessage):

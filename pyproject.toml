@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datamind"
-description = "Composable inference-time data framework for LLM agents — KB / Graph / DB / Skills / Memory / Hooks behind one tool registry"
+description = "Two-agent inference-time data system over RAG, Graph, DB, Skills, and Memory"
 requires-python = ">=3.11"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = {text = "Apache-2.0"}

@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/datamind.svg)](https://pypi.org/project/datamind/)
 [![License](https://img.shields.io/pypi/l/datamind.svg)](https://github.com/OpenDCAI/DataMind/blob/main/LICENSE)
 
-一个具备自主决策能力（agentic）的检索助手：从 **6 种**不同的知识来源取数，并**自己决定该用哪个工具**。你可以通过命令行或浏览器界面和它对话；把文件拖进去，它会自动把内容路由到正确的后端。
+面向 inference-time data 的双 agent 工具：**StoreAgent** 负责把数据自主路由到五个数据面，**RetrieveAgent** 只读地跨面取数、组合证据并回答问题。五个数据面是 RAG、数据库、图谱、Skills 和 Memory；系统不使用 DataOp、DataPlan 或执行 DAG。
 
 > **v0.3.0 是发布在 PyPI 上的预览版。** 当前代码位于 [`datamind/`](./datamind/) 目录；最初的 v0.1 原型（`main.py` / `server.py` / `modules/`）仅作对比参考而保留在仓库中。完整上手流程见 [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [文档站](https://opendcai.github.io/DataMind-Doc/zh/)。
 
@@ -48,17 +48,17 @@ python -m uvicorn datamind.server:app --port 8000      # 浏览器界面 http://
 
 ## 能力一览
 
-| 能力 | 后端 | Agent 拿到的工具 |
-|---|---|---|
-| **知识库（RAG）** | Chroma + BM25，采用倒数排名融合（RRF） | `kb_search`、`kb_list_documents`、`kb_count`、`kb_reindex` |
-| **图谱** | NetworkX，JSON 持久化 | `graph_search_entities`、`graph_traverse`、`graph_neighbors`、`graph_upsert_triples` |
-| **数据库** | SQLAlchemy（SQLite / MySQL / Postgres） | `db_list_tables`、`db_describe_table`、`db_query_sql`、`db_query_nl` |
-| **技能（Skills）** | `.claude/skills/<name>/SKILL.md` + 安全的 Python 工具 | `skill_search`、`skill_get`、`skill_list`、`calculator`、`unit_convert`、`get_current_time`、`analyze_text` |
-| **记忆** | SQLite，余弦召回 + LLM 事实抽取；**按作用域分类（`global` / `profile` / `session`）** 实现多租户隔离 | `memory_save`、`memory_recall`、`memory_forget`、`memory_list_profiles` |
-| **数据导入** ✨ | 对话式数据导入 —— 通过聊天或浏览器拖拽区放入文件 | `kb_add_file`、`kb_add_path`、`db_import_csv`、`graph_add_triples_from_text` |
-| **Hooks** ✨ v0.3 | 沙箱化的工具调度 —— 每次调用都会被拦截；支持 `Allow` / `Deny` / `AskUser` / `Rewrite`；每个 profile 有防篡改审计日志 | `PathAllowlistHook`、`DestructiveSqlHook`、`AuditLogHook`（内置；用户可插拔自定义 hook） |
+| 数据面 | 后端 | RetrieveAgent | StoreAgent |
+|---|---|---|---|
+| **知识库（RAG）** | Chroma + BM25，采用倒数排名融合（RRF） | `kb_search`、`kb_list_documents`、`kb_count` | `kb_add_text`、`kb_add_file`、`kb_add_path`、`kb_reindex` |
+| **图谱** | NetworkX，JSON 持久化 | `graph_search_entities`、`graph_traverse`、`graph_neighbors` | `graph_upsert_triples`、`graph_add_triples_from_text` |
+| **数据库** | SQLAlchemy（SQLite / MySQL / Postgres） | `db_list_tables`、`db_describe_table`、`db_query_sql`、`db_query_nl` | `db_import_csv`、`db_import_records` |
+| **技能（Skills）** | 基础 + profile 级 `SKILL.md`，以及安全的 Python 工具 | `skill_search`、`skill_get`、`skill_list`、`calculator`、`unit_convert`、`get_current_time`、`analyze_text` | `skill_upsert` |
+| **记忆** | SQLite，余弦召回；按 `global` / `profile` / `session` 隔离 | `memory_recall`、`memory_list_profiles` | `memory_save`、`memory_forget` |
 
-**共 27 个工具。** 全部通过同一个 `ToolRegistry` 路由；由 agent 决定调用什么、以什么顺序调用。
+运行时使用两个物理隔离的注册表：RetrieveAgent 只有 19 个 read/utility 工具，StoreAgent 只有 11 个 write 工具。权限边界由代码强制执行，而不是依赖 prompt 自觉。
+
+每次工具调用仍会经过共享的安全 HookChain：`PathAllowlistHook`、`DestructiveSqlHook` 和 `AuditLogHook`。
 
 ---
 
@@ -99,16 +99,16 @@ DATAMIND__DATA__PROFILE=enterprise_demo \
 
 问它：**「工程部 Shanghai 的员工工资加起来是多少？」**
 
-Agent 判断出需要用 SQL，先尝试 `db_query_nl`，拿到空结果后自己去检查表结构（`db_list_tables` → `db_describe_table`），发现字段是 `Eng` 而不是 `Engineering`，于是自行改写 SQL，最终答出 ¥26,000 —— 这一切都没有任何硬编码。同一个 agent 会为关系类问题选 `graph_search_entities + graph_neighbors`，为流程规范（SOP）类问题选 `kb_search + skill_get`，为"帮我记住这个"类请求选 `memory_save`。
+RetrieveAgent 判断出需要用 SQL，先尝试 `db_query_nl`，拿到空结果后自己检查表结构并修正查询；关系问题选择 Graph，流程问题组合 KB 与 Skills。"帮我记住这个"则进入 StoreAgent，由它选择 `memory_save`，取数 agent 永远拿不到该写工具。
 
-**无论如何前端都不变。** 27 个工具、SSE 流式协议、聊天界面，以及 DataMind 自己的安全 HookChain，在两个可互换的 agent 后端上表现完全一致：
+两个 agent 都支持下列可互换的 loop 后端，并共享同一套 HookChain、SSE 协议和服务实例：
 
 ```
 DATAMIND__AGENT__BACKEND=native   # 默认 —— 纯 Python 的 anthropic SDK + 自写循环
                                   # 需要一个 Anthropic 格式的上游
 DATAMIND__AGENT__BACKEND=sdk      # claude-agent-sdk + claude-code-router (CCR)
                                   # 当你要接 OpenAI 格式的网关时用它（CCR 负责翻译）；
-                                  # 额外解锁 Subagents / Compaction / Plan 模式
+                                  # 额外解锁 Subagents / Compaction
 ```
 
 DataMind 的 `HookChain`（路径白名单、破坏性 SQL 拦截、防篡改审计）在**两个后端上都会强制执行** —— 在 `native` 上位于调度咽喉点，在 `sdk` 上位于每个 MCP 工具的包装层内。两者都用同一组 8 个企业 demo 问题做了端到端验证（[具体数据见此](./GETTING_STARTED.md#10-bench)）。
@@ -167,13 +167,18 @@ DATAMIND__AGENT__CCR_API_KEY=dummy       # 真正的 key 在 CCR 里，这个字
 
 ## 靠对话就能加数据
 
-4 个数据导入工具把 agent 变成了一个**可读可写**的界面：
+StoreAgent 独占全部写工具，RetrieveAgent 保持严格只读：
+
+```bash
+datamind store "把 /Users/foo/sales-q2.csv 导入成数据表 q2_sales"
+datamind store "记住：所有周报默认使用中文"
+```
 
 ```
 你    → "把 /Users/foo/sales-q2.csv 导入成数据表 q2_sales"
-agent → 调用 db_import_csv(path=..., table='q2_sales')   ✓ 插入 18 行
+StoreAgent → 调用 db_import_csv(path=..., table='q2_sales')   ✓ 插入 18 行
 你    → "Q2 sales pipeline 里 in-pipeline 单子总额是多少？哪个 sales rep 单子最多？"
-agent → 调用 db_query_sql(...)                            ✓ 从刚导入的表里给出答案
+RetrieveAgent → 调用 db_query_sql(...)                    ✓ 从刚导入的表里给出答案
 ```
 
 或者把文件拖进浏览器拖拽区，点击 **导入**。或者说"把这段加进图谱：陈诚晋升 Tech Lead，向 Ann 汇报" → agent 调用 `graph_add_triples_from_text`，LLM 抽取三元组，图谱把它们 upsert 进去。无需重启，无需重建索引。

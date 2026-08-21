@@ -96,7 +96,7 @@ async def _main() -> int:
 
     print(f"[hello_agent_sdk] router={ccr_base}  model={model}")
 
-    from datamind.agent import build_agent
+    from datamind.agent import build_datamind
     from datamind.config import Settings
     from datamind.core.logging import setup_logging
 
@@ -147,10 +147,10 @@ async def _main() -> int:
         encoding="utf-8",
     )
 
-    agent = await build_agent(settings)
-    await agent.warmup()
+    system = await build_datamind(settings)
+    await system.warmup()
 
-    with agent.db.engine.begin() as conn:
+    with system.services.db.engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS employees (
                 id INTEGER PRIMARY KEY,
@@ -164,9 +164,12 @@ async def _main() -> int:
               (3, 'Cam', 'Sales', 9000, 'Beijing')
         """))
 
-    stats = await agent.kb.reindex()
-    print(f"[hello_agent_sdk] KB indexed: {stats}")
-    print(f"[hello_agent_sdk] Tools: {len(agent.tools)} ({', '.join(agent.tools.names())})")
+    receipt = await system.store.tools.get("kb_reindex").handler()
+    print(f"[hello_agent_sdk] KB receipt: {receipt}")
+    print(
+        f"[hello_agent_sdk] Tools: retrieve={len(system.retrieve.tools)} "
+        f"store={len(system.store.tools)}"
+    )
 
     # Bridge every DataMind ToolSpec into one SDK MCP server.
     from claude_agent_sdk import (
@@ -182,16 +185,6 @@ async def _main() -> int:
         query,
     )
 
-    sdk_tools = [_spec_to_sdk_tool(agent.tools.get(n)) for n in agent.tools.names()]
-    mcp_server = create_sdk_mcp_server("datamind", tools=sdk_tools)
-
-    # SDK-side tool names get the form `mcp__<server>__<tool>` — pre-allow them.
-    allowed = [f"mcp__datamind__{n}" for n in agent.tools.names()]
-
-    # System prompt: mirror what build_agent() injects, so behavioural diff
-    # is in the loop and not in the prompt.
-    system_prompt = agent.loop._cfg.system_prompt
-
     questions = [
         "我们公司的 Status meeting 是什么时候开？",
         "Search platform 团队负责人是谁？他在哪个城市？",
@@ -203,6 +196,11 @@ async def _main() -> int:
 
     for q in questions:
         print(f"\n[Q] {q}")
+        agent = system.store if q.startswith("帮我记住") else system.retrieve
+        sdk_tools = [_spec_to_sdk_tool(agent.tools.get(n)) for n in agent.tools.names()]
+        mcp_server = create_sdk_mcp_server("datamind", tools=sdk_tools)
+        allowed = [f"mcp__datamind__{n}" for n in agent.tools.names()]
+        system_prompt = agent.loop._cfg.system_prompt
         options = ClaudeAgentOptions(
             model=model,
             system_prompt=system_prompt,

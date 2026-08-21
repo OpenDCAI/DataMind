@@ -67,7 +67,7 @@ class AgentLoopConfig:
 class AgentLoopProtocol(Protocol):
     """The contract every loop implementation must satisfy.
 
-    Both `NativeAgentLoop` and `SdkAgentLoop` implement this. `build_agent`
+    Both `NativeAgentLoop` and `SdkAgentLoop` implement this. Agent assembly
     picks one based on `Settings.agent.backend`; everything downstream
     (server, CLI, frontend) talks through this protocol.
     """
@@ -86,6 +86,10 @@ class AgentLoopProtocol(Protocol):
             iterations: int    — number of API round-trips used
             stop_reason: str   — "end_turn" | "max_iterations" | ...
             usage: dict        — token counts (implementation-specific keys)
+            tool_trace: list   — ordered tool calls made during the turn
+            surfaces_used: list — data surfaces touched during the turn
+            evidence: list     — normalized retrieval evidence (when available)
+            receipts: list     — StoreAgent write receipts (when available)
         """
         ...
 

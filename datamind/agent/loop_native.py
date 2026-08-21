@@ -33,6 +33,7 @@ from typing import Any, AsyncIterator
 from anthropic import AsyncAnthropic
 from anthropic.types import Message
 
+from datamind.core.contracts import ToolAccess
 from datamind.core.hooks import (
     AskUser,
     Allow,
@@ -202,6 +203,98 @@ class NativeAgentLoop:
             "content": f"{type(err).__name__}: {err}",
         }
 
+    def _trace_and_evidence(
+        self,
+        *,
+        name: str,
+        tool_input: dict[str, Any],
+        result: Any,
+        error: Exception | None,
+        outcome: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Normalize one dispatch for inference observability."""
+        try:
+            spec = self._tools.get(name)
+        except Exception:
+            return ({"name": name, "input": tool_input, "is_error": True}, [])
+        surface = spec.metadata.get("surface")
+        receipt_failed = self._result_failed(result)
+        trace = {
+            "name": name,
+            "surface": surface,
+            "access": spec.metadata.get("access", "read"),
+            "input": tool_input,
+            "is_error": error is not None or outcome is not None or receipt_failed,
+        }
+        if outcome is not None:
+            trace["hook_outcome"] = outcome.get("kind")
+        if (
+            error is not None
+            or outcome is not None
+            or spec.access != ToolAccess.READ
+            or surface is None
+        ):
+            return trace, []
+
+        evidence: list[dict[str, Any]] = []
+        if surface == "kb" and isinstance(result, dict):
+            for item in result.get("results", []):
+                if not isinstance(item, dict):
+                    continue
+                evidence.append({
+                    "surface": surface,
+                    "source_id": item.get("source"),
+                    "locator": {"source": item.get("source"), "chunk_id": item.get("id")},
+                    "content": item.get("text"),
+                    "score": item.get("score"),
+                })
+            if not evidence:
+                evidence.append({
+                    "surface": surface,
+                    "source_id": result.get("source"),
+                    "locator": dict(tool_input),
+                    "content": result,
+                    "score": None,
+                })
+        elif surface == "memory" and isinstance(result, dict):
+            for item in result.get("results", []):
+                if not isinstance(item, dict):
+                    continue
+                evidence.append({
+                    "surface": surface,
+                    "source_id": item.get("id"),
+                    "locator": {
+                        "scope": item.get("scope"),
+                        "profile": item.get("profile"),
+                        "session_id": item.get("session_id"),
+                    },
+                    "content": item.get("content"),
+                    "score": item.get("score"),
+                })
+        else:
+            source_id = None
+            locator = dict(tool_input)
+            if isinstance(result, dict):
+                source_id = result.get("source") or result.get("path") or result.get("name")
+            evidence.append({
+                "surface": surface,
+                "source_id": source_id,
+                "locator": locator,
+                "content": result,
+                "score": None,
+            })
+        return trace, evidence
+
+    @staticmethod
+    def _result_failed(result: Any) -> bool:
+        if not isinstance(result, dict):
+            return False
+        results = result.get("results")
+        return isinstance(results, list) and any(
+            isinstance(item, dict) and item.get("status") == "failed"
+            for item in results
+        )
+
     # ---------------------------------------------------------------- API
 
     async def run_turn(
@@ -218,6 +311,10 @@ class NativeAgentLoop:
         total_output = 0
         total_cache_read = 0
         total_cache_create = 0
+        tool_trace: list[dict[str, Any]] = []
+        evidence: list[dict[str, Any]] = []
+        receipts: list[dict[str, Any]] = []
+        surfaces_used: list[str] = []
 
         for iteration in range(self._cfg.max_tool_turns):
             resp: Message = await self._client.messages.create(
@@ -249,6 +346,10 @@ class NativeAgentLoop:
                         "cache_read": total_cache_read,
                         "cache_create": total_cache_create,
                     },
+                    "tool_trace": tool_trace,
+                    "evidence": evidence,
+                    "receipts": receipts,
+                    "surfaces_used": surfaces_used,
                 }
 
             # Dispatch every tool_use block, collect tool_result blocks.
@@ -256,7 +357,21 @@ class NativeAgentLoop:
             for b in assistant_blocks:
                 if b.get("type") != "tool_use":
                     continue
-                result, err, _outcome = await self._dispatch_tool(b["name"], b["input"])
+                result, err, outcome = await self._dispatch_tool(b["name"], b["input"])
+                trace, found = self._trace_and_evidence(
+                    name=b["name"],
+                    tool_input=b["input"],
+                    result=result,
+                    error=err,
+                    outcome=outcome,
+                )
+                tool_trace.append(trace)
+                evidence.extend(found)
+                if isinstance(result, dict) and result.get("receipt_id"):
+                    receipts.append(result)
+                surface = trace.get("surface")
+                if surface and surface not in surfaces_used:
+                    surfaces_used.append(surface)
                 tool_results.append(self._tool_result_block(b["id"], result, err))
             conv.append({"role": "user", "content": tool_results})
 
@@ -272,6 +387,10 @@ class NativeAgentLoop:
                 "cache_read": total_cache_read,
                 "cache_create": total_cache_create,
             },
+            "tool_trace": tool_trace,
+            "evidence": evidence,
+            "receipts": receipts,
+            "surfaces_used": surfaces_used,
         }
 
     async def stream_turn(
@@ -287,6 +406,10 @@ class NativeAgentLoop:
         """
         conv: list[dict] = list(history or [])
         conv.append({"role": "user", "content": user_message})
+        tool_trace: list[dict[str, Any]] = []
+        evidence: list[dict[str, Any]] = []
+        receipts: list[dict[str, Any]] = []
+        surfaces_used: list[str] = []
 
         for iteration in range(self._cfg.max_tool_turns):
             async with self._client.messages.stream(
@@ -315,6 +438,10 @@ class NativeAgentLoop:
                             "input_tokens": final.usage.input_tokens,
                             "output_tokens": final.usage.output_tokens,
                         },
+                        "tool_trace": tool_trace,
+                        "evidence": evidence,
+                        "receipts": receipts,
+                        "surfaces_used": surfaces_used,
                     },
                 )
                 return
@@ -328,6 +455,20 @@ class NativeAgentLoop:
                     data={"name": b["name"], "input": b["input"], "id": b["id"]},
                 )
                 result, err, outcome = await self._dispatch_tool(b["name"], b["input"])
+                trace, found = self._trace_and_evidence(
+                    name=b["name"],
+                    tool_input=b["input"],
+                    result=result,
+                    error=err,
+                    outcome=outcome,
+                )
+                tool_trace.append(trace)
+                evidence.extend(found)
+                if isinstance(result, dict) and result.get("receipt_id"):
+                    receipts.append(result)
+                surface = trace.get("surface")
+                if surface and surface not in surfaces_used:
+                    surfaces_used.append(surface)
                 tr = self._tool_result_block(b["id"], result, err)
                 tool_results.append(tr)
                 # If a hook short-circuited (denied / asks_user), surface it
@@ -357,7 +498,7 @@ class NativeAgentLoop:
                     type="tool_result",
                     data={
                         "name": b["name"],
-                        "is_error": bool(err),
+                        "is_error": bool(err) or self._result_failed(result),
                         "preview": tr["content"][:500] if isinstance(tr["content"], str) else None,
                     },
                 )
@@ -365,7 +506,14 @@ class NativeAgentLoop:
 
         yield AgentEvent(
             type="done",
-            data={"stop_reason": "max_iterations", "iterations": self._cfg.max_tool_turns},
+            data={
+                "stop_reason": "max_iterations",
+                "iterations": self._cfg.max_tool_turns,
+                "tool_trace": tool_trace,
+                "evidence": evidence,
+                "receipts": receipts,
+                "surfaces_used": surfaces_used,
+            },
         )
 
 

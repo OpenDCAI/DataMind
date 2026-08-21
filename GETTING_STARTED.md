@@ -122,7 +122,7 @@ This is the prize-winning moment. The script:
 
 1. Seeds a profile with a 2-file KB, a SQLite DB (employees + projects), and a small graph.
 2. Asks four real questions in Chinese.
-3. The agent picks tools on its own — you can see the tool sequence in the output.
+3. RetrieveAgent answers the first three questions; StoreAgent handles the final write. You can see each tool sequence in the output.
 
 Expected tool sequences (they may differ slightly between runs — the agent has latitude):
 
@@ -144,7 +144,7 @@ python -m datamind chat
 ```
 ╭──── Chat ─────╮
 │ DataMind ready · profile=default · model=claude-sonnet-4-6
-│ tools=23 · kb_chunks=0 · graph_triples=0 · skills=2
+│ tools=19 · kb_chunks=0 · graph_triples=0 · skills=2
 │ type /exit to quit, /new to reset history
 ╰───────────────╯
 you ›
@@ -160,7 +160,7 @@ Commands: `/new` resets history, `/exit` or `Ctrl-D` leaves. Tool calls print as
 python -m datamind ask "如何做代码审查？" --show-tools
 ```
 
-Uses the **current profile's** knowledge surfaces. Memory is now **scope-typed** (v0.3): facts saved without an explicit scope land under `scope='profile'`, isolated to the active tenant. Pass `--session some-id` plus `scope='session'` in `memory_save` to confine items to a single conversation. `scope='global'` items are visible across every profile.
+Uses RetrieveAgent over the **current profile's** knowledge surfaces. To write memory, use `datamind store "帮我记住……"`; StoreAgent chooses `memory_save` and defaults to the active profile scope. Session and global scopes remain available through the memory tool contract.
 
 ---
 
@@ -196,6 +196,11 @@ curl -s -X POST localhost:8000/api/ask \
 curl -N -X POST localhost:8000/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"message":"告诉我 Status meeting 时间"}'
+
+# Store data through StoreAgent
+curl -s -X POST localhost:8000/api/store \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"记住：发布窗口是每周四 20:00"}' | python3 -m json.tool
 ```
 
 ---
@@ -207,9 +212,9 @@ DataMind ships two interchangeable agent-loop implementations:
 | Backend | How it talks to the model | When to pick it |
 |---|---|---|
 | `native` (default) | Pure Python, `anthropic` SDK → your gateway | Simplest deploy, fewest deps |
-| `sdk` | `claude-agent-sdk` → `claude` CLI → **CCR** (local translator) → your gateway | Want the SDK's own Subagents / Compaction / Plan mode out of the box |
+| `sdk` | `claude-agent-sdk` → `claude` CLI → **CCR** (local translator) → your gateway | Want the SDK's own Subagents / Compaction facilities |
 
-The **27 DataMind tools**, the SSE event shape, the frontend, **and DataMind's own safety HookChain** (PathAllowlist / DestructiveSql / AuditLog) all work identically either way — only the inner loop changes. On `native` the HookChain runs at the loop's dispatch chokepoint; on `sdk` it runs inside each MCP tool wrapper. Same chain instance, same Allow/Deny/AskUser/Rewrite decisions, same audit log.
+The role-scoped tool registries (19 read/utility tools for RetrieveAgent and 11 write tools for StoreAgent), the event shape, the frontend, **and DataMind's own safety HookChain** (PathAllowlist / DestructiveSql / AuditLog) all work identically either way — only the inner loop changes. On `native` the HookChain runs at the loop's dispatch chokepoint; on `sdk` it runs inside each MCP tool wrapper. Same chain instance, same Allow/Deny/AskUser/Rewrite decisions, same audit log.
 
 > Note: the SDK's *own* hook system (its `PreToolUse`/`PostToolUse` API) is a separate thing from DataMind's `HookChain`. DataMind's safety hooks are enforced on both backends regardless of which one you pick.
 
@@ -257,34 +262,34 @@ Switch back to native any time by setting `DATAMIND__AGENT__BACKEND=native` (or 
 
 There are three ways to put data into DataMind, and they coexist. Pick whichever fits your workflow.
 
-### 9.1 Conversational ingest (recommended for ad-hoc additions)
+### 9.1 Agentic storage (recommended for ad-hoc additions)
 
-The agent has 4 ingest tools that let it *write* to the KB / DB / Graph during a conversation:
+StoreAgent owns all writes across the five data surfaces. Each successful tool call returns a durable receipt with its surface, source fingerprint, changed resources, and monotonic revision; retrying the same request is idempotent.
 
-| Tool | What it does |
+| Surface | Store tools |
 |---|---|
-| `kb_add_file` | Single file → chunk → embed → upsert (immediately searchable) |
-| `kb_add_path` | One file or every supported file under a directory |
-| `db_import_csv` | CSV → infer schema → CREATE TABLE → INSERT (with `append` / `replace` / `fail` modes) |
-| `graph_add_triples_from_text` | Free-form text → LLM extracts (subject, relation, object) → upsert into graph |
+| KB | `kb_add_text`, `kb_add_file`, `kb_add_path`, `kb_reindex` |
+| DB | `db_import_csv`, `db_import_records` |
+| Graph | `graph_upsert_triples`, `graph_add_triples_from_text` |
+| Skills | `skill_upsert` |
+| Memory | `memory_save`, `memory_forget` |
 
 Try it:
 
 ```bash
-# In the chat:
-"帮我把 /Users/foo/policy.md 加进知识库"
-# → agent calls kb_add_file, file is immediately retrievable via kb_search
+datamind store "帮我把 /Users/foo/policy.md 加进知识库"
+# → StoreAgent calls kb_add_file; RetrieveAgent can immediately use kb_search
 
-"把 /Users/foo/sales.csv 导入成数据表 sales_q2"
-# → agent calls db_import_csv, you can immediately ask SQL questions
+datamind store "把 /Users/foo/sales.csv 导入成数据表 sales_q2"
+# → StoreAgent calls db_import_csv; RetrieveAgent can immediately answer SQL questions
 
-"陈诚晋升 Tech Lead，向 Ann 汇报，负责 Project Kepler"
-# → agent calls graph_add_triples_from_text, LLM extracts triples, graph upserts them
+datamind store "把陈诚晋升 Tech Lead、向 Ann 汇报、负责 Project Kepler 写入图谱"
+# → StoreAgent extracts and upserts triples, returning a write receipt
 ```
 
 ### 9.2 Browser drag-drop
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000) → drag any `.md` / `.txt` / `.csv` file into the dropzone above the input box. The file uploads to `data/profiles/<profile>/uploads/`, gets listed below the dropzone, and clicking **导入** asks the agent to ingest it (it picks the right tool based on extension).
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000) → drag any `.md` / `.txt` / `.csv` file into the dropzone above the input box. The file uploads to `data/profiles/<profile>/uploads/`; clicking **导入** sends the request to StoreAgent, which picks the write tool. The ordinary chat endpoint remains RetrieveAgent-only.
 
 A handful of demo files live in [`demo-uploads/`](./demo-uploads/) — drag any of them to see the full pipeline:
 

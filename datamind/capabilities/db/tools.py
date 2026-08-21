@@ -29,7 +29,7 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
             description="List the tables available in the active SQL database.",
             input_schema={"type": "object", "properties": {}},
             handler=_list_tables,
-            metadata={"group": "db"},
+            metadata={"group": "db", "surface": "db", "access": "read"},
         ),
         ToolSpec(
             name="db_describe_table",
@@ -45,7 +45,7 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
                 "required": ["table"],
             },
             handler=_describe,
-            metadata={"group": "db"},
+            metadata={"group": "db", "surface": "db", "access": "read"},
         ),
         ToolSpec(
             name="db_query_sql",
@@ -62,7 +62,7 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
                 "required": ["sql"],
             },
             handler=_query_sql,
-            metadata={"group": "db"},
+            metadata={"group": "db", "surface": "db", "access": "read"},
         ),
         ToolSpec(
             name="db_query_nl",
@@ -83,7 +83,7 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
                 "required": ["question"],
             },
             handler=_query_nl,
-            metadata={"group": "db"},
+            metadata={"group": "db", "surface": "db", "access": "read"},
         ),
     ]
 

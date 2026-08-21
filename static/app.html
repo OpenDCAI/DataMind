@@ -523,7 +523,7 @@ main {
 <body>
 
 <header>
-  <h1>DataMind <small>v0.2</small></h1>
+  <h1>DataMind <small>two-agent</small></h1>
   <div class="header-status" id="headerStatus">
     <span class="pill warn" id="healthPill"><span class="dot"></span><span>Connecting…</span></span>
   </div>
@@ -534,8 +534,8 @@ main {
     <div class="messages" id="messages">
       <div class="welcome" id="welcome">
         <h3>👋 欢迎使用 DataMind</h3>
-        <p>这是一个统一检索 Agent，可以调用 <code>kb_search</code>、<code>db_query_nl</code>、<code>graph_traverse</code>、<code>skill_search</code>、<code>memory_recall</code> 等工具自动回答你的问题。</p>
-        <p>下方输入问题试试 —— 工具调用会实时展示在回答中。</p>
+        <p><strong>RetrieveAgent</strong> 只读地跨五个数据面取数；<strong>StoreAgent</strong> 负责写入，并返回可审计回执。</p>
+        <p>输入问题后点「取数」，输入要保存的内容后点「存数」。</p>
         <div class="sample-prompts" id="samplePrompts"></div>
       </div>
     </div>
@@ -555,8 +555,9 @@ main {
       <input type="file" id="fileInput" style="display: none" multiple />
 
       <div class="composer-row">
-        <textarea id="chatInput" placeholder="输入问题… (Enter 发送,  Shift+Enter 换行)" rows="1"></textarea>
-        <button id="sendBtn">发送</button>
+        <textarea id="chatInput" placeholder="输入取数问题或存数指令…" rows="1"></textarea>
+        <button id="storeBtn">存数</button>
+        <button id="sendBtn">取数</button>
       </div>
       <div class="composer-hints">
         <span>
@@ -565,7 +566,7 @@ main {
           · <a href="#" id="clearHistoryBtn" style="color: var(--text3)">清空上下文</a>
         </span>
         <span>
-          <kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行
+          <kbd>Enter</kbd> 取数 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行
         </span>
       </div>
     </div>
@@ -658,7 +659,7 @@ async function loadHealth() {
     state.health = await api('/api/health');
     const pill = $('healthPill');
     pill.classList.remove('warn', 'err');
-    pill.innerHTML = `<span class="dot"></span><span>就绪 · ${state.health.tools} 工具</span>`;
+    pill.innerHTML = `<span class="dot"></span><span>就绪 · 取 ${state.health.retrieve_tools} / 存 ${state.health.store_tools}</span>`;
 
     const kv = $('configKV');
     kv.innerHTML = '';
@@ -667,6 +668,7 @@ async function loadHealth() {
       ['model', state.health.model],
       ['embedding', state.health.embedding],
       ['db', state.health.db_dialect],
+      ['revision', state.health.revision],
     ];
     for (const [k, v] of rows) {
       kv.innerHTML += `<dt>${k}</dt><dd>${v}</dd>`;
@@ -693,7 +695,7 @@ async function loadTools() {
       item.className = 'tool-item';
       const groupCls = (t.group || 'other').replace('.', '').toLowerCase();
       const shortDesc = (t.description || '').split(/[\n.]/)[0].slice(0, 80);
-      item.innerHTML = `<span class="group-tag ${groupCls}">${t.group || '-'}</span><span title="${escapeHtml(t.description || '')}">${t.name}</span>`;
+      item.innerHTML = `<span class="group-tag ${groupCls}">${t.role || '-'} · ${t.group || '-'}</span><span title="${escapeHtml(t.description || '')}">${t.name}</span>`;
       list.appendChild(item);
     }
     fillSamplePrompts();
@@ -733,7 +735,8 @@ async function reindexKb() {
   btn.textContent = '重建中…';
   try {
     const out = await api('/api/kb/reindex', { method: 'POST' });
-    logLine(`kb reindex: pre_chunked=${out.pre_chunked} raw_chunks=${out.raw_chunks} total=${out.total_embedded}`);
+    const write = out.results?.[0] || {};
+    logLine(`kb reindex: status=${write.status || '?'} revision=${out.revision ?? '?'}`);
     await loadKb();
   } catch (err) {
     logLine(`reindex failed: ${err.message}`);
@@ -771,22 +774,25 @@ async function runMemoryQuery() {
 function fillSamplePrompts() {
   const known = new Set(state.tools.map(t => t.name));
   const bag = [];
-  if (known.has('kb_search')) bag.push('Search platform 团队负责人是谁？');
-  if (known.has('db_query_nl')) bag.push('数据库里有多少个员工？');
-  if (known.has('graph_traverse')) bag.push('Ann 三跳能到达哪些实体？');
-  if (known.has('skill_search')) bag.push('如何做代码审查？');
-  if (known.has('calculator')) bag.push('帮我算 sqrt(144) + 3^4 是多少');
-  if (known.has('memory_save')) bag.push('帮我记住：下周三会议调到周四');
-  if (known.has('get_current_time')) bag.push('现在几点了？');
-  if (!bag.length) bag.push('你能帮我做什么？');
+  if (known.has('kb_search')) bag.push({ text: 'Search platform 团队负责人是谁？', role: 'retrieve' });
+  if (known.has('db_query_nl')) bag.push({ text: '数据库里有多少个员工？', role: 'retrieve' });
+  if (known.has('graph_traverse')) bag.push({ text: 'Ann 三跳能到达哪些实体？', role: 'retrieve' });
+  if (known.has('skill_search')) bag.push({ text: '如何做代码审查？', role: 'retrieve' });
+  if (known.has('memory_save')) bag.push({ text: '帮我记住：下周三会议调到周四', role: 'store' });
+  if (known.has('get_current_time')) bag.push({ text: '现在几点了？', role: 'retrieve' });
+  if (!bag.length) bag.push({ text: '你能帮我做什么？', role: 'retrieve' });
 
   const el = $('samplePrompts');
   el.innerHTML = '';
-  for (const q of bag.slice(0, 6)) {
+  for (const sample of bag.slice(0, 6)) {
     const btn = document.createElement('button');
     btn.className = 'sample-prompt';
-    btn.textContent = q;
-    btn.onclick = () => { $('chatInput').value = q; sendMessage(); };
+    btn.textContent = `${sample.role === 'store' ? '存' : '取'} · ${sample.text}`;
+    btn.onclick = () => {
+      $('chatInput').value = sample.text;
+      if (sample.role === 'store') sendStoreFromComposer();
+      else sendMessage();
+    };
     el.appendChild(btn);
   }
 }
@@ -1088,6 +1094,7 @@ $('sendBtn').addEventListener('click', () => {
   if (state.streaming) stopStream();
   else sendMessage();
 });
+$('storeBtn').addEventListener('click', sendStoreFromComposer);
 
 $('clearHistoryBtn').addEventListener('click', (e) => {
   e.preventDefault();
@@ -1119,9 +1126,8 @@ $('sessionInput').addEventListener('change', () => {
 // ────────────────────────────────────────────────────────
 // Files dropped here are uploaded to /api/upload (server saves under
 // data/profiles/<profile>/uploads/) and then displayed in a small list
-// below the drop zone. Clicking "导入" on a row sends a follow-up chat
-// prompt that asks the agent to ingest the file via its kb_add_file /
-// db_import_csv tools — the agent picks based on the extension.
+// below the drop zone. Clicking "导入" sends the instruction to the
+// write-only StoreAgent endpoint; normal chat remains strictly read-only.
 
 const DROP = $('dropZone');
 const FILE_INPUT = $('fileInput');
@@ -1141,17 +1147,59 @@ function formatBytes(n) {
   return `${(n / 1024 / 1024).toFixed(2)} MB`;
 }
 
-function suggestPromptForFile(filename) {
+function suggestPromptForFile(filename, savedPath) {
   const lower = filename.toLowerCase();
+  const sourcePath = savedPath || filename;
   if (lower.endsWith('.csv') || lower.endsWith('.tsv')) {
     const tableHint = filename.replace(/\.(csv|tsv)$/i, '').replace(/[^a-zA-Z0-9_]+/g, '_');
-    return `把刚上传的 ${filename} 导入成数据表，表名叫 ${tableHint}`;
+    return `把文件 ${sourcePath} 导入成数据表，表名叫 ${tableHint}`;
   }
   if (lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.txt')) {
-    return `帮我把刚上传的 ${filename} 加进知识库`;
+    return `帮我把文件 ${sourcePath} 加进知识库`;
   }
   // Fallback — let the agent decide
-  return `刚上传了文件 ${filename}，请帮我处理`;
+  return `请存储文件 ${sourcePath}`;
+}
+
+async function sendStoreInstruction(message) {
+  addBubble('user').textContent = message;
+  const aiBubble = addBubble('assistant');
+  aiBubble.textContent = 'StoreAgent 正在写入…';
+  try {
+    const result = await api('/api/store', {
+      method: 'POST',
+      body: JSON.stringify({ message, history: [] }),
+    });
+    const receiptLines = (result.receipts || []).map(receipt => {
+      const statuses = (receipt.results || []).map(item => `${item.surface}:${item.status}`).join(', ');
+      return `revision ${receipt.revision} · ${statuses} · ${receipt.receipt_id}`;
+    });
+    aiBubble.textContent = [result.answer || '写入完成。', ...receiptLines].join('\n');
+    await loadHealth();
+    logLine(`store revision -> ${state.health?.revision ?? '?'}`);
+    await loadKb();
+  } catch (err) {
+    aiBubble.textContent = `存数失败：${err.message}`;
+    aiBubble.classList.add('error');
+    logLine(`store error: ${err.message}`);
+  }
+  scrollToBottom();
+}
+
+async function sendStoreFromComposer() {
+  if (state.streaming) return;
+  const input = $('chatInput');
+  const message = input.value.trim();
+  if (!message) return;
+  input.value = '';
+  autoresize();
+  const button = $('storeBtn');
+  button.disabled = true;
+  try {
+    await sendStoreInstruction(message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function uploadOne(file) {
@@ -1187,11 +1235,11 @@ function renderUpload(data) {
     <span style="color: var(--text3)">${formatBytes(data.bytes)}</span>
     <button class="ingest-btn">导入</button>
   `;
-  row.querySelector('.ingest-btn').addEventListener('click', () => {
-    const prompt = suggestPromptForFile(data.filename);
-    $('chatInput').value = prompt;
-    autoresize();
-    sendMessage();
+  row.querySelector('.ingest-btn').addEventListener('click', async (event) => {
+    const prompt = suggestPromptForFile(data.filename, data.saved_to);
+    event.currentTarget.disabled = true;
+    await sendStoreInstruction(prompt);
+    event.currentTarget.disabled = false;
   });
   UPLOADS.appendChild(row);
 }

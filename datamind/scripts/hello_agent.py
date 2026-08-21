@@ -36,7 +36,7 @@ async def _main() -> int:
         print("[hello_agent] DATAMIND__LLM__API_KEY not set", file=sys.stderr)
         return 1
 
-    from datamind.agent import build_agent
+    from datamind.agent import build_datamind
     from datamind.config import Settings
     from datamind.core.logging import setup_logging
 
@@ -89,11 +89,11 @@ async def _main() -> int:
         encoding="utf-8",
     )
 
-    agent = await build_agent(settings)
-    await agent.warmup()
+    system = await build_datamind(settings)
+    await system.warmup()
 
     # Seed SQLite (via the agent's engine)
-    with agent.db.engine.begin() as conn:
+    with system.services.db.engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS employees (
                 id INTEGER PRIMARY KEY,
@@ -108,10 +108,11 @@ async def _main() -> int:
         """))
 
     # Re-index KB now that docs exist
-    stats = await agent.kb.reindex()
-    print(f"[hello_agent] KB indexed: {stats}")
-    print(f"[hello_agent] Graph stats: {agent.graph.stats()}")
-    print(f"[hello_agent] Tools: {agent.tools.names()}\n")
+    receipt = await system.store.tools.get("kb_reindex").handler()
+    print(f"[hello_agent] KB receipt: {receipt}")
+    print(f"[hello_agent] Graph stats: {system.services.graph.stats()}")
+    print(f"[hello_agent] Retrieve tools: {system.retrieve.tools.names()}")
+    print(f"[hello_agent] Store tools: {system.store.tools.names()}\n")
 
     questions = [
         "我们公司的 Status meeting 是什么时候开？",
@@ -120,9 +121,13 @@ async def _main() -> int:
         "帮我记住：我下周三会议不能参加，请调到周四。",
     ]
 
-    history: list[dict] = []
+    retrieve_history: list[dict] = []
+    store_history: list[dict] = []
     for q in questions:
         print(f"\n[Q] {q}")
+        is_store = q.startswith("帮我记住")
+        agent = system.store if is_store else system.retrieve
+        history = store_history if is_store else retrieve_history
         collected_text = []
         tool_calls = []
         async for event in agent.loop.stream_turn(user_message=q, history=history):

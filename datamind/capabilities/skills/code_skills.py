@@ -114,7 +114,7 @@ def build_code_skills() -> list[ToolSpec]:
             description="Return the current local date and time.",
             input_schema={"type": "object", "properties": {}},
             handler=_get_current_time,
-            metadata={"group": "skill.code"},
+            metadata={"group": "skill.code", "surface": "skills", "access": "utility"},
         ),
         ToolSpec(
             name="calculator",
@@ -131,7 +131,7 @@ def build_code_skills() -> list[ToolSpec]:
                 "required": ["expression"],
             },
             handler=_calculator,
-            metadata={"group": "skill.code"},
+            metadata={"group": "skill.code", "surface": "skills", "access": "utility"},
         ),
         ToolSpec(
             name="analyze_text",
@@ -142,7 +142,7 @@ def build_code_skills() -> list[ToolSpec]:
                 "required": ["text"],
             },
             handler=_analyze_text,
-            metadata={"group": "skill.code"},
+            metadata={"group": "skill.code", "surface": "skills", "access": "utility"},
         ),
         ToolSpec(
             name="unit_convert",
@@ -157,7 +157,7 @@ def build_code_skills() -> list[ToolSpec]:
                 "required": ["value", "from_unit", "to_unit"],
             },
             handler=_unit_convert,
-            metadata={"group": "skill.code"},
+            metadata={"group": "skill.code", "surface": "skills", "access": "utility"},
         ),
     ]
 

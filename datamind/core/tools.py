@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
 from .errors import ConfigError
+from .contracts import DataSurface, ToolAccess
 from .registry import Registry
 
 # Handler signature: async callable from JSON input -> JSON-serialisable output.
@@ -43,6 +44,25 @@ class ToolSpec:
     handler: ToolHandler
     # Free-form metadata for UI / audit / grouping (e.g. {"group": "kb"}).
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def access(self) -> ToolAccess:
+        """Return the declared access role, defaulting legacy tools to read."""
+        raw = self.metadata.get("access", ToolAccess.READ.value)
+        try:
+            return ToolAccess(str(raw))
+        except ValueError as exc:
+            raise ConfigError(f"Tool '{self.name}' has invalid access role: {raw!r}") from exc
+
+    @property
+    def surface(self) -> DataSurface | None:
+        raw = self.metadata.get("surface")
+        if raw is None:
+            return None
+        try:
+            return DataSurface(str(raw))
+        except ValueError as exc:
+            raise ConfigError(f"Tool '{self.name}' has invalid data surface: {raw!r}") from exc
 
     def to_anthropic_tool(self) -> dict[str, Any]:
         """Serialise to the JSON object the Anthropic API accepts in `tools=`."""
@@ -95,6 +115,34 @@ class ToolRegistry:
 
     def as_anthropic_tools(self) -> list[dict[str, Any]]:
         return [t.to_anthropic_tool() for t in self._tools.values()]
+
+    def select(
+        self,
+        *,
+        access: set[ToolAccess] | None = None,
+        surfaces: set[DataSurface] | None = None,
+    ) -> "ToolRegistry":
+        """Create a role-scoped registry without copying handlers.
+
+        This is the enforcement point used by the two agent assemblers.  A
+        RetrieveAgent registry accepts read/utility tools while a StoreAgent
+        registry accepts write tools; prompts are not trusted for isolation.
+        """
+        selected = ToolRegistry()
+        for spec in self._tools.values():
+            if access is not None and spec.access not in access:
+                continue
+            if surfaces is not None and spec.surface not in surfaces:
+                continue
+            selected.add(spec)
+        return selected
+
+    def assert_access(self, allowed: set[ToolAccess]) -> None:
+        disallowed = [s.name for s in self._tools.values() if s.access not in allowed]
+        if disallowed:
+            raise ConfigError(
+                "Tool registry violates its access boundary: " + ", ".join(sorted(disallowed))
+            )
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools

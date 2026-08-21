@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/datamind.svg)](https://pypi.org/project/datamind/)
 [![License](https://img.shields.io/pypi/l/datamind.svg)](https://github.com/OpenDCAI/DataMind/blob/main/LICENSE)
 
-An agentic retrieval assistant that pulls from **six** distinct knowledge surfaces and **picks the right tool itself**. Talk to it through a CLI or a browser UI; drag a file in and it'll route it into the right backend automatically.
+An inference-time data system with two cooperating agents. **StoreAgent** routes writes across five data surfaces; **RetrieveAgent** performs strictly read-only cross-surface retrieval and evidence synthesis. The five surfaces are RAG, database, graph, Skills, and Memory. There is no DataOp, DataPlan, or execution DAG.
 
 > **v0.3.0 is a preview release on PyPI.** The current codebase lives under [`datamind/`](./datamind/); the original v0.1 prototype (`main.py` / `server.py` / `modules/`) is kept in-tree for comparison only. End-to-end walkthrough: [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [docs site](https://opendcai.github.io/DataMind-Doc/en/).
 
@@ -49,17 +49,17 @@ python -m uvicorn datamind.server:app --port 8000      # browser UI on http://12
 
 ## Capabilities
 
-| Capability | Backend | Tools the agent gets |
-|---|---|---|
-| **KB (RAG)** | Chroma + BM25 with Reciprocal Rank Fusion | `kb_search`, `kb_list_documents`, `kb_count`, `kb_reindex` |
-| **Graph** | NetworkX, JSON-persisted | `graph_search_entities`, `graph_traverse`, `graph_neighbors`, `graph_upsert_triples` |
-| **Database** | SQLAlchemy (SQLite / MySQL / Postgres) | `db_list_tables`, `db_describe_table`, `db_query_sql`, `db_query_nl` |
-| **Skills** | `.claude/skills/<name>/SKILL.md` + safe Python tools | `skill_search`, `skill_get`, `skill_list`, `calculator`, `unit_convert`, `get_current_time`, `analyze_text` |
-| **Memory** | SQLite with cosine recall + LLM fact extraction; **scope-typed (`global` / `profile` / `session`)** for multi-tenant isolation | `memory_save`, `memory_recall`, `memory_forget`, `memory_list_profiles` |
-| **Ingest** ✨ | Conversational data import — drop a file in via chat or the browser drag-drop zone | `kb_add_file`, `kb_add_path`, `db_import_csv`, `graph_add_triples_from_text` |
-| **Hooks** ✨ v0.3 | Sandboxed tool dispatch — every call is intercepted; `Allow` / `Deny` / `AskUser` / `Rewrite`; tamper-evident audit log per profile | `PathAllowlistHook`, `DestructiveSqlHook`, `AuditLogHook` (built-in; user hooks pluggable) |
+| Data surface | Backend | RetrieveAgent | StoreAgent |
+|---|---|---|---|
+| **KB (RAG)** | Chroma + BM25 with Reciprocal Rank Fusion | `kb_search`, `kb_list_documents`, `kb_count` | `kb_add_text`, `kb_add_file`, `kb_add_path`, `kb_reindex` |
+| **Graph** | NetworkX, JSON-persisted | `graph_search_entities`, `graph_traverse`, `graph_neighbors` | `graph_upsert_triples`, `graph_add_triples_from_text` |
+| **Database** | SQLAlchemy (SQLite / MySQL / Postgres) | `db_list_tables`, `db_describe_table`, `db_query_sql`, `db_query_nl` | `db_import_csv`, `db_import_records` |
+| **Skills** | base + profile-scoped `SKILL.md`, plus safe Python tools | `skill_search`, `skill_get`, `skill_list`, `calculator`, `unit_convert`, `get_current_time`, `analyze_text` | `skill_upsert` |
+| **Memory** | SQLite with cosine recall; scope-typed (`global` / `profile` / `session`) | `memory_recall`, `memory_list_profiles` | `memory_save`, `memory_forget` |
 
-**27 tools total.** All routed through one `ToolRegistry`; the agent decides what to call and in what order.
+The runtime uses two physically separate registries: 19 read/utility tools for RetrieveAgent and 11 write tools for StoreAgent. Code enforces the boundary before tools reach the model.
+
+Every tool call still passes through the shared safety HookChain: `PathAllowlistHook`, `DestructiveSqlHook`, and `AuditLogHook`.
 
 ---
 
@@ -100,16 +100,16 @@ More detail in [`GETTING_STARTED.md`](./GETTING_STARTED.md).
 
 Ask: **"工程部 Shanghai 的员工工资加起来是多少？"**
 
-The agent figures out it needs SQL, tries `db_query_nl`, gets an empty result, recovers by inspecting the schema (`db_list_tables` → `db_describe_table`), discovers the column is `Eng` not `Engineering`, rewrites the SQL itself, and answers ¥26,000 — without any of that being hard-coded. Same agent picks `graph_search_entities + graph_neighbors` for relationship questions, `kb_search + skill_get` for SOP questions, `memory_save` for "remember this for me" requests.
+RetrieveAgent can recover from a failed SQL attempt by inspecting the schema and rewriting the query, combine Graph with KB/Skills, and return evidence. "Remember this for me" is handled by StoreAgent through `memory_save`; RetrieveAgent never receives that write tool.
 
-**Frontend stays the same regardless.** The 27 tools, the streaming SSE protocol, the chat UI, and DataMind's own safety HookChain work identically across two interchangeable agent backends:
+Both agents support the same two interchangeable loop backends and share the SSE protocol, services, and safety HookChain:
 
 ```
 DATAMIND__AGENT__BACKEND=native   # default — pure-Python anthropic SDK + self-written loop
                                   # requires an Anthropic-format upstream
 DATAMIND__AGENT__BACKEND=sdk      # claude-agent-sdk + claude-code-router (CCR)
                                   # use this to sit on an OpenAI-format gateway
-                                  # (CCR translates); adds Subagents / Compaction / Plan mode
+                                  # (CCR translates); adds Subagents / Compaction
 ```
 
 DataMind's `HookChain` (path allow-list, destructive-SQL gate, tamper-evident audit) is enforced on **both** backends — at the dispatch chokepoint on `native`, inside each MCP tool wrapper on `sdk`. Both verified end-to-end against the same 8 enterprise-demo questions ([numbers here](./GETTING_STARTED.md#10-bench)).
@@ -177,13 +177,18 @@ the header comment in that script.
 
 ## Add data by talking
 
-The 4 ingest tools turn the agent into a **read-and-write** surface:
+StoreAgent owns every write tool while RetrieveAgent remains strictly read-only:
+
+```bash
+datamind store "Import /Users/foo/sales-q2.csv as table q2_sales"
+datamind store "Remember that weekly reports default to Chinese"
+```
 
 ```
 you  → "把 /Users/foo/sales-q2.csv 导入成数据表 q2_sales"
-agent → calls db_import_csv(path=..., table='q2_sales')   ✓ 18 rows inserted
+StoreAgent → calls db_import_csv(path=..., table='q2_sales')   ✓ 18 rows inserted
 you  → "Q2 sales pipeline 里 in-pipeline 单子总额是多少？哪个 sales rep 单子最多？"
-agent → calls db_query_sql(...)                            ✓ answers from the freshly-imported table
+RetrieveAgent → calls db_query_sql(...)                    ✓ answers from the freshly-imported table
 ```
 
 Or drop the file into the browser dropzone and click **导入**. Or say "把这段加进图谱：陈诚晋升 Tech Lead，向 Ann 汇报" → agent calls `graph_add_triples_from_text`, LLM extracts triples, graph upserts them. No restart, no reindex.

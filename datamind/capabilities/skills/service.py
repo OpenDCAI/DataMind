@@ -8,11 +8,14 @@ Code skills are just ToolSpecs; they don't need an index.
 """
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import Any
 
 from datamind.capabilities.embedding import build_embedding
 from datamind.config import Settings
+from datamind.core.errors import CapabilityError
 from datamind.core.logging import get_logger
 from datamind.core.protocols import EmbeddingProvider, VectorStore
 from datamind.core.registry import vector_store_registry
@@ -33,10 +36,12 @@ class SkillsService:
         self,
         *,
         skills_dir: Path,
+        profile_skills_dir: Path | None = None,
         embedding: EmbeddingProvider | None,
         vector_store: VectorStore | None,
     ) -> None:
         self._skills_dir = Path(skills_dir)
+        self._profile_skills_dir = Path(profile_skills_dir or skills_dir)
         self._embedding = embedding
         self._store = vector_store
         self._by_name: dict[str, SkillManifest] = {}
@@ -46,8 +51,13 @@ class SkillsService:
     # ------------------------------------------------------------ lifecycle
 
     async def load(self) -> dict[str, int]:
+        # Built-in/user skills load first; profile-scoped skills override a
+        # same-named base skill without mutating the shared catalogue.
         manifests = discover_skills(self._skills_dir)
+        if self._profile_skills_dir.resolve() != self._skills_dir.resolve():
+            manifests.extend(discover_skills(self._profile_skills_dir))
         self._by_name = {m.name: m for m in manifests}
+        manifests = list(self._by_name.values())
         indexed = 0
         if manifests and self._embedding and self._store:
             ids = [m.name for m in manifests]
@@ -121,6 +131,56 @@ class SkillsService:
             for h in hits
         ]
 
+    async def upsert(
+        self,
+        *,
+        name: str,
+        description: str,
+        body: str,
+        keywords: list[str] | None = None,
+        overwrite: bool = True,
+    ) -> dict[str, Any]:
+        """Write a profile-scoped SKILL.md and refresh the live index."""
+        normalized = name.strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", normalized):
+            raise CapabilityError(
+                "skills",
+                "skill name must contain lowercase letters, digits, '-' or '_'",
+            )
+        if not description.strip():
+            raise CapabilityError("skills", "skill description is required")
+        if not body.strip():
+            raise CapabilityError("skills", "skill body is required")
+
+        target_dir = self._profile_skills_dir / normalized
+        target = target_dir / "SKILL.md"
+        existed = target.exists()
+        if existed and not overwrite:
+            raise CapabilityError("skills", f"skill '{normalized}' already exists")
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_keywords = [
+            str(k).strip() for k in (keywords or []) if str(k).strip()
+        ]
+        keyword_json = json.dumps(safe_keywords, ensure_ascii=False)
+        description_json = json.dumps(description.strip(), ensure_ascii=False)
+        text = (
+            "---\n"
+            f"name: {normalized}\n"
+            f"description: {description_json}\n"
+            f"keywords: {keyword_json}\n"
+            "---\n\n"
+            f"{body.strip()}\n"
+        )
+        target.write_text(text, encoding="utf-8")
+        stats = await self.load()
+        return {
+            "name": normalized,
+            "path": str(target),
+            "created": not existed,
+            "index": stats,
+        }
+
     @property
     def code_tools(self) -> list[ToolSpec]:
         return list(self._code_tools)
@@ -153,6 +213,7 @@ def build_skills_service(settings: Settings) -> SkillsService:
             store = None
     return SkillsService(
         skills_dir=skills_dir,
+        profile_skills_dir=settings.data.profile_skills_dir,
         embedding=embedding,
         vector_store=store,
     )

@@ -24,6 +24,15 @@ from .tools import (
     ToolSpec,
     tool_provider_registry,
 )
+from .contracts import (
+    DataSurface,
+    ToolAccess,
+    SourceRef,
+    SurfaceWriteResult,
+    IngestReceipt,
+    Evidence,
+    InferenceResult,
+)
 
 __all__ = [
     # Errors
@@ -51,4 +60,11 @@ __all__ = [
     "ToolProvider",
     "ToolRegistry",
     "tool_provider_registry",
+    "DataSurface",
+    "ToolAccess",
+    "SourceRef",
+    "SurfaceWriteResult",
+    "IngestReceipt",
+    "Evidence",
+    "InferenceResult",
 ]

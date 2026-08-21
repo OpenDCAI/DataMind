@@ -5,30 +5,29 @@
     python -m datamind ingest            # build KB index for current profile
     python -m datamind info              # show active config and tool inventory
 
-Uses `typer` for arg parsing and `rich` for pretty output. All heavy work
-is delegated to DataMindAgent; this file is thin on purpose.
+Uses `typer` for arg parsing and `rich` for pretty output. Reads are delegated
+to RetrieveAgent and writes to StoreAgent.
 """
 from __future__ import annotations
 
 import asyncio
 import json
-from typing import Optional
 
 import typer
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
-from datamind.agent import build_agent
-from datamind.capabilities.kb.indexer import build_index
+from datamind.agent import build_datamind
 from datamind.config import Settings
+from datamind.core.context import RequestContext
+from datamind.core.logging import bind_context
 from datamind.core.logging import setup_logging
 
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
-    help="DataMind — unified retrieval agent (KB / DB / Graph / Skills / Memory).",
+    help="DataMind — cooperating StoreAgent and RetrieveAgent over five data surfaces.",
 )
 console = Console()
 
@@ -75,18 +74,23 @@ def info() -> None:
     console.print(t)
 
     async def _run():
-        agent = await build_agent(settings)
+        system = await build_datamind(settings)
         tools_table = Table(title="Registered tools", show_lines=False)
+        tools_table.add_column("Role")
         tools_table.add_column("Name")
+        tools_table.add_column("Surface")
         tools_table.add_column("Group")
         tools_table.add_column("Description")
-        for name in agent.tools.names():
-            spec = agent.tools.get(name)
-            tools_table.add_row(
-                spec.name,
-                spec.metadata.get("group", "-"),
-                spec.description.split("\n", 1)[0][:80],
-            )
+        for role, registry in (("retrieve", system.retrieve.tools), ("store", system.store.tools)):
+            for name in registry.names():
+                spec = registry.get(name)
+                tools_table.add_row(
+                    role,
+                    spec.name,
+                    spec.metadata.get("surface", "-"),
+                    spec.metadata.get("group", "-"),
+                    spec.description.split("\n", 1)[0][:80],
+                )
         console.print(tools_table)
 
     asyncio.run(_run())
@@ -103,15 +107,15 @@ def ingest() -> None:
     settings.ensure_dirs()
 
     async def _run():
-        agent = await build_agent(settings)
+        system = await build_datamind(settings)
         console.print(Panel.fit(
             f"Indexing [bold]{settings.data.data_dir}[/bold]\n"
             f"into Chroma at [bold]{settings.data.storage_dir / 'chroma'}[/bold]\n"
             f"chunk_size={settings.retrieval.chunk_size} overlap={settings.retrieval.chunk_overlap}",
             title="KB ingest",
         ))
-        stats = await agent.kb.reindex()
-        console.print(f"[green]Indexed:[/green] {stats}")
+        receipt = await system.store.tools.get("kb_reindex").handler()
+        console.print(f"[green]Stored:[/green] {json.dumps(receipt, ensure_ascii=False, indent=2)}")
 
     asyncio.run(_run())
 
@@ -130,29 +134,65 @@ def ask(
     settings = _load_settings()
 
     async def _run():
-        agent = await build_agent(
-            settings,
-            default_memory_namespace=f"session:{session}",
-        )
+        system = await build_datamind(settings)
+        agent = system.retrieve
         await agent.warmup()
         console.print(Panel.fit(question, title="Q", style="cyan"))
-        async for event in agent.loop.stream_turn(user_message=question):
-            if event.type == "text":
-                console.print(event.data["delta"], end="")
-            elif event.type == "tool_use" and show_tools:
-                console.print(
-                    f"\n[dim][tool]:[/dim] [bold]{event.data['name']}[/bold] {json.dumps(event.data['input'], ensure_ascii=False)[:200]}"
-                )
-            elif event.type == "tool_result" and show_tools:
-                marker = "[red]ERR[/red]" if event.data.get("is_error") else "[green]ok[/green]"
-                preview = (event.data.get("preview") or "")[:200].replace("\n", " ")
-                console.print(f"[dim][result {marker}][/dim] {preview}")
-            elif event.type == "done":
-                console.print()
-                console.print(
-                    f"[dim]done ({event.data.get('iterations')} iterations, "
-                    f"stop={event.data.get('stop_reason')})[/dim]"
-                )
+        context = RequestContext(session_id=session, profile=settings.data.profile)
+        with bind_context(context):
+            async for event in agent.loop.stream_turn(user_message=question):
+                if event.type == "text":
+                    console.print(event.data["delta"], end="")
+                elif event.type == "tool_use" and show_tools:
+                    console.print(
+                        f"\n[dim][tool]:[/dim] [bold]{event.data['name']}[/bold] {json.dumps(event.data['input'], ensure_ascii=False)[:200]}"
+                    )
+                elif event.type == "tool_result" and show_tools:
+                    marker = "[red]ERR[/red]" if event.data.get("is_error") else "[green]ok[/green]"
+                    preview = (event.data.get("preview") or "")[:200].replace("\n", " ")
+                    console.print(f"[dim][result {marker}][/dim] {preview}")
+                elif event.type == "done":
+                    console.print()
+                    console.print(
+                        f"[dim]done ({event.data.get('iterations')} iterations, "
+                        f"stop={event.data.get('stop_reason')})[/dim]"
+                    )
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------- store ---
+
+
+@app.command("store")
+def store_command(
+    instruction: str = typer.Argument(..., help="What data should be stored and where."),
+    session: str = typer.Option("default", help="Session id for memory scoping."),
+    show_tools: bool = typer.Option(True, help="Print tool calls and receipt previews."),
+) -> None:
+    """Route data into KB / DB / Graph / Skills / Memory through StoreAgent."""
+    setup_logging("WARNING")
+    settings = _load_settings()
+
+    async def _run():
+        system = await build_datamind(settings)
+        console.print(Panel.fit(instruction, title="Store", style="magenta"))
+        context = RequestContext(session_id=session, profile=settings.data.profile)
+        with bind_context(context):
+            async for event in system.store.loop.stream_turn(user_message=instruction):
+                if event.type == "text":
+                    console.print(event.data["delta"], end="")
+                elif event.type == "tool_use" and show_tools:
+                    console.print(
+                        f"\n[dim][store]:[/dim] [bold]{event.data['name']}[/bold] "
+                        f"{json.dumps(event.data['input'], ensure_ascii=False)[:240]}"
+                    )
+                elif event.type == "tool_result" and show_tools:
+                    marker = "[red]ERR[/red]" if event.data.get("is_error") else "[green]receipt[/green]"
+                    preview = (event.data.get("preview") or "")[:300].replace("\n", " ")
+                    console.print(f"[dim][{marker}][/dim] {preview}")
+                elif event.type == "done":
+                    console.print()
 
     asyncio.run(_run())
 
@@ -170,10 +210,8 @@ def chat(
     settings = _load_settings()
 
     async def _run():
-        agent = await build_agent(
-            settings,
-            default_memory_namespace=f"session:{session}",
-        )
+        system = await build_datamind(settings)
+        agent = system.retrieve
         warmup = await agent.warmup()
         console.print(Panel.fit(
             f"[bold]DataMind[/bold] ready · profile=[cyan]{settings.data.profile}[/cyan] · "
@@ -205,26 +243,28 @@ def chat(
 
             console.print("[green]ai  ›[/green] ", end="")
             collected = []
-            async for event in agent.loop.stream_turn(user_message=q, history=history):
-                if event.type == "text":
-                    delta = event.data["delta"]
-                    collected.append(delta)
-                    console.print(delta, end="")
-                elif event.type == "tool_use" and show_tools:
-                    console.print(
-                        f"\n[dim][tool {event.data['name']}] "
-                        f"{json.dumps(event.data['input'], ensure_ascii=False)[:160]}[/dim]"
-                    )
-                elif event.type == "tool_result" and show_tools:
-                    marker = "[red]ERR[/red]" if event.data.get("is_error") else "[green]ok[/green]"
-                    preview = (event.data.get("preview") or "")[:160].replace("\n", " ")
-                    console.print(f"[dim][result {marker}] {preview}[/dim]")
-                elif event.type == "done":
-                    console.print()
-                    # Save a simplified turn in history.
-                    answer_text = "".join(collected)
-                    history.append({"role": "user", "content": q})
-                    history.append({"role": "assistant", "content": answer_text or "…"})
+            context = RequestContext(session_id=session, profile=settings.data.profile)
+            with bind_context(context):
+                async for event in agent.loop.stream_turn(user_message=q, history=history):
+                    if event.type == "text":
+                        delta = event.data["delta"]
+                        collected.append(delta)
+                        console.print(delta, end="")
+                    elif event.type == "tool_use" and show_tools:
+                        console.print(
+                            f"\n[dim][tool {event.data['name']}] "
+                            f"{json.dumps(event.data['input'], ensure_ascii=False)[:160]}[/dim]"
+                        )
+                    elif event.type == "tool_result" and show_tools:
+                        marker = "[red]ERR[/red]" if event.data.get("is_error") else "[green]ok[/green]"
+                        preview = (event.data.get("preview") or "")[:160].replace("\n", " ")
+                        console.print(f"[dim][result {marker}] {preview}[/dim]")
+                    elif event.type == "done":
+                        console.print()
+                        # Save a simplified turn in history.
+                        answer_text = "".join(collected)
+                        history.append({"role": "user", "content": q})
+                        history.append({"role": "assistant", "content": answer_text or "…"})
 
     asyncio.run(_run())
 

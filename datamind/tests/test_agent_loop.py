@@ -72,7 +72,7 @@ def _tool_echo() -> ToolSpec:
         description="echo",
         input_schema={"type": "object", "properties": {"value": {"type": "string"}}},
         handler=handler,
-        metadata={"group": "other"},
+        metadata={"group": "other", "surface": "kb", "access": "read"},
     )
 
 
@@ -130,6 +130,9 @@ async def test_tool_use_then_final_answer():
     out = await loop.run_turn(user_message="echo hi please")
     assert out["iterations"] == 2
     assert "echo said hi" in out["answer"]
+    assert out["surfaces_used"] == ["kb"]
+    assert out["tool_trace"][0]["name"] == "echo"
+    assert out["evidence"][0]["surface"] == "kb"
     # Second API call should have seen a tool_result in its messages.
     call2 = loop._client.messages.calls[1]  # type: ignore[attr-defined]
     assert any(

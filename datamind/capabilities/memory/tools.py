@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from datamind.core.context import RequestContext
+from datamind.core.logging import current_context
 from datamind.core.tools import ToolSpec, tool_provider_registry
 
 from .service import MemoryService
@@ -31,9 +32,10 @@ def build_memory_tools(
     """
 
     def _ctx() -> tuple[str | None, str | None]:
-        if request_context is None:
+        context = request_context or current_context()
+        if context is None:
             return (None, None)
-        return (request_context.profile, request_context.session_id)
+        return (context.profile, context.session_id)
 
     async def _save(
         content: str,
@@ -44,11 +46,13 @@ def build_memory_tools(
         metadata: dict | None = None,
     ) -> dict:
         ctx_profile, ctx_session = _ctx()
+        effective_profile = profile or ctx_profile if scope == "profile" else profile
+        effective_session = session_id or ctx_session if scope == "session" else session_id
         item_id = await memory.save(
             content,
             scope=scope,  # type: ignore[arg-type]
-            profile=profile or ctx_profile,
-            session_id=session_id or ctx_session,
+            profile=effective_profile,
+            session_id=effective_session,
             kind=kind,  # type: ignore[arg-type]
             metadata=metadata,
         )
@@ -119,7 +123,7 @@ def build_memory_tools(
                 "required": ["content"],
             },
             handler=_save,
-            metadata={"group": "memory"},
+            metadata={"group": "memory", "surface": "memory", "access": "write"},
         ),
         ToolSpec(
             name="memory_recall",
@@ -150,7 +154,7 @@ def build_memory_tools(
                 "required": ["query"],
             },
             handler=_recall,
-            metadata={"group": "memory"},
+            metadata={"group": "memory", "surface": "memory", "access": "read"},
         ),
         ToolSpec(
             name="memory_forget",
@@ -168,14 +172,19 @@ def build_memory_tools(
                 "required": ["item_id"],
             },
             handler=_forget,
-            metadata={"group": "memory", "destructive": True},
+            metadata={
+                "group": "memory",
+                "surface": "memory",
+                "access": "write",
+                "destructive": True,
+            },
         ),
         ToolSpec(
             name="memory_list_profiles",
             description="List every profile (tenant) that currently has stored memories.",
             input_schema={"type": "object", "properties": {}},
             handler=_list_profiles,
-            metadata={"group": "memory"},
+            metadata={"group": "memory", "surface": "memory", "access": "read"},
         ),
     ]
 

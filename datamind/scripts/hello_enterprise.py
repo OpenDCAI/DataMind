@@ -20,8 +20,8 @@ multiple backends:
 - KB (employee handbook + runbooks + tech docs + policies)
 - DB (employees + projects + incidents + performance_reviews + …)
 - Graph (org hierarchy + project deps + incident → service)
-- Memory (write-then-recall in turn 8)
-- Ingest (write-then-query in turns 7-8 — agent writes via tools)
+- Memory (StoreAgent write in turn 8)
+- Ingest (StoreAgent write in turn 7)
 
 Pre-req: enterprise_demo profile must be seeded:
     python -m datamind.scripts.seed_enterprise_demo
@@ -75,7 +75,7 @@ async def _main() -> int:
 
     os.environ.setdefault("DATAMIND__DATA__PROFILE", "enterprise_demo")
 
-    from datamind.agent import build_agent
+    from datamind.agent import build_datamind
     from datamind.config import Settings
     from datamind.core.logging import setup_logging
 
@@ -90,12 +90,15 @@ async def _main() -> int:
     if backend == "sdk":
         print(f"[hello_enterprise] ccr     = {settings.agent.ccr_base_url}")
 
-    agent = await build_agent(settings)
-    await agent.warmup()
-    print(f"[hello_enterprise] tools   = {len(agent.tools)}")
+    system = await build_datamind(settings)
+    await system.warmup()
+    print(
+        f"[hello_enterprise] tools   = "
+        f"retrieve:{len(system.retrieve.tools)} store:{len(system.store.tools)}"
+    )
 
     # Sanity check: profile must already be seeded.
-    kb_count = await agent.kb.count()
+    kb_count = await system.services.kb.count()
     if kb_count == 0:
         print(
             "\n[hello_enterprise] FATAL: KB is empty. Seed first:\n"
@@ -105,7 +108,7 @@ async def _main() -> int:
         return 2
 
     summary: list[dict] = []
-    history: list[dict] = []
+    histories: dict[str, list[dict]] = {"retrieve": [], "store": []}
 
     for i, q in enumerate(QUESTIONS, 1):
         print(f"\n[Q{i}] {q}")
@@ -113,6 +116,9 @@ async def _main() -> int:
         text_parts: list[str] = []
         tool_calls: list[tuple[str, str]] = []
         errors: list[str] = []
+        role = "store" if i in {7, 8} else "retrieve"
+        agent = system.store if role == "store" else system.retrieve
+        history = histories[role]
 
         async for ev in agent.loop.stream_turn(user_message=q, history=history):
             if ev.type == "text":
@@ -142,6 +148,7 @@ async def _main() -> int:
         history.append({"role": "assistant", "content": ans})
         summary.append({
             "q": q,
+            "role": role,
             "tools": [t[0] for t in tool_calls],
             "tool_count": len(tool_calls),
             "elapsed_s": round(elapsed, 1),

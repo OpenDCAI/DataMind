@@ -71,21 +71,21 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
                 "required": ["query"],
             },
             handler=_search,
-            metadata={"group": "kb"},
+            metadata={"group": "kb", "surface": "kb", "access": "read"},
         ),
         ToolSpec(
             name="kb_list_documents",
             description="List all documents currently available under the active profile.",
             input_schema={"type": "object", "properties": {}},
             handler=_list_documents,
-            metadata={"group": "kb"},
+            metadata={"group": "kb", "surface": "kb", "access": "read"},
         ),
         ToolSpec(
             name="kb_count",
             description="Report how many chunks are currently indexed in the knowledge base.",
             input_schema={"type": "object", "properties": {}},
             handler=_count,
-            metadata={"group": "kb"},
+            metadata={"group": "kb", "surface": "kb", "access": "read"},
         ),
         ToolSpec(
             name="kb_reindex",
@@ -95,7 +95,13 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
             ),
             input_schema={"type": "object", "properties": {}},
             handler=_reindex,
-            metadata={"group": "kb", "destructive": True},
+            metadata={
+                "group": "kb",
+                "surface": "kb",
+                "access": "write",
+                "destructive": True,
+                "source_path": str(kb.data_dir),
+            },
         ),
     ]
 

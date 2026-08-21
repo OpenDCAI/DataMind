@@ -1,6 +1,6 @@
 """ToolSpec wrappers for the ingest capability.
 
-Four tools registered with `tool_provider_registry` under the "ingest"
+Write tools registered under the "ingest"
 group. They share the same shape as the rest of DataMind's tools so the
 agent loop / system prompt grouper picks them up automatically.
 
@@ -21,7 +21,14 @@ from .service import IngestService
 
 
 def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
-    """Build the four ingest tools bound to a concrete IngestService."""
+    """Build StoreAgent ingest tools bound to a concrete IngestService."""
+
+    async def _kb_add_text(
+        text: str,
+        source: str | None = None,
+        persist: bool = True,
+    ) -> dict:
+        return await svc.kb_add_text(text=text, source=source, persist=persist)
 
     async def _kb_add_file(path: str, copy_to_profile: bool = True) -> dict:
         return await svc.kb_add_file(path=path, copy_to_profile=copy_to_profile)
@@ -40,10 +47,40 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
             path=path, table=table, if_exists=if_exists, delimiter=delimiter
         )
 
+    async def _db_import_records(
+        table: str,
+        records: list[dict],
+        if_exists: str = "append",
+    ) -> dict:
+        return await svc.db_import_records(
+            table=table,
+            records=records,
+            if_exists=if_exists,
+        )
+
     async def _graph_add_triples_from_text(text: str, max_triples: int = 30) -> dict:
         return await svc.graph_add_triples_from_text(text=text, max_triples=max_triples)
 
     return [
+        ToolSpec(
+            name="kb_add_text",
+            description=(
+                "Store inline unstructured text in the knowledge base. The text "
+                "is chunked, embedded, immediately searchable, and persisted "
+                "under the active profile by default."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "source": {"type": "string", "description": "Optional source filename."},
+                    "persist": {"type": "boolean", "default": True},
+                },
+                "required": ["text"],
+            },
+            handler=_kb_add_text,
+            metadata={"group": "ingest", "surface": "kb", "access": "write"},
+        ),
         ToolSpec(
             name="kb_add_file",
             description=(
@@ -71,7 +108,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                 "required": ["path"],
             },
             handler=_kb_add_file,
-            metadata={"group": "ingest"},
+            metadata={"group": "ingest", "surface": "kb", "access": "write"},
         ),
         ToolSpec(
             name="kb_add_path",
@@ -103,7 +140,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                 "required": ["path"],
             },
             handler=_kb_add_path,
-            metadata={"group": "ingest"},
+            metadata={"group": "ingest", "surface": "kb", "access": "write"},
         ),
         ToolSpec(
             name="db_import_csv",
@@ -141,7 +178,32 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                 "required": ["path", "table"],
             },
             handler=_db_import_csv,
-            metadata={"group": "ingest"},
+            metadata={"group": "ingest", "surface": "db", "access": "write"},
+        ),
+        ToolSpec(
+            name="db_import_records",
+            description=(
+                "Store an array of JSON objects in a SQL table. Use this for "
+                "structured records supplied directly in the conversation."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "table": {"type": "string"},
+                    "records": {
+                        "type": "array",
+                        "items": {"type": "object", "additionalProperties": True},
+                    },
+                    "if_exists": {
+                        "type": "string",
+                        "enum": ["append", "replace", "fail"],
+                        "default": "append",
+                    },
+                },
+                "required": ["table", "records"],
+            },
+            handler=_db_import_records,
+            metadata={"group": "ingest", "surface": "db", "access": "write"},
         ),
         ToolSpec(
             name="graph_add_triples_from_text",
@@ -171,7 +233,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                 "required": ["text"],
             },
             handler=_graph_add_triples_from_text,
-            metadata={"group": "ingest"},
+            metadata={"group": "ingest", "surface": "graph", "access": "write"},
         ),
     ]
 

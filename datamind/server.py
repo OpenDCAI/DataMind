@@ -1,7 +1,8 @@
 """FastAPI HTTP server.
 
 Endpoints:
-    POST /api/chat           — stream an agent answer over Server-Sent Events
+    POST /api/chat           — stream a RetrieveAgent answer over SSE
+    POST /api/store          — run StoreAgent and return its receipt summary
     POST /api/ask            — non-streaming convenience (full response JSON)
     GET  /api/health         — process liveness + config snapshot
     GET  /api/tools          — list registered tools (name/description/schema)
@@ -13,8 +14,8 @@ Endpoints:
 Streaming uses true SSE; each AgentEvent becomes one `data: {...}\n\n` frame.
 
 Design:
-- One DataMindAgent per process, built at startup (FastAPI lifespan).
-- No request-scoped globals — the agent itself is concurrency-safe because
+- One DataMind system (StoreAgent + RetrieveAgent) per process, built at startup.
+- No request-scoped globals — each agent is concurrency-safe because
   each call threads through its own `history=[]` parameter.
 - Session identity comes from the `X-Session-Id` header (or cookie), not a
   server-side map, so horizontal scaling is trivial.
@@ -33,8 +34,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from datamind import __version__
-from datamind.agent import DataMindAgent, build_agent
+from datamind.agent import DataMind, build_datamind
 from datamind.config import Settings
+from datamind.core.context import RequestContext
+from datamind.core.logging import bind_context
 from datamind.core.logging import setup_logging
 
 
@@ -44,7 +47,7 @@ from datamind.core.logging import setup_logging
 class AppState:
     """Container held on `app.state` — no module-level globals."""
 
-    agent: DataMindAgent | None = None
+    system: DataMind | None = None
     settings: Settings | None = None
 
 
@@ -54,8 +57,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     st = AppState()
     st.settings = Settings()
     st.settings.ensure_dirs()
-    st.agent = await build_agent(st.settings)
-    await st.agent.warmup()
+    st.system = await build_datamind(st.settings)
+    await st.system.warmup()
     app.state.datamind = st
     yield
 
@@ -103,7 +106,7 @@ if _STATIC_DIR is not None:
 
 def _state(request: Request) -> AppState:
     st: AppState = request.app.state.datamind
-    if st.agent is None or st.settings is None:
+    if st.system is None or st.settings is None:
         raise HTTPException(503, "Agent not ready")
     return st
 
@@ -125,12 +128,10 @@ class AskResponse(BaseModel):
     iterations: int
     stop_reason: str
     usage: dict
-
-
-class ReindexResponse(BaseModel):
-    pre_chunked: int
-    raw_chunks: int
-    total_embedded: int
+    evidence: list[dict] = Field(default_factory=list)
+    receipts: list[dict] = Field(default_factory=list)
+    surfaces_used: list[str] = Field(default_factory=list)
+    tool_trace: list[dict] = Field(default_factory=list)
 
 
 # ------------------------------------------------------------- endpoints
@@ -144,21 +145,30 @@ async def health(st: AppState = Depends(_state)) -> dict:
         "model": st.settings.llm.model,
         "embedding": st.settings.embedding.model,
         "db_dialect": st.settings.db.dialect,
-        "tools": len(st.agent.tools),
+        "retrieve_tools": len(st.system.retrieve.tools),
+        "store_tools": len(st.system.store.tools),
+        "revision": st.system.store.revision,
     }
 
 
 @app.get("/api/tools")
 async def list_tools(st: AppState = Depends(_state)) -> dict:
     out = []
-    for name in st.agent.tools.names():
-        spec = st.agent.tools.get(name)
-        out.append({
-            "name": spec.name,
-            "description": spec.description,
-            "group": spec.metadata.get("group"),
-            "input_schema": spec.input_schema,
-        })
+    for role, registry in (
+        ("retrieve", st.system.retrieve.tools),
+        ("store", st.system.store.tools),
+    ):
+        for name in registry.names():
+            spec = registry.get(name)
+            out.append({
+                "name": spec.name,
+                "role": role,
+                "surface": spec.metadata.get("surface"),
+                "access": spec.metadata.get("access"),
+                "description": spec.description,
+                "group": spec.metadata.get("group"),
+                "input_schema": spec.input_schema,
+            })
     return {"tools": out, "count": len(out)}
 
 
@@ -168,17 +178,46 @@ async def ask(
     st: AppState = Depends(_state),
     session: str = Depends(_session_id),
 ) -> AskResponse:
-    # Adjust default memory namespace for this call — memory tool already
-    # bound at build time, but users can always pass an explicit namespace.
-    result = await st.agent.loop.run_turn(
-        user_message=req.message,
-        history=req.history or [],
-    )
+    context = RequestContext(session_id=session, profile=st.settings.data.profile)
+    with bind_context(context):
+        result = await st.system.retrieve.loop.run_turn(
+            user_message=req.message,
+            history=req.history or [],
+        )
     return AskResponse(
         answer=result["answer"],
         iterations=result["iterations"],
         stop_reason=result["stop_reason"],
         usage=result["usage"],
+        evidence=result.get("evidence", []),
+        receipts=result.get("receipts", []),
+        surfaces_used=result.get("surfaces_used", []),
+        tool_trace=result.get("tool_trace", []),
+    )
+
+
+@app.post("/api/store", response_model=AskResponse)
+async def store(
+    req: AskRequest,
+    st: AppState = Depends(_state),
+    session: str = Depends(_session_id),
+) -> AskResponse:
+    """Ask StoreAgent to route and persist data across the five surfaces."""
+    context = RequestContext(session_id=session, profile=st.settings.data.profile)
+    with bind_context(context):
+        result = await st.system.store.loop.run_turn(
+            user_message=req.message,
+            history=req.history or [],
+        )
+    return AskResponse(
+        answer=result["answer"],
+        iterations=result["iterations"],
+        stop_reason=result["stop_reason"],
+        usage=result["usage"],
+        evidence=result.get("evidence", []),
+        receipts=result.get("receipts", []),
+        surfaces_used=result.get("surfaces_used", []),
+        tool_trace=result.get("tool_trace", []),
     )
 
 
@@ -189,15 +228,17 @@ async def chat(
     session: str = Depends(_session_id),
 ):
     async def stream() -> AsyncIterator[bytes]:
-        async for event in st.agent.loop.stream_turn(
-            user_message=req.message,
-            history=req.history or [],
-        ):
-            payload = json.dumps(
-                {"type": event.type, **event.data},
-                ensure_ascii=False,
-            )
-            yield f"data: {payload}\n\n".encode("utf-8")
+        context = RequestContext(session_id=session, profile=st.settings.data.profile)
+        with bind_context(context):
+            async for event in st.system.retrieve.loop.stream_turn(
+                user_message=req.message,
+                history=req.history or [],
+            ):
+                payload = json.dumps(
+                    {"type": event.type, **event.data},
+                    ensure_ascii=False,
+                )
+                yield f"data: {payload}\n\n".encode("utf-8")
 
     return StreamingResponse(
         stream(),
@@ -210,15 +251,15 @@ async def chat(
     )
 
 
-@app.post("/api/kb/reindex", response_model=ReindexResponse)
-async def kb_reindex(st: AppState = Depends(_state)) -> ReindexResponse:
-    stats = await st.agent.kb.reindex()
-    return ReindexResponse(**stats)
+@app.post("/api/kb/reindex")
+async def kb_reindex(st: AppState = Depends(_state)) -> dict:
+    """Compatibility endpoint routed through StoreAgent's receipt boundary."""
+    return await st.system.store.tools.get("kb_reindex").handler()
 
 
 @app.get("/api/kb/documents")
 async def kb_documents(st: AppState = Depends(_state)) -> dict:
-    items = await st.agent.kb.list_documents()
+    items = await st.system.services.kb.list_documents()
     return {"count": len(items), "items": items}
 
 
@@ -237,13 +278,13 @@ async def memory_peek(
     """
     if not query:
         query = " "  # any string — recall ranks every row lexically if no embedding
-    results = await st.agent.memory.recall(query, profile=namespace, top_k=top_k)
+    results = await st.system.services.memory.recall(query, profile=namespace, top_k=top_k)
     return {"profile": namespace, "query": query, "results": results}
 
 
 @app.get("/api/graph/stats")
 async def graph_stats(st: AppState = Depends(_state)) -> dict:
-    return st.agent.graph.stats()
+    return st.system.services.graph.stats()
 
 
 # ----------------------------------------------------- file upload (ingest)
@@ -256,7 +297,7 @@ async def upload_file(
 ) -> dict:
     """Accept a multipart file upload and stash it in the profile's
     `uploads/` dir. Returns the saved path so the frontend can construct a
-    follow-up chat prompt asking the agent to ingest it.
+    follow-up StoreAgent request asking it to ingest the file.
 
     We deliberately don't auto-ingest here — the agent decides what to do
     with the file (KB chunk? CSV import? graph triples?) based on the

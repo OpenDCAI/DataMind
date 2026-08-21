@@ -37,7 +37,7 @@ def build_skills_tools(skills: SkillsService) -> list[ToolSpec]:
                 "required": ["query"],
             },
             handler=_search,
-            metadata={"group": "skill.knowledge"},
+            metadata={"group": "skill.knowledge", "surface": "skills", "access": "read"},
         ),
         ToolSpec(
             name="skill_get",
@@ -50,20 +50,63 @@ def build_skills_tools(skills: SkillsService) -> list[ToolSpec]:
                 "required": ["name"],
             },
             handler=_get,
-            metadata={"group": "skill.knowledge"},
+            metadata={"group": "skill.knowledge", "surface": "skills", "access": "read"},
         ),
         ToolSpec(
             name="skill_list",
             description="List every available knowledge skill (name + description).",
             input_schema={"type": "object", "properties": {}},
             handler=_list,
-            metadata={"group": "skill.knowledge"},
+            metadata={"group": "skill.knowledge", "surface": "skills", "access": "read"},
         ),
     ]
 
     # Combine with code skills for a single registry-facing list.
     specs.extend(skills.code_tools)
     return specs
+
+
+def build_skills_store_tools(skills: SkillsService) -> list[ToolSpec]:
+    """Tools available only to StoreAgent."""
+
+    async def _upsert(
+        name: str,
+        description: str,
+        body: str,
+        keywords: list[str] | None = None,
+        overwrite: bool = True,
+    ) -> dict:
+        return await skills.upsert(
+            name=name,
+            description=description,
+            body=body,
+            keywords=keywords,
+            overwrite=overwrite,
+        )
+
+    return [
+        ToolSpec(
+            name="skill_upsert",
+            description=(
+                "Create or update a profile-scoped procedural skill. Use this "
+                "only for reusable SOPs, methods, or operating instructions; "
+                "ordinary facts belong in memory or the knowledge base."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "body": {"type": "string"},
+                    "keywords": {"type": "array", "items": {"type": "string"}},
+                    "overwrite": {"type": "boolean", "default": True},
+                },
+                "required": ["name", "description", "body"],
+            },
+            handler=_upsert,
+            metadata={"group": "skill.store", "surface": "skills", "access": "write"},
+        )
+    ]
 
 
 @tool_provider_registry.register("skills")
@@ -75,4 +118,4 @@ class _SkillsToolProvider:
         return build_skills_tools(s)
 
 
-__all__ = ["build_skills_tools"]
+__all__ = ["build_skills_tools", "build_skills_store_tools"]

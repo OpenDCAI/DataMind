@@ -154,6 +154,11 @@ class DataConfig(BaseModel):
         # SkillsService will simply load 0 skills, no crash.
         return user_dir
 
+    @property
+    def profile_skills_dir(self) -> Path:
+        """Writable, profile-scoped skills owned by StoreAgent."""
+        return self.data_dir / "skills"
+
 
 class LoggingConfig(BaseModel):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
@@ -162,7 +167,7 @@ class LoggingConfig(BaseModel):
 class AgentConfig(BaseModel):
     """Agent loop backend selection.
 
-    Two implementations live side-by-side, picked at build_agent() time:
+    Two implementations live side-by-side, picked during agent assembly:
 
     - `native` (default): thin tool-use loop on top of the `anthropic`
       Python SDK. Talks directly to whatever `LLMConfig.api_base` points
@@ -173,11 +178,11 @@ class AgentConfig(BaseModel):
       the `claude` CLI and speaks Anthropic stdio to it. Best run behind
       `claude-code-router` (CCR) when the real upstream only speaks
       OpenAI `/v1/chat/completions` — CCR translates Anthropic↔OpenAI.
-      You get Hooks / Subagents / Compaction / Plan mode for free.
+      You get the SDK's Subagents and Compaction facilities.
 
-    The two backends share the exact same tool catalogue (all 23 DataMind
-    tools bridge into both) and emit the same `AgentEvent` stream, so the
-    server / CLI / frontend don't need to know which is active.
+    Both backends expose the same role-scoped registries (read/utility for
+    RetrieveAgent, write for StoreAgent) and emit the same `AgentEvent`
+    stream, so the server / CLI / frontend don't need to know which is active.
     """
 
     backend: Literal["native", "sdk"] = "native"

@@ -1,9 +1,11 @@
 """Conversational ingest — let the agent add data via tools.
 
-Four tools:
+Store tools:
+    kb_add_text              inline text → chunk → embed → upsert into Chroma
     kb_add_file              one file → chunk → embed → upsert into Chroma
     kb_add_path              file or directory → recursive ingest
     db_import_csv            CSV → infer schema → CREATE TABLE → INSERT
+    db_import_records        records → infer schema → CREATE TABLE → INSERT
     graph_add_triples_from_text   free-form text → LLM extracts (s,r,o) → upsert
 
 Design notes:
@@ -155,6 +157,56 @@ class IngestService:
         return _resolve_safe_path(raw_path, self._allowed_roots)
 
     # ------------------------------------------------------------- KB
+
+    async def kb_add_text(
+        self,
+        *,
+        text: str,
+        source: str | None = None,
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        """Ingest inline text and optionally persist it under the profile."""
+        content = text.strip()
+        if not content:
+            raise CapabilityError("ingest", "text is required")
+        source_name = source or f"note-{_hash(content, 'inline')[:12]}.md"
+        if Path(source_name).name != source_name:
+            raise CapabilityError("ingest", "source must be a filename, not a path")
+        if Path(source_name).suffix.lower() not in _TEXT_EXTS:
+            source_name += ".md"
+
+        stored_source = source_name
+        if persist:
+            notes_dir = self._profile_dir / "notes"
+            notes_dir.mkdir(parents=True, exist_ok=True)
+            target = notes_dir / source_name
+            if target.exists() and target.read_text(encoding="utf-8", errors="replace").strip() != content:
+                target = notes_dir / (
+                    f"{Path(source_name).stem}-{_hash(content, source_name)[:8]}"
+                    f"{Path(source_name).suffix}"
+                )
+            target.write_text(content + "\n", encoding="utf-8")
+            stored_source = str(target.relative_to(self._profile_dir))
+
+        chunks = [
+            Chunk(
+                id=_hash(segment, stored_source),
+                text=segment,
+                source=stored_source,
+                metadata={"_origin": "store_agent"},
+            )
+            for segment in _split_text(
+                content,
+                chunk_size=self._chunk_size,
+                chunk_overlap=self._chunk_overlap,
+            )
+        ]
+        await self._upsert_chunks(chunks)
+        return {
+            "source": stored_source,
+            "chunks_added": len(chunks),
+            "persisted": persist,
+        }
 
     async def kb_add_file(self, *, path: str, copy_to_profile: bool = True) -> dict[str, Any]:
         """Ingest a single text file into the KB.
@@ -346,6 +398,10 @@ class IngestService:
         insert_cols = ", ".join(f'"{c}"' for c in safe_cols)
 
         with engine.begin() as conn:
+            # RetrieveAgent marks pooled SQLite connections query-only.
+            # StoreAgent explicitly re-enables writes when it checks one out.
+            if self._db.dialect.name == "sqlite":
+                conn.exec_driver_sql("PRAGMA query_only = OFF")
             # Probe existence once.
             existing = self._db.dialect.name in {"sqlite"} and conn.execute(
                 sql_text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
@@ -374,6 +430,84 @@ class IngestService:
             "rows_inserted": len(rows),
             "if_exists": if_exists,
             "source_file": str(resolved),
+        }
+
+    async def db_import_records(
+        self,
+        *,
+        table: str,
+        records: list[dict[str, Any]],
+        if_exists: str = "append",
+    ) -> dict[str, Any]:
+        """Import inline JSON-like records into a table as TEXT columns."""
+        if not records:
+            raise CapabilityError("ingest", "records must be a non-empty array")
+        if not all(isinstance(row, dict) for row in records):
+            raise CapabilityError("ingest", "every record must be an object")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", table):
+            raise CapabilityError("ingest", f"invalid table name '{table}'")
+        if if_exists not in ("append", "replace", "fail"):
+            raise CapabilityError(
+                "ingest", f"if_exists must be append|replace|fail, got '{if_exists}'"
+            )
+
+        original_cols: list[str] = []
+        for row in records:
+            for key in row:
+                normalized_key = str(key)
+                if normalized_key not in original_cols:
+                    original_cols.append(normalized_key)
+        if not original_cols:
+            raise CapabilityError("ingest", "records must contain at least one field")
+        safe_cols: list[str] = []
+        used: set[str] = set()
+        for index, raw in enumerate(original_cols, 1):
+            col = raw.strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", col) or col in used:
+                col = f"col_{index}"
+            used.add(col)
+            safe_cols.append(col)
+
+        rows: list[dict[str, str | None]] = []
+        for record in records:
+            converted: dict[str, str | None] = {}
+            string_keys = {str(k): value for k, value in record.items()}
+            for original, safe in zip(original_cols, safe_cols):
+                value = string_keys.get(original)
+                if value is None:
+                    converted[safe] = None
+                elif isinstance(value, (dict, list)):
+                    converted[safe] = json.dumps(value, ensure_ascii=False)
+                else:
+                    converted[safe] = str(value)
+            rows.append(converted)
+
+        col_defs = ", ".join(f'"{c}" TEXT' for c in safe_cols)
+        placeholders = ", ".join(f":{c}" for c in safe_cols)
+        insert_cols = ", ".join(f'"{c}"' for c in safe_cols)
+        with self._db.engine.begin() as conn:
+            if self._db.dialect.name == "sqlite":
+                conn.exec_driver_sql("PRAGMA query_only = OFF")
+            existing = self._db.dialect.name == "sqlite" and conn.execute(
+                sql_text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
+            ).fetchone()
+            if if_exists == "replace":
+                conn.execute(sql_text(f'DROP TABLE IF EXISTS "{table}"'))
+                conn.execute(sql_text(f'CREATE TABLE "{table}" ({col_defs})'))
+            elif if_exists == "fail" and existing:
+                raise CapabilityError("ingest", f"table '{table}' already exists")
+            else:
+                conn.execute(sql_text(f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})'))
+            conn.execute(
+                sql_text(f'INSERT INTO "{table}" ({insert_cols}) VALUES ({placeholders})'),
+                rows,
+            )
+        return {
+            "table": table,
+            "columns": safe_cols,
+            "rows_inserted": len(rows),
+            "if_exists": if_exists,
+            "source": "inline_records",
         }
 
     # ------------------------------------------------------------- Graph

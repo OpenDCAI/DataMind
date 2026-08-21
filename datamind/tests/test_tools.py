@@ -5,6 +5,7 @@ import pytest
 
 from datamind.core.errors import ConfigError
 from datamind.core.tools import ToolRegistry, ToolSpec
+from datamind.core.contracts import DataSurface, ToolAccess
 
 
 async def _echo(value: str) -> dict:
@@ -57,6 +58,34 @@ def test_tool_registry_as_anthropic_tools_matches_spec():
     assert len(out) == 2
     for o in out:
         assert set(o.keys()) == {"name", "description", "input_schema"}
+
+
+def test_registry_select_enforces_agent_access_boundary():
+    read = _spec("read")
+    write = ToolSpec(
+        name="write",
+        description="write",
+        input_schema={"type": "object", "properties": {}},
+        handler=_echo,
+        metadata={"surface": "memory", "access": "write"},
+    )
+    utility = ToolSpec(
+        name="utility",
+        description="utility",
+        input_schema={"type": "object", "properties": {}},
+        handler=_echo,
+        metadata={"surface": "skills", "access": "utility"},
+    )
+    reg = ToolRegistry()
+    reg.extend([read, write, utility])
+
+    retrieve = reg.select(access={ToolAccess.READ, ToolAccess.UTILITY})
+    store = reg.select(access={ToolAccess.WRITE})
+    assert set(retrieve.names()) == {"read", "utility"}
+    assert store.names() == ["write"]
+    assert store.get("write").surface == DataSurface.MEMORY
+    retrieve.assert_access({ToolAccess.READ, ToolAccess.UTILITY})
+    store.assert_access({ToolAccess.WRITE})
 
 
 @pytest.mark.asyncio
