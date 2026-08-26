@@ -7,7 +7,7 @@ Exercises the 3-layer memory:
 - Tool-dispatch path
 
 Usage:
-    DATAMIND__LLM__API_BASE=http://35.220.164.252:3888
+    DATAMIND__LLM__API_BASE=https://gateway.example.com
     DATAMIND__LLM__API_KEY=sk-...
     python -m datamind.scripts.hello_memory
 """

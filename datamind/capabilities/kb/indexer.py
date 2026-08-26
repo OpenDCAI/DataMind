@@ -45,10 +45,18 @@ class Chunk:
     metadata: dict[str, Any] | None = None
 
 
-def _hash(text: str, source: str | None) -> str:
+def _hash(
+    text: str,
+    source: str | None,
+    *,
+    ordinal: int | str | None = None,
+) -> str:
     h = hashlib.sha1()
     if source:
         h.update(source.encode("utf-8", errors="ignore"))
+        h.update(b"\x00")
+    if ordinal is not None:
+        h.update(str(ordinal).encode("utf-8", errors="ignore"))
         h.update(b"\x00")
     h.update(text.encode("utf-8", errors="ignore"))
     return h.hexdigest()[:16]
@@ -118,7 +126,10 @@ def _iter_pre_chunked(chunks_dir: Path) -> Iterable[Chunk]:
                 if not text:
                     continue
                 source = obj.get("source") or jsonl.name
-                cid = str(obj.get("id") or _hash(text, source))
+                cid = str(
+                    obj.get("id")
+                    or _hash(text, f"{jsonl.name}\x00{source}", ordinal=lineno)
+                )
                 meta = obj.get("metadata") or {}
                 if not isinstance(meta, dict):
                     meta = {"_raw_metadata": str(meta)}
@@ -148,12 +159,14 @@ def _iter_raw_documents(
             _log.warning("read_fail", extra={"path": str(path), "err": str(exc)})
             continue
         source = str(path.relative_to(data_dir))
-        for seg in _split_text(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap):
+        for ordinal, seg in enumerate(
+            _split_text(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        ):
             yield Chunk(
-                id=_hash(seg, source),
+                id=_hash(seg, source, ordinal=ordinal),
                 text=seg,
                 source=source,
-                metadata={"_origin": "raw"},
+                metadata={"_origin": "raw", "_chunk_ordinal": ordinal},
             )
 
 

@@ -4,7 +4,7 @@ This is the real deal: seeds a profile with a small KB + SQLite + graph,
 then asks the agent real questions and watches it pick the right tool.
 
 Usage:
-    DATAMIND__LLM__API_BASE=http://35.220.164.252:3888
+    DATAMIND__LLM__API_BASE=https://gateway.example.com
     DATAMIND__LLM__API_KEY=sk-...
     python -m datamind.scripts.hello_agent
 """

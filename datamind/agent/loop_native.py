@@ -45,6 +45,7 @@ from datamind.core.logging import current_context, get_logger
 from datamind.core.model_clients import AnthropicModelClient
 from datamind.core.protocols import ModelResponse
 from datamind.core.tools import ToolRegistry
+from datamind.core.errors import FinalAnswerContractError
 
 from .base import AgentEvent, AgentLoopConfig, OnToolEnd, OnToolStart
 
@@ -436,29 +437,35 @@ class NativeAgentLoop:
         return "\n".join(rules)
 
     @staticmethod
-    def _validate_contract(answer: str, contract: dict[str, Any] | None) -> bool:
+    def _contract_error(answer: str, contract: dict[str, Any] | None) -> str | None:
         if not contract:
-            return True
+            return None
         if contract.get("max_length") and len(answer) > int(contract["max_length"]):
-            return False
+            return f"answer exceeds maximum length {int(contract['max_length'])}"
         kind = contract.get("type")
         if kind == "number":
             try:
-                float(answer.strip())
+                value = float(answer.strip())
             except ValueError:
-                return False
+                return "answer is not a number"
+            if value != value or value in {float("inf"), float("-inf")}:
+                return "answer is not a finite number"
         schema = contract.get("json_schema")
         if schema or kind in {"json", "array", "object"}:
             try:
                 parsed = json.loads(answer)
             except json.JSONDecodeError:
-                return False
+                return "answer is not valid JSON"
             expected = (schema or {}).get("type") or kind
             if expected == "array" and not isinstance(parsed, list):
-                return False
+                return "answer is not a JSON array"
             if expected == "object" and not isinstance(parsed, dict):
-                return False
-        return True
+                return "answer is not a JSON object"
+        return None
+
+    @classmethod
+    def _validate_contract(cls, answer: str, contract: dict[str, Any] | None) -> bool:
+        return cls._contract_error(answer, contract) is None
 
     @staticmethod
     def _dedupe_evidence(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -558,18 +565,22 @@ class NativeAgentLoop:
         successful_calls: dict[str, Any] = {}
         tool_call_count = 0
         started = time.monotonic()
+        finalization_reserve = min(
+            self._cfg.finalization_reserve_s,
+            self._cfg.wall_clock_timeout_s / 2,
+        )
+        tool_deadline_s = self._cfg.wall_clock_timeout_s - finalization_reserve
 
         for iteration in range(self._cfg.max_tool_turns):
             elapsed = time.monotonic() - started
-            if elapsed >= self._cfg.wall_clock_timeout_s:
-                allow_tools = False
-            else:
-                allow_tools = (
-                    iteration < self._cfg.max_tool_turns - 1
-                    and tool_call_count < self._cfg.max_tool_calls
-                    and total_input < self._cfg.max_input_tokens
-                )
-            remaining = max(0.1, self._cfg.wall_clock_timeout_s - elapsed)
+            allow_tools = (
+                elapsed < tool_deadline_s
+                and iteration < self._cfg.max_tool_turns - 1
+                and tool_call_count < self._cfg.max_tool_calls
+                and total_input < self._cfg.max_input_tokens
+            )
+            request_deadline_s = tool_deadline_s if allow_tools else self._cfg.wall_clock_timeout_s
+            remaining = max(0.1, request_deadline_s - elapsed)
             try:
                 async with asyncio.timeout(remaining):
                     resp = await self._complete(
@@ -578,11 +589,24 @@ class NativeAgentLoop:
                         system_prompt=system_prompt,
                     )
             except TimeoutError:
+                # A tool-capable model call may consume its exploration
+                # budget. Continue once with tools disabled so the protected
+                # finalization budget can still produce a proper answer.
+                if allow_tools:
+                    continue
+                fallback = self._best_effort_answer(evidence)
+                error = self._contract_error(fallback, final_contract)
+                if error is not None:
+                    raise FinalAnswerContractError(
+                        error, stop_reason="wall_clock_timeout"
+                    ) from None
                 return {
-                    "answer": self._best_effort_answer(evidence),
+                    "answer": fallback,
                     "history": conv,
                     "iterations": iteration,
                     "stop_reason": "wall_clock_timeout",
+                    "contract_valid": True,
+                    "contract_repair_attempted": False,
                     "usage": self._usage_dict(
                         total_input, total_output, total_cache_read, total_cache_create,
                         tool_call_count, resolved_models,
@@ -605,17 +629,30 @@ class NativeAgentLoop:
             if resp.stop_reason != "tool_use" or not allow_tools:
                 text = "".join(b["text"] for b in assistant_blocks if b.get("type") == "text")
                 stop_reason = resp.stop_reason if resp.stop_reason != "tool_use" else "max_iterations"
+                repair_attempted = False
                 # One no-tool formatting repair is allowed, and it never gets
                 # access to evidence tools or expected-answer content.
                 if text and not self._validate_contract(text, final_contract):
+                    repair_attempted = True
                     conv.append({
                         "role": "user",
                         "content": "Reformat the previous answer to satisfy the final answer contract. "
-                                   "Do not add new factual claims.",
+                                   "Return only the contracted value with no explanation, prefix, "
+                                   "code fence, or Markdown. Do not add new factual claims.",
                     })
-                    repair = await self._complete(
-                        conv=conv, allow_tools=False, system_prompt=system_prompt,
+                    repair_remaining = max(
+                        0.1,
+                        self._cfg.wall_clock_timeout_s - (time.monotonic() - started),
                     )
+                    try:
+                        async with asyncio.timeout(repair_remaining):
+                            repair = await self._complete(
+                                conv=conv, allow_tools=False, system_prompt=system_prompt,
+                            )
+                    except TimeoutError:
+                        raise FinalAnswerContractError(
+                            "formatting repair timed out", stop_reason="contract_repair_timeout"
+                        ) from None
                     total_input += repair.usage.input_tokens
                     total_output += repair.usage.output_tokens
                     if repair.resolved_model and repair.resolved_model not in resolved_models:
@@ -625,16 +662,25 @@ class NativeAgentLoop:
                     candidate = "".join(
                         b["text"] for b in repair_blocks if b.get("type") == "text"
                     )
-                    if candidate:
-                        text = candidate
-                        stop_reason = "contract_repaired"
+                    candidate_error = self._contract_error(candidate, final_contract)
+                    if candidate_error is not None:
+                        raise FinalAnswerContractError(
+                            candidate_error, stop_reason="contract_repair_failed"
+                        )
+                    text = candidate
+                    stop_reason = "contract_repaired"
                 if not text:
                     text = self._best_effort_answer(evidence)
+                final_error = self._contract_error(text, final_contract)
+                if final_error is not None:
+                    raise FinalAnswerContractError(final_error, stop_reason=stop_reason)
                 return {
                     "answer": text,
                     "history": conv,
                     "iterations": iteration + 1,
                     "stop_reason": stop_reason,
+                    "contract_valid": True,
+                    "contract_repair_attempted": repair_attempted,
                     "usage": self._usage_dict(
                         total_input, total_output, total_cache_read, total_cache_create,
                         tool_call_count, resolved_models,
@@ -650,6 +696,9 @@ class NativeAgentLoop:
             tool_results: list[dict] = []
             blocks = [b for b in assistant_blocks if b.get("type") == "tool_use"]
             pending: dict[str, asyncio.Task] = {}
+            dispatch_remaining = max(
+                0.0, tool_deadline_s - (time.monotonic() - started)
+            )
             for b in blocks:
                 key = self._call_key(b["name"], b["input"])
                 if key in successful_calls or key in pending:
@@ -657,12 +706,21 @@ class NativeAgentLoop:
                 if tool_call_count + len(pending) >= self._cfg.max_tool_calls:
                     continue
 
-                async def _timed_dispatch(block=b):
+                async def _timed_dispatch(block=b, timeout_s=dispatch_remaining):
                     call_started = time.monotonic()
-                    result = await self._dispatch_tool(block["name"], block["input"])
+                    try:
+                        async with asyncio.timeout(max(0.1, timeout_s)):
+                            result = await self._dispatch_tool(block["name"], block["input"])
+                    except TimeoutError:
+                        result = (
+                            None,
+                            TimeoutError("tool call exceeded finalization reserve"),
+                            None,
+                        )
                     return (*result, (time.monotonic() - call_started) * 1000)
 
-                pending[key] = asyncio.create_task(_timed_dispatch())
+                if dispatch_remaining > 0:
+                    pending[key] = asyncio.create_task(_timed_dispatch())
             completed = dict(zip(pending, await asyncio.gather(*pending.values()))) if pending else {}
 
             for b in blocks:
@@ -706,11 +764,17 @@ class NativeAgentLoop:
             conv.append({"role": "user", "content": tool_results})
 
         # Hit the iteration cap.
+        fallback = self._best_effort_answer(evidence)
+        final_error = self._contract_error(fallback, final_contract)
+        if final_error is not None:
+            raise FinalAnswerContractError(final_error, stop_reason="max_iterations")
         return {
-            "answer": self._best_effort_answer(evidence),
+            "answer": fallback,
             "history": conv,
             "iterations": self._cfg.max_tool_turns,
             "stop_reason": "max_iterations",
+            "contract_valid": True,
+            "contract_repair_attempted": False,
             "usage": self._usage_dict(
                 total_input, total_output, total_cache_read, total_cache_create,
                 tool_call_count, resolved_models,

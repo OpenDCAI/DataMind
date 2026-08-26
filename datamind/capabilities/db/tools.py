@@ -39,7 +39,9 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
             name="db_describe_table",
             description=(
                 "Describe a table: column names, types, primary keys, and an estimated row count. "
-                "Use this before writing SQL by hand so you reference existing columns."
+                "Use this before writing SQL by hand so you reference existing columns. SQLite "
+                "TEXT affinity does not prove that values are non-numeric; inspect representative "
+                "rows before extrema or arithmetic when the business field is numeric."
             ),
             input_schema={
                 "type": "object",
@@ -56,7 +58,10 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
             description=(
                 "Execute a single read-only SELECT against the database. "
                 "The runtime enforces a row limit and rejects anything that looks like DML/DDL. "
-                "Prefer this when you already know the SQL you want."
+                "Prefer this when you already know the SQL you want. For numeric-looking TEXT, "
+                "cast explicitly before ordering or arithmetic. Treat Unicode-whitespace-only "
+                "text as empty, preserve stored percentage scale unless conversion is requested, "
+                "and never invent an unstated numeric encoding for categories."
             ),
             input_schema={
                 "type": "object",
@@ -72,7 +77,9 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
             name="db_query_nl",
             description=(
                 "Answer a question against the SQL database. The runtime generates a SELECT from your question "
-                "and returns the rows plus the generated SQL. Prefer this when you don't know the schema cold."
+                "and returns the rows plus the generated SQL. Prefer this when you don't know the schema cold. "
+                "Generated SQL applies numeric casts, empty-cell normalization, and stored-unit preservation "
+                "where the question requires them."
             ),
             input_schema={
                 "type": "object",

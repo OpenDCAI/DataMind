@@ -281,6 +281,7 @@ def _build_loop(
         max_tool_result_chars=settings.agent.max_tool_result_chars,
         max_tool_result_rows=settings.agent.max_tool_result_rows,
         wall_clock_timeout_s=settings.agent.wall_clock_timeout_s,
+        finalization_reserve_s=settings.agent.finalization_reserve_s,
     )
     if settings.agent.backend == "sdk":
         from .loop_sdk import SdkAgentLoop  # noqa: PLC0415

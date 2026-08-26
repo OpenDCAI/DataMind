@@ -191,15 +191,17 @@ class IngestService:
 
         chunks = [
             Chunk(
-                id=_hash(segment, stored_source),
+                id=_hash(segment, stored_source, ordinal=ordinal),
                 text=segment,
                 source=stored_source,
-                metadata={"_origin": "store_agent"},
+                metadata={"_origin": "store_agent", "_chunk_ordinal": ordinal},
             )
-            for segment in _split_text(
-                content,
-                chunk_size=self._chunk_size,
-                chunk_overlap=self._chunk_overlap,
+            for ordinal, segment in enumerate(
+                _split_text(
+                    content,
+                    chunk_size=self._chunk_size,
+                    chunk_overlap=self._chunk_overlap,
+                )
             )
         ]
         await self._upsert_chunks(chunks)
@@ -248,12 +250,18 @@ class IngestService:
         # Build chunks identical in shape to indexer's raw path.
         source = copied_to or str(resolved)
         chunks: list[Chunk] = []
-        for seg in _split_text(text, chunk_size=self._chunk_size, chunk_overlap=self._chunk_overlap):
+        for ordinal, seg in enumerate(
+            _split_text(
+                text,
+                chunk_size=self._chunk_size,
+                chunk_overlap=self._chunk_overlap,
+            )
+        ):
             chunks.append(Chunk(
-                id=_hash(seg, source),
+                id=_hash(seg, source, ordinal=ordinal),
                 text=seg,
                 source=source,
-                metadata={"_origin": "ingest"},
+                metadata={"_origin": "ingest", "_chunk_ordinal": ordinal},
             ))
 
         if not chunks:

@@ -113,6 +113,37 @@ async def test_build_index_from_raw_markdown(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_index_assigns_unique_stable_ids_to_repeated_raw_chunks(tmp_path):
+    data_dir = tmp_path / "profile"
+    data_dir.mkdir()
+    (data_dir / "repeated.md").write_text(
+        "repeat\n\nrepeat", encoding="utf-8"
+    )
+
+    store = _InMemoryStore()
+    stats = await build_index(
+        data_dir=data_dir,
+        vector_store=store,
+        embedding=_FakeEmbed(),
+        chunk_size=8,
+        chunk_overlap=0,
+    )
+    first_ids = set(store._data)
+
+    assert stats["raw_chunks"] == 2
+    assert len(first_ids) == 2
+
+    await build_index(
+        data_dir=data_dir,
+        vector_store=store,
+        embedding=_FakeEmbed(),
+        chunk_size=8,
+        chunk_overlap=0,
+    )
+    assert set(store._data) == first_ids
+
+
+@pytest.mark.asyncio
 async def test_build_index_pre_chunked_jsonl(tmp_path):
     data_dir = tmp_path / "profile"
     (data_dir / "chunks").mkdir(parents=True)

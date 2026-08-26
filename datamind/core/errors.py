@@ -46,3 +46,20 @@ class ExternalServiceError(DataMindError):
         self.service = service
         self.status_code = status_code
         self.__cause__ = cause
+
+
+class FinalAnswerContractError(DataMindError):
+    """The model could not produce a caller-compliant final answer.
+
+    The raw provider output is intentionally omitted from the exception so a
+    tool-result dump cannot leak through an error path.  Callers may retry the
+    whole turn once because contract failures and exhausted finalization time
+    can be stochastic.
+    """
+
+    retryable = True
+
+    def __init__(self, reason: str, *, stop_reason: str) -> None:
+        super().__init__(f"final answer contract failed ({stop_reason}): {reason}")
+        self.reason = reason
+        self.stop_reason = stop_reason

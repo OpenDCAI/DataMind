@@ -63,6 +63,9 @@ class AgentLoopConfig:
     max_tool_result_chars: int = 12_000
     max_tool_result_rows: int = 100
     wall_clock_timeout_s: float = 300.0
+    # Keep a protected tail of the wall-clock budget for a no-tool final
+    # response and, when needed, one formatting-only contract repair.
+    finalization_reserve_s: float = 20.0
 
 
 # ---------------------------------------------------------------- protocol

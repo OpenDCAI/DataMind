@@ -4,8 +4,8 @@ Works with:
 - OpenAI (api.openai.com/v1)
 - SiliconFlow, DeepSeek, Moonshot, 智谱 etc. — any provider that speaks the
   POST /v1/embeddings JSON shape `{"model": ..., "input": [...]}`.
-- The gateway itself (http://35.220.164.252:3888) also exposes this endpoint
-  so one API key can drive both LLM and embeddings.
+- A custom gateway may expose this endpoint alongside its LLM endpoint so one
+  deployment can drive both LLM and embeddings.
 
 We use httpx directly rather than the `openai` package: fewer deps, easier
 to retry, and the Anthropic-style gateway sometimes has quirks around error

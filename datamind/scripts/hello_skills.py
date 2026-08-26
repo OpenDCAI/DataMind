@@ -6,7 +6,7 @@ bodies, and exercises the code skills (calculator, unit_convert).
 
 Usage:
     DATAMIND__LLM__API_KEY=sk-...
-    DATAMIND__EMBEDDING__API_BASE=http://35.220.164.252:3888
+    DATAMIND__EMBEDDING__API_BASE=https://gateway.example.com
     DATAMIND__EMBEDDING__API_KEY=sk-...
     python -m datamind.scripts.hello_skills
 """

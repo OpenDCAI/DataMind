@@ -6,6 +6,7 @@ AgentLoop.run_turn — enough to script a deterministic conversation.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -13,6 +14,7 @@ import pytest
 
 from datamind.agent.loop_native import NativeAgentLoop
 from datamind.agent.base import AgentLoopConfig
+from datamind.core.errors import FinalAnswerContractError
 from datamind.core.tools import ToolRegistry, ToolSpec
 
 
@@ -89,6 +91,20 @@ def _tool_boom() -> ToolSpec:
     )
 
 
+def _tool_slow() -> ToolSpec:
+    async def handler() -> dict:
+        await asyncio.sleep(1)
+        return {"late": True}
+
+    return ToolSpec(
+        name="slow",
+        description="sleeps",
+        input_schema={"type": "object", "properties": {}},
+        handler=handler,
+        metadata={"group": "other", "surface": "kb", "access": "read"},
+    )
+
+
 # ---------------------------------------------------------------- tests
 
 
@@ -140,6 +156,73 @@ async def test_tool_use_then_final_answer():
         and any(b.get("type") == "tool_result" for b in m["content"])
         for m in call2["messages"]
     )
+
+
+@pytest.mark.asyncio
+async def test_invalid_contract_gets_one_validated_no_tool_repair():
+    script = [
+        _Message(content=[_Block(type="text", text="Answer: [1]")], stop_reason="end_turn"),
+        _Message(content=[_Block(type="text", text="[1]")], stop_reason="end_turn"),
+    ]
+    loop = NativeAgentLoop(
+        client=_FakeClient(script),  # type: ignore[arg-type]
+        tools=ToolRegistry(),
+        config=AgentLoopConfig(model="m"),
+    )
+    out = await loop.run_turn(
+        user_message="return an array",
+        final_contract={"type": "array", "json_schema": {"type": "array"}},
+    )
+    assert out["answer"] == "[1]"
+    assert out["stop_reason"] == "contract_repaired"
+    assert out["contract_valid"] is True
+    assert out["contract_repair_attempted"] is True
+    assert "tools" not in loop._client.messages.calls[-1]  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_invalid_contract_repair_raises_typed_error_instead_of_leaking_text():
+    script = [
+        _Message(content=[_Block(type="text", text="not json")], stop_reason="end_turn"),
+        _Message(content=[_Block(type="text", text="still not json")], stop_reason="end_turn"),
+    ]
+    loop = NativeAgentLoop(
+        client=_FakeClient(script),  # type: ignore[arg-type]
+        tools=ToolRegistry(),
+        config=AgentLoopConfig(model="m"),
+    )
+    with pytest.raises(FinalAnswerContractError, match="not valid JSON"):
+        await loop.run_turn(
+            user_message="return an array",
+            final_contract={"type": "array", "json_schema": {"type": "array"}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_slow_tool_is_cut_off_to_preserve_contract_finalization_budget():
+    script = [
+        _Message(
+            content=[_Block(type="tool_use", id="t1", name="slow", input={})],
+            stop_reason="tool_use",
+        ),
+        _Message(content=[_Block(type="text", text='["ok"]')], stop_reason="end_turn"),
+    ]
+    registry = ToolRegistry(); registry.add(_tool_slow())
+    loop = NativeAgentLoop(
+        client=_FakeClient(script),  # type: ignore[arg-type]
+        tools=registry,
+        config=AgentLoopConfig(
+            model="m", max_tool_turns=2,
+            wall_clock_timeout_s=0.3, finalization_reserve_s=0.15,
+        ),
+    )
+    out = await loop.run_turn(
+        user_message="use the tool then return an array",
+        final_contract={"type": "array", "json_schema": {"type": "array"}},
+    )
+    assert out["answer"] == '["ok"]'
+    assert out["contract_valid"] is True
+    assert out["tool_trace"][0]["error_type"] == "TimeoutError"
 
 
 @pytest.mark.asyncio

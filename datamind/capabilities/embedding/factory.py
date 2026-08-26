@@ -13,8 +13,9 @@ def build_embedding(cfg: EmbeddingConfig, *, fallback_llm: LLMConfig | None = No
 
     If cfg.api_key / cfg.api_base aren't set but a `fallback_llm` is given
     and the provider needs credentials (openai_compatible), we reuse the
-    LLM gateway creds. This is the "one key, one gateway, two endpoints"
-    deployment (which the user's 35.220.164.252:3888 is).
+    LLM gateway credentials. This supports generic "one key, one gateway, two
+    endpoints" deployments without baking environment-specific hosts into the
+    library.
     """
     kwargs: dict = {
         "model": cfg.model,

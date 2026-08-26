@@ -3,7 +3,7 @@
 Nested `pydantic-settings` with env prefix `DATAMIND__` and double-underscore
 delimiter. Example:
 
-    DATAMIND__LLM__API_BASE=http://35.220.164.252:3888
+    DATAMIND__LLM__API_BASE=https://gateway.example.com
     DATAMIND__LLM__MODEL=claude-sonnet-4-6
     DATAMIND__EMBEDDING__PROVIDER=openai
     DATAMIND__DB__DIALECT=mysql
@@ -43,7 +43,7 @@ class LLMConfig(BaseModel):
     rewriting, memory and ingest) uses the same client as the outer loop.
     """
 
-    api_base: AnyUrl = Field(default=AnyUrl("http://35.220.164.252:3888"))
+    api_base: AnyUrl = Field(default=AnyUrl("https://api.anthropic.com"))
     api_key: SecretStr
     protocol: Literal["anthropic", "openai_chat_completions"] = "anthropic"
     model: str = "claude-sonnet-4-6"
@@ -217,6 +217,7 @@ class AgentConfig(BaseModel):
     max_tool_result_chars: int = Field(default=12_000, ge=256)
     max_tool_result_rows: int = Field(default=100, ge=1)
     wall_clock_timeout_s: float = Field(default=300.0, gt=0)
+    finalization_reserve_s: float = Field(default=20.0, ge=0)
 
 
 class HooksConfig(BaseModel):

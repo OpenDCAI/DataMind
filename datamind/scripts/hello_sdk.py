@@ -6,7 +6,7 @@ ship a vendor-rebranded binary that ignores ANTHROPIC_API_KEY. Going straight
 to the /v1/messages endpoint gives us a 100% deterministic check.
 
 Run:
-    export DATAMIND__LLM__API_BASE=http://35.220.164.252:3888
+    export DATAMIND__LLM__API_BASE=https://gateway.example.com
     export DATAMIND__LLM__API_KEY=sk-...
     # Optional override
     export DATAMIND__LLM__MODEL=claude-sonnet-4-6
