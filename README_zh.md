@@ -1,277 +1,269 @@
 # DataMind
 
-[English](./README.md) | **中文**
+<p align="center">
+  <strong>为 Agent 准备的 inference-time data。</strong><br>
+  边聊边入库，需要时跨数据面取证。
+</p>
 
-[![PyPI version](https://img.shields.io/pypi/v/datamind.svg)](https://pypi.org/project/datamind/)
-[![Python](https://img.shields.io/pypi/pyversions/datamind.svg)](https://pypi.org/project/datamind/)
-[![License](https://img.shields.io/pypi/l/datamind.svg)](https://github.com/OpenDCAI/DataMind/blob/main/LICENSE)
+<p align="center">
+  <a href="https://github.com/OpenDCAI/DataMind/actions/workflows/python-ci.yml"><img src="https://github.com/OpenDCAI/DataMind/actions/workflows/python-ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/datamind/"><img src="https://img.shields.io/pypi/v/datamind.svg" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/datamind/"><img src="https://img.shields.io/pypi/pyversions/datamind.svg" alt="Python versions"></a>
+  <a href="https://github.com/OpenDCAI/DataMind/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/datamind.svg" alt="License"></a>
+</p>
 
-面向 inference-time data 的双 agent 工具：**StoreAgent** 负责把数据自主路由到五个数据面，**RetrieveAgent** 只读地跨面取数、组合证据并回答问题。五个数据面是 RAG、数据库、图谱、Skills 和 Memory；系统不使用 DataOp、DataPlan 或执行 DAG。
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="./GETTING_STARTED.md">完整上手</a> ·
+  <a href="./docs/STABLE_API.md">稳定 API</a> ·
+  <a href="./README.md">English</a>
+</p>
+
+DataMind 是一个面向 Agent 的小型、协议中立 data plane。它把“数据怎么写入”和“问题怎么取证”拆成两个清晰的角色：
+
+- **StoreAgent**：判断新信息应该落在哪个数据面，并在 inference time 写入。
+- **RetrieveAgent**：跨五个数据面检索、组合证据并回答，严格保持只读。
+
+它不是另一份聊天历史，也不是批处理 ETL。它是一层可检查、可持续更新的共享知识：对话中刚写入的数据，下一句话就能被使用。
 
 ![DataMind inference-time data plane](./assets/inference-time-data-plane.png)
 
-*暖色路径表示 StoreAgent 的写入/入库流，冷色路径表示 RetrieveAgent 跨数据面读取证据并回答的流。*
+<p align="center"><sub>暖色路径是 StoreAgent 的写入/入库流；冷色路径是 RetrieveAgent 的跨面取证流。</sub></p>
 
-> **v1.0.0 是 DataMind inference-time data plane 的首个稳定版本。** native 后端和本地 profile 工作流构成稳定核心；可选的 SDK/CCR 以及远程数据库集成仍建议先在你的环境中验证。当前代码位于 [`datamind/`](./datamind/) 目录；最初的 v0.1 原型（`main.py` / `server.py` / `modules/`）仅作对比参考而保留在仓库中。完整上手流程见 [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [文档站](https://opendcai.github.io/DataMind-Doc/zh/)。
+> **v1.0.0 是首个稳定版本。** native + 本地 profile 存储是发布基线；SDK/CCR 与远程数据库属于已实现的集成路径，建议在目标环境中单独验证。
 
-发布参考：[CHANGELOG](./CHANGELOG.md) · [稳定 API](./docs/STABLE_API.md) · [native / SDK 支持矩阵](./docs/SUPPORT_MATRIX.md) · [公网部署安全边界](./docs/SECURITY_BOUNDARIES.md) · [术语与概念](./docs/CONCEPTS.md)
+## 为什么是 DataMind？
 
----
+| Inference-time 写入 | 跨数据面取证 | 安全边界内建 |
+|---|---|---|
+| 一句话、一个文件、一张 CSV 或一组关系都能直接变成持久数据，无需另起 ingestion 服务。 | 一个问题同时查询 RAG、SQL、图谱、Skills、Memory，返回统一答案与来源。 | 两个 Agent 使用物理隔离的工具注册表，共享安全 Hook、profile 隔离和可审计 receipt。 |
 
-## 安装
+### 两个 Agent 的契约
 
-```bash
+| Agent | 负责什么 | 明确不做什么 |
+|---|---|---|
+| **StoreAgent** | `kb_add_*`、`db_import_*`、图谱 upsert、`skill_upsert`、`memory_save` / `memory_forget` | 不带写权限回答取数问题 |
+| **RetrieveAgent** | 知识库搜索、SQL 检查/查询、图谱遍历、Skills、Memory recall | 不修改任何数据面 |
+
+边界在工具到达模型之前就由代码强制执行：RetrieveAgent 获得 19 个 read/utility 工具，StoreAgent 获得 11 个 write 工具。每次调用还会经过 `PathAllowlistHook`、`DestructiveSqlHook` 和 `AuditLogHook`。
+
+## 五个数据面，一个答案
+
+| 数据面 | 最适合解决 | 默认实现 |
+|---|---|---|
+| **KB / RAG** | 文档、制度、笔记、语义检索 | Chroma + BM25 + 倒数排名融合（RRF） |
+| **Database** | 精确数字、筛选、Join、聚合 | SQLAlchemy，支持 SQLite / MySQL / PostgreSQL |
+| **Knowledge Graph** | 实体、关系、多跳事实 | NetworkX + JSON 持久化 |
+| **Skills** | 可复用流程与安全工具 | profile 级 `SKILL.md` + Python 工具 |
+| **Memory** | 偏好、约定、长期事实 | SQLite + 余弦召回，支持 `global` / `profile` / `session` |
+
+## 快速开始
+
+安装稳定的 native 栈：
+
+~~~bash
 pip install datamind
-```
+~~~
 
-可选扩展：
+配置一个 Anthropic 或 OpenAI Chat Completions 兼容网关：
 
-```bash
-pip install 'datamind[mysql]'         # MySQL 方言
-pip install 'datamind[postgres]'      # PostgreSQL 方言
-pip install 'datamind[voyage]'        # Voyage 向量嵌入
-pip install 'datamind[huggingface]'   # 本地 BGE / e5 嵌入
-pip install 'datamind[dev]'           # pytest + build + twine
-```
-
-指向 Anthropic 或 OpenAI Chat Completions 兼容网关即可开始对话：
-
-```bash
+~~~bash
 export DATAMIND__LLM__API_BASE=https://your-gateway.example.com
-export DATAMIND__LLM__API_KEY=sk-ant-...
-export DATAMIND__LLM__PROTOCOL=anthropic  # 或 openai_chat_completions
+export DATAMIND__LLM__API_KEY=sk-...
+export DATAMIND__LLM__PROTOCOL=anthropic   # 或 openai_chat_completions
 export DATAMIND__LLM__MODEL=claude-sonnet-4-6
 
-datamind chat                                          # 命令行
-python -m uvicorn datamind.server:app --port 8000      # 浏览器界面 http://127.0.0.1:8000
-```
+datamind chat
+~~~
 
-所选协议会同时用于外层工具循环和内部生成（NL2SQL、multi-query、Memory、Graph
-抽取）；模型名不会隐式决定协议。参见
-[ADR 0001](./docs/adr/0001-protocol-neutral-model-clients.md)。
+或者启动本地浏览器界面：
 
----
+~~~bash
+python -m uvicorn datamind.server:app --port 8000
+# 打开 http://127.0.0.1:8000
+~~~
 
-## 能力一览
+协议必须显式设置，并会同时用于外层 Agent loop 和内部生成路径（NL2SQL、multi-query、Memory、图谱抽取）。模型名不会隐式决定协议。详见 [ADR 0001](./docs/adr/0001-protocol-neutral-model-clients.md)。
 
-| 数据面 | 后端 | RetrieveAgent | StoreAgent |
-|---|---|---|---|
-| **知识库（RAG）** | Chroma + BM25，采用倒数排名融合（RRF） | `kb_search`、`kb_list_documents`、`kb_count` | `kb_add_text`、`kb_add_file`、`kb_add_path`、`kb_reindex` |
-| **图谱** | NetworkX，JSON 持久化 | `graph_search_entities`、`graph_traverse`、`graph_neighbors` | `graph_upsert_triples`、`graph_add_triples_from_text` |
-| **数据库** | SQLAlchemy（SQLite / MySQL / Postgres） | `db_list_tables`、`db_describe_table`、`db_query_sql`、`db_query_nl` | `db_import_csv`、`db_import_records` |
-| **技能（Skills）** | 基础 + profile 级 `SKILL.md`，以及安全的 Python 工具 | `skill_search`、`skill_get`、`skill_list`、`calculator`、`unit_convert`、`get_current_time`、`analyze_text` | `skill_upsert` |
-| **记忆** | SQLite，余弦召回；按 `global` / `profile` / `session` 隔离 | `memory_recall`、`memory_list_profiles` | `memory_save`、`memory_forget` |
+### 可选扩展
 
-运行时使用两个物理隔离的注册表：RetrieveAgent 只有 19 个 read/utility 工具，StoreAgent 只有 11 个 write 工具。权限边界由代码强制执行，而不是依赖 prompt 自觉。
+~~~bash
+pip install 'datamind[mysql]'       # MySQL 方言
+pip install 'datamind[postgres]'    # PostgreSQL 方言
+pip install 'datamind[voyage]'      # Voyage 向量嵌入
+pip install 'datamind[huggingface]' # 本地 BGE / e5 嵌入
+pip install 'datamind[dev]'         # pytest + build + twine
+~~~
 
-每次工具调用仍会经过共享的安全 HookChain：`PathAllowlistHook`、`DestructiveSqlHook` 和 `AuditLogHook`。
+## 60 秒看见完整流程
 
----
+仓库内置一套企业 demo：17 篇文档、64 个图谱节点、6 张表、101 行数据。
 
-## 60 秒体验
-
-> **只想直接用？** `pip install datamind`，设置 `DATAMIND__LLM__API_KEY`，运行 `datamind chat`。
-> 下面的流程会克隆仓库，让你顺带拿到种子脚本和企业 demo 数据集。
-
-```bash
-git clone https://github.com/OpenDCAI/DataMind.git && cd DataMind
+~~~bash
+git clone https://github.com/OpenDCAI/DataMind.git
+cd DataMind
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
 cp .env.datamind.example .env.datamind
-$EDITOR .env.datamind     # 至少设置 DATAMIND__LLM__API_KEY
+$EDITOR .env.datamind              # 至少设置 DATAMIND__LLM__API_KEY
 
-# 1. 冒烟测试网关连通性（约 2 秒）
 python -m datamind.scripts.hello_sdk
-
-# 2. 灌入一个真实的企业数据集（17 篇文档 / 64 个图谱节点 / 6 张表 / 101 行）
 python -m datamind.scripts.seed_enterprise_demo
-
-# 3. 看 agent 自主回答 8 个跨后端的问题
 DATAMIND__DATA__PROFILE=enterprise_demo \
   python -m datamind.scripts.hello_enterprise
+~~~
 
-# 4. 或者直接打开浏览器界面
+想直接看 UI：
+
+~~~bash
 DATAMIND__DATA__PROFILE=enterprise_demo \
   python -m uvicorn datamind.server:app --port 8000
-# → http://127.0.0.1:8000  —— 把任意 .md / .csv / .txt 拖进拖拽区，提问，观察工具触发
-```
+~~~
 
-更多细节见 [`GETTING_STARTED.md`](./GETTING_STARTED.md)；通用长跑评测接口、
-checkpoint 格式与 resume 保证见 [`Benchmark runner`](./docs/BENCHMARK_RUNNER.md)。
+把 `.md`、`.csv` 或 `.txt` 拖进拖拽区，提问并观察按角色隔离的工具调用。完整步骤见 [GETTING_STARTED.md](./GETTING_STARTED.md)。
 
----
+## 对话本身就能改变 data plane
 
-## 这里的"agentic"到底指什么
+~~~bash
+datamind store "把 /Users/foo/sales-q2.csv 导入成数据表 q2_sales"
+datamind store "记住：所有周报默认使用中文"
+datamind chat
+~~~
 
-问它：**「工程部 Shanghai 的员工工资加起来是多少？」**
+下一次提问即可使用刚写入的数据：
 
-RetrieveAgent 判断出需要用 SQL，先尝试 `db_query_nl`，拿到空结果后自己检查表结构并修正查询；关系问题选择 Graph，流程问题组合 KB 与 Skills。"帮我记住这个"则进入 StoreAgent，由它选择 `memory_save`，取数 agent 永远拿不到该写工具。
+~~~text
+你            → “哪个 sales rep 的 Q2 pipeline 最大？”
+RetrieveAgent  → db_query_sql(...) → 答案 + 表格来源证据
+~~~
 
-两个 agent 都支持下列可互换的 loop 后端，并共享同一套 HookChain、SSE 协议和服务实例：
+同样的模式也适用于文档、图谱事实和 profile 级 Skills。StoreAgent 返回写入 receipt；RetrieveAgent 返回标准化 evidence。
 
-```
-DATAMIND__AGENT__BACKEND=native   # 默认 —— 内置协议中立 loop
-DATAMIND__LLM__PROTOCOL=anthropic # 或 openai_chat_completions
-DATAMIND__AGENT__BACKEND=sdk      # claude-agent-sdk + claude-code-router (CCR)
-                                  # 当你要接 OpenAI 格式的网关时用它（CCR 负责翻译）；
-                                  # 额外解锁 Subagents / Compaction
-```
+## 选择运行时
 
-DataMind 的 `HookChain`（路径白名单、破坏性 SQL 拦截、防篡改审计）在**两个后端上都会强制执行** —— 在 `native` 上位于调度咽喉点，在 `sdk` 上位于每个 MCP 工具的包装层内。两者都用同一组 8 个企业 demo 问题做了端到端验证（[具体数据见此](./GETTING_STARTED.md#10-bench)）。
+稳定默认值是内置的 `native` loop。需要 Subagents 或 Compaction 等 Claude Agent SDK 能力时，再选择可选的 `sdk` loop。
 
----
+| Backend | 协议 | 状态 | 适用场景 |
+|---|---|---|---|
+| `native` | Anthropic `/v1/messages` | **Stable** | 想使用最小、最直接的支持路径 |
+| `native` | OpenAI `/v1/chat/completions` | **Stable** | 上游是 OpenAI 兼容网关 |
+| `sdk` | Anthropic | Integration | 已经在使用 Claude Agent SDK / CLI |
+| `sdk` | OpenAI 兼容 + CCR | Integration | 需要 SDK loop，但上游只有 OpenAI 格式 |
 
-## 协议支持与可选 CCR 桥接
+请显式设置两个开关：
 
-native loop 原生支持 Anthropic `/v1/messages` 与 OpenAI
-`/v1/chat/completions`，包括工具调用与真实流式输出。请显式设置
-`DATAMIND__LLM__PROTOCOL`，内部生成路径会复用同一个模型客户端。
+~~~bash
+DATAMIND__AGENT__BACKEND=native
+DATAMIND__LLM__PROTOCOL=anthropic
+~~~
 
-选择 Claude Agent SDK 后端时仍可使用 CCR，因为该 SDK 使用 Anthropic 协议，而许多网关只暴露 OpenAI Chat Completions：
+完整边界见 [native / SDK 支持矩阵](./docs/SUPPORT_MATRIX.md)。SDK + OpenAI 格式路径使用 [CCR](https://github.com/musistudio/claude-code-router) 做本地 Anthropic ↔ OpenAI 协议桥接：
 
-**[claude-code-router (CCR)](https://github.com/musistudio/claude-code-router)** —— 一个本地代理，接收 Anthropic `/v1/messages` 请求并转发给 OpenAI 格式的上游，双向翻译请求体（以及流式事件）。
+<details>
+<summary>展开 SDK + CCR 配置</summary>
 
-```
-DataMind ──Anthropic /v1/messages──▶  CCR（本地）  ──OpenAI /v1/chat/completions──▶  你的网关
-   （sdk 后端）                       双向翻译                                     （OpenAI 格式 key）
-```
+~~~bash
+npm install -g @musistudio/claude-code-router   # Node >= 18
 
-CCR 只对 `sdk` 后端是必需的；`native` 后端可直连两种协议。
-
-### 我什么时候需要它？
-
-| 你的上游网关讲的是…… | 该怎么做 |
-|---|---|
-| **Anthropic**（`/v1/messages`，`sk-ant` key） | 什么都不用做。用 `BACKEND=native`，把 `DATAMIND__LLM__API_BASE` 直接指过去。 |
-| **OpenAI**（`/v1/chat/completions`） | `BACKEND=native` + `LLM__PROTOCOL=openai_chat_completions`；仅在 `BACKEND=sdk` 时使用 CCR。 |
-
-### 配置步骤（OpenAI 格式上游）
-
-```bash
-# 1. 安装 CCR（Node ≥ 18）
-npm install -g @musistudio/claude-code-router
-#    …… 或克隆 https://github.com/musistudio/claude-code-router 自行构建。
-
-# 2. 启动本地桥接。它会写一份配置，注册你的 OpenAI 格式上游，
-#    并应用 `anthropic` transformer。
 UPSTREAM_BASE=https://your-openai-gateway.example.com/v1 \
 UPSTREAM_KEY=sk-your-openai-format-key \
 UPSTREAM_MODEL=claude-sonnet-4-6 \
   ./scripts/start_ccr.sh
-# → [ccr] listen = http://127.0.0.1:13456
 
-# 3. 让 DataMind 的 sdk 后端指向 CCR（写在 .env.datamind 里）：
 DATAMIND__AGENT__BACKEND=sdk
 DATAMIND__AGENT__CCR_BASE_URL=http://127.0.0.1:13456
-DATAMIND__AGENT__CCR_API_KEY=dummy       # 真正的 key 在 CCR 里，这个字段用不到
-```
+DATAMIND__AGENT__CCR_API_KEY=dummy
+~~~
 
-`scripts/start_ccr.sh` 会替你生成 CCR 的 `config.json`，把上游 URL 归一化为
-`/v1/chat/completions`，并把 `default` / `background` / `think` 路由映射到你的
-主模型和降级模型。可通过环境变量覆盖 `CCR_PORT`、`UPSTREAM_FALLBACK`、
-`CCR_SERVER_ENTRY`（CCR 的 `packages/server/dist/index.js` 路径）—— 详见该脚本头部注释。
+真实上游 key 保存在 CCR 中，不要放进浏览器侧环境，也不要提交生成的 CCR 配置。
+</details>
 
----
+## Python 与 HTTP API
 
-## 靠对话就能加数据
+推荐使用轻量的异步 Python facade：
 
-StoreAgent 独占全部写工具，RetrieveAgent 保持严格只读：
+~~~python
+from datamind.agent import build_datamind
+from datamind.config import Settings
 
-```bash
-datamind store "把 /Users/foo/sales-q2.csv 导入成数据表 q2_sales"
-datamind store "记住：所有周报默认使用中文"
-```
+async def answer() -> str:
+    system = await build_datamind(Settings())
+    try:
+        await system.ingest("Remember that weekly reports use Chinese.")
+        result = await system.query("What language should weekly reports use?")
+        return result["answer"]
+    finally:
+        await system.aclose()
+~~~
 
-```
-你    → "把 /Users/foo/sales-q2.csv 导入成数据表 q2_sales"
-StoreAgent → 调用 db_import_csv(path=..., table='q2_sales')   ✓ 插入 18 行
-你    → "Q2 sales pipeline 里 in-pipeline 单子总额是多少？哪个 sales rep 单子最多？"
-RetrieveAgent → 调用 db_query_sql(...)                    ✓ 从刚导入的表里给出答案
-```
+内置 FastAPI 服务提供：
 
-或者把文件拖进浏览器拖拽区，点击 **导入**。或者说"把这段加进图谱：陈诚晋升 Tech Lead，向 Ann 汇报" → agent 调用 `graph_add_triples_from_text`，LLM 抽取三元组，图谱把它们 upsert 进去。无需重启，无需重建索引。
+| 路由 | 作用 |
+|---|---|
+| `GET /api/health` | 存活状态、profile、协议和工具数量 |
+| `GET /api/tools` | 按角色隔离的工具目录与 schema |
+| `POST /api/ask` | 只读 RetrieveAgent 请求 |
+| `POST /api/store` | StoreAgent 请求，返回 receipts |
+| `POST /api/chat` | 真 SSE 流（`text`、`tool_use`、`tool_result`、`done`） |
+| `POST /api/upload` | 保存上传文件并返回建议的入库提示 |
 
----
+稳定返回结构与兼容策略见 [稳定 API](./docs/STABLE_API.md)。
 
-## 为什么要重写（v0.1 → v1.0）
+## 安全与公网部署边界
 
-v0.1 原型能跑，但耦合严重：一个全局 `AppState`、写死的模块、被 `claude` CLI 供应商锁定。当前架构围绕以下几点重塑：
+DataMind 设计为嵌入你自己的认证和授权层，内置 server 不替代它。准备暴露到公网前，请先阅读[公网部署安全边界](./docs/SECURITY_BOUNDARIES.md)：
 
-- **协议 + 注册表** —— 每种能力都是一个 `Protocol`；具体类以短名注册。新增一个 DB 方言 / 嵌入提供方 / 检索策略 = 一个文件。
-- **可插拔的 agent 循环** —— `native`（anthropic SDK）或 `sdk`（claude-agent-sdk + CCR），一个环境变量切换。
-- **真正的 SSE 流式** —— 通过 FastAPI，而不是 v0.1 那种假的、按字符切片的伪流式。
-- **零全局状态** —— 每个请求拥有自己的 `RequestContext`，带一个 trace id。
-- **与 v0.1 并存** —— 原始代码路径原封不动，方便新旧对照。
+- 本地使用时绑定 loopback；
+- 在边缘层提供认证、授权、限流与 TLS；
+- 隔离 profile/storage 目录，限制上传路径；
+- provenance 只是来源元数据，不是授权凭证。
 
-完整细节见[架构文档](https://opendcai.github.io/DataMind-Doc/zh/guide/basicinfo/architecture/)。
+## 开发与验证
 
----
-
-## 仓库结构
-
-```
-DataMind/
-├── datamind/                     # ── 当前代码 ────────────────────────
-│   ├── agent/                    # base.py + loop_native.py + loop_sdk.py
-│   ├── capabilities/             # kb / graph / db / skills / memory /
-│   │                             #   ingest / embedding
-│   ├── core/                     # Protocol、Registry、Logging、Tools、Hooks
-│   ├── config.py                 # Settings（LLM / 嵌入 / 检索 / …）
-│   ├── scripts/                  # hello_*.py + seed_enterprise_demo.py
-│   ├── cli.py                    # `python -m datamind ...`
-│   ├── server.py                 # FastAPI + 真 SSE + /api/upload
-│   └── tests/                    # 无网络单元测试与协议合同测试
-│
-├── .claude/skills/               # SDK 风格的知识技能（SKILL.md）
-├── assets/inference-time-data-plane.png # README 架构图
-├── static/app.html               # 浏览器界面（拖拽 + 工具卡片 + 侧边栏）
-├── scripts/start_ccr.sh          # 一行命令启动 CCR（用于 sdk 后端）
-├── demo-uploads/                 # 6 个可拖进界面的示例文件
-│
-├── benchmark/                    # 当前栈 checkpoint/resume runner
-├── modules/ core/ main.py server.py              # ── v0.1 遗留代码 ─
-│
-├── data/profiles/<profile>/      # 每个 profile 的原始输入
-├── storage/<profile>/            # 每个 profile 的索引与数据库
-├── pyproject.toml                # 安装 + CLI 入口
-├── requirements-legacy.txt       # 仅供 v0.1 遗留栈复现
-├── LICENSE                       # Apache-2.0
-└── .env.datamind.example         # 嵌套式环境变量模板
-```
-
----
-
-## Profiles（多套数据隔离）
-
-一个环境变量即可让数据目录与存储目录联动切换：
-
-```bash
-DATAMIND__DATA__PROFILE=customer_a python -m datamind chat
-```
-
-映射到 `data/profiles/customer_a/` 和 `storage/customer_a/`。
-
----
-
-## 测试
-
-```bash
-pytest datamind/tests/
-```
-
-单独运行确定性、无需联网的 SQLite 验证：
-
-```bash
+~~~bash
+pytest
 python -m datamind.scripts.verify_sqlite_demo
-```
+~~~
 
-以及若干在线冒烟 + 基准脚本：
-`hello_sdk`、`hello_kb`、`hello_db`、`hello_graph`、`hello_skills`、`hello_memory`、`hello_agent`、
-`seed_enterprise_demo`、`hello_enterprise`（8 个跨后端问题）。
+第一条命令运行无网络单元测试和协议合同测试；第二条命令一键验证真实 SQLite demo。长跑评测、checkpoint/resume 和 benchmark 见 [BENCHMARK_RUNNER](./docs/BENCHMARK_RUNNER.md)。
 
----
+<details>
+<summary>查看仓库结构</summary>
 
-## 完整文档
+~~~text
+DataMind/
+├── datamind/                 # 当前 v1.x 包
+│   ├── agent/                # StoreAgent / RetrieveAgent loop
+│   ├── capabilities/         # kb / graph / db / skills / memory / ingest
+│   ├── core/                 # protocols、registries、hooks、contracts
+│   ├── scripts/               # hello_*.py 与验证 demo
+│   ├── cli.py                 # datamind CLI
+│   └── server.py              # FastAPI + SSE + upload API
+├── docs/                     # API、支持矩阵、安全和概念说明
+├── assets/                   # README 架构图
+├── demo-uploads/              # 可拖拽的示例文件
+├── benchmark/                # checkpoint/resume runner
+├── data/profiles/<profile>/  # profile 级输入
+├── storage/<profile>/        # profile 级索引和数据库
+├── modules/ core/ main.py    # v0.1 原型，保留用于对比
+├── pyproject.toml             # 包和 CLI 元数据
+└── LICENSE                    # Apache-2.0
+~~~
 
-架构、配置参考、各能力的深入讲解，以及中英文教程，请见 **[DataMind-Doc](https://opendcai.github.io/DataMind-Doc/zh/)**。仓库内的[稳定 API](./docs/STABLE_API.md)、[支持矩阵](./docs/SUPPORT_MATRIX.md)、[安全边界](./docs/SECURITY_BOUNDARIES.md)和[术语概念说明](./docs/CONCEPTS.md)定义了 v1.x 的发布契约。
+v0.1 原型路径仍保留在仓库中；v1.x 的支持入口位于 `datamind/`。
+</details>
+
+## 文档与发布信息
+
+- [完整上手](./GETTING_STARTED.md)
+- [稳定 API](./docs/STABLE_API.md)
+- [native / SDK 支持矩阵](./docs/SUPPORT_MATRIX.md)
+- [公网部署安全边界](./docs/SECURITY_BOUNDARIES.md)
+- [术语与概念](./docs/CONCEPTS.md) —— inference-time data 与传统 RAG、ETL、Agent Memory 的区别
+- [CHANGELOG](./CHANGELOG.md)
+- [DataMind-Doc](https://opendcai.github.io/DataMind-Doc/zh/)
+
+## License
+
+DataMind 基于 [Apache License 2.0](./LICENSE) 发布。

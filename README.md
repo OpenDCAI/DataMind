@@ -1,285 +1,297 @@
 # DataMind
 
-**English** | [中文](./README_zh.md)
+<p align="center">
+  <strong>Inference-time data, built for agents.</strong><br>
+  Store knowledge while you work. Retrieve evidence when you need it.
+</p>
 
-[![PyPI version](https://img.shields.io/pypi/v/datamind.svg)](https://pypi.org/project/datamind/)
-[![Python](https://img.shields.io/pypi/pyversions/datamind.svg)](https://pypi.org/project/datamind/)
-[![License](https://img.shields.io/pypi/l/datamind.svg)](https://github.com/OpenDCAI/DataMind/blob/main/LICENSE)
+<p align="center">
+  <a href="https://github.com/OpenDCAI/DataMind/actions/workflows/python-ci.yml"><img src="https://github.com/OpenDCAI/DataMind/actions/workflows/python-ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/datamind/"><img src="https://img.shields.io/pypi/v/datamind.svg" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/datamind/"><img src="https://img.shields.io/pypi/pyversions/datamind.svg" alt="Python versions"></a>
+  <a href="https://github.com/OpenDCAI/DataMind/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/datamind.svg" alt="License"></a>
+</p>
 
-An inference-time data system with two cooperating agents. **StoreAgent** routes writes across five data surfaces; **RetrieveAgent** performs strictly read-only cross-surface retrieval and evidence synthesis. The five surfaces are RAG, database, graph, Skills, and Memory. There is no DataOp, DataPlan, or execution DAG.
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="./GETTING_STARTED.md">Getting started</a> ·
+  <a href="./docs/STABLE_API.md">Stable API</a> ·
+  <a href="./README_zh.md">中文</a>
+</p>
+
+DataMind is a small, protocol-neutral data plane for agent applications. Two
+cooperating agents keep the contract simple:
+
+- **StoreAgent** decides where new information belongs and writes it at
+  inference time.
+- **RetrieveAgent** searches across five data surfaces, combines evidence, and
+  stays strictly read-only.
+
+The result is not another chat history or a batch ETL job. It is a shared,
+inspectable layer of knowledge that can change during a conversation and be
+used immediately by the next question.
 
 ![DataMind inference-time data plane](./assets/inference-time-data-plane.png)
 
-*The warm path is StoreAgent's write/ingest flow; the cool path is RetrieveAgent's read/retrieve flow across the shared data plane.*
+<p align="center"><sub>Warm paths write through StoreAgent; cool paths retrieve evidence through RetrieveAgent.</sub></p>
 
-> **v1.0.0 is the first stable release of DataMind's inference-time data plane.** The native backend and local profile workflow form the stable core; optional SDK/CCR and remote database integrations should still be validated in your environment. The current codebase lives under [`datamind/`](./datamind/); the original v0.1 prototype (`main.py` / `server.py` / `modules/`) is kept in-tree for comparison only. End-to-end walkthrough: [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [docs site](https://opendcai.github.io/DataMind-Doc/en/).
+> **v1.0.0 is the first stable release.** The native backend with local profile
+> storage is the release baseline. SDK/CCR and remote database integrations are
+> supported integration paths and should be validated in the target environment.
 
-Release references: [CHANGELOG](./CHANGELOG.md) · [Stable API](./docs/STABLE_API.md) · [Native/SDK support matrix](./docs/SUPPORT_MATRIX.md) · [Public deployment security boundary](./docs/SECURITY_BOUNDARIES.md) · [Concepts and terminology](./docs/CONCEPTS.md)
+## Why DataMind?
 
----
+| Write at inference time | Retrieve across surfaces | Safe by construction |
+|---|---|---|
+| Turn a message, file, CSV, or triple into durable data without a separate ingestion service. | Ask one question across RAG, SQL, graph, Skills, and Memory; get a single answer with provenance. | Store and Retrieve use separate tool registries, shared safety hooks, scoped profiles, and auditable receipts. |
 
-## Install
+### The two-agent contract
+
+| Agent | Owns | Never does |
+|---|---|---|
+| **StoreAgent** | `kb_add_*`, `db_import_*`, graph upserts, `skill_upsert`, `memory_save` / `memory_forget` | Answer retrieval questions with write privileges |
+| **RetrieveAgent** | KB search, SQL inspection/querying, graph traversal, Skills, Memory recall | Mutate a data surface |
+
+The boundary is enforced in code before tools reach the model: RetrieveAgent
+gets 19 read/utility tools, StoreAgent gets 11 write tools. Every call also
+passes through the shared `PathAllowlistHook`, `DestructiveSqlHook`, and
+`AuditLogHook` chain.
+
+## Five surfaces, one answer
+
+| Surface | What it is good at | Default implementation |
+|---|---|---|
+| **KB / RAG** | Documents, notes, policies, semantic search | Chroma + BM25 with reciprocal-rank fusion |
+| **Database** | Exact numbers, filters, joins, aggregations | SQLAlchemy over SQLite / MySQL / PostgreSQL |
+| **Knowledge graph** | Entities, relationships, multi-hop facts | NetworkX with JSON persistence |
+| **Skills** | Reusable procedures and safe utilities | Profile-scoped `SKILL.md` plus Python tools |
+| **Memory** | Preferences and durable facts | SQLite with cosine recall and `global` / `profile` / `session` scopes |
+
+## Quick start
+
+Install the stable native stack:
 
 ```bash
 pip install datamind
 ```
 
-Optional extras:
-
-```bash
-pip install 'datamind[mysql]'         # MySQL dialect
-pip install 'datamind[postgres]'      # PostgreSQL dialect
-pip install 'datamind[voyage]'        # Voyage embeddings
-pip install 'datamind[huggingface]'   # Local BGE / e5 embeddings
-pip install 'datamind[dev]'           # pytest + build + twine
-```
-
-Point it at an Anthropic or OpenAI Chat Completions compatible gateway and start chatting:
+Point it at an Anthropic or OpenAI Chat Completions-compatible gateway:
 
 ```bash
 export DATAMIND__LLM__API_BASE=https://your-gateway.example.com
-export DATAMIND__LLM__API_KEY=sk-ant-...
-export DATAMIND__LLM__PROTOCOL=anthropic  # or openai_chat_completions
+export DATAMIND__LLM__API_KEY=sk-...
+export DATAMIND__LLM__PROTOCOL=anthropic   # or openai_chat_completions
 export DATAMIND__LLM__MODEL=claude-sonnet-4-6
 
-datamind chat                                          # CLI
-python -m uvicorn datamind.server:app --port 8000      # browser UI on http://127.0.0.1:8000
+datamind chat
 ```
 
-The selected protocol is shared by the outer tool loop and internal generation
-(NL2SQL, multi-query retrieval, Memory, and Graph ingest). Model names do not
-implicitly select a protocol. See [ADR 0001](./docs/adr/0001-protocol-neutral-model-clients.md).
-
----
-
-## Capabilities
-
-| Data surface | Backend | RetrieveAgent | StoreAgent |
-|---|---|---|---|
-| **KB (RAG)** | Chroma + BM25 with Reciprocal Rank Fusion | `kb_search`, `kb_list_documents`, `kb_count` | `kb_add_text`, `kb_add_file`, `kb_add_path`, `kb_reindex` |
-| **Graph** | NetworkX, JSON-persisted | `graph_search_entities`, `graph_traverse`, `graph_neighbors` | `graph_upsert_triples`, `graph_add_triples_from_text` |
-| **Database** | SQLAlchemy (SQLite / MySQL / Postgres) | `db_list_tables`, `db_describe_table`, `db_query_sql`, `db_query_nl` | `db_import_csv`, `db_import_records` |
-| **Skills** | base + profile-scoped `SKILL.md`, plus safe Python tools | `skill_search`, `skill_get`, `skill_list`, `calculator`, `unit_convert`, `get_current_time`, `analyze_text` | `skill_upsert` |
-| **Memory** | SQLite with cosine recall; scope-typed (`global` / `profile` / `session`) | `memory_recall`, `memory_list_profiles` | `memory_save`, `memory_forget` |
-
-The runtime uses two physically separate registries: 19 read/utility tools for RetrieveAgent and 11 write tools for StoreAgent. Code enforces the boundary before tools reach the model.
-
-Every tool call still passes through the shared safety HookChain: `PathAllowlistHook`, `DestructiveSqlHook`, and `AuditLogHook`.
-
----
-
-## 60-second demo
-
-> **Just want to use it?** `pip install datamind`, set `DATAMIND__LLM__API_KEY`, run `datamind chat`.
-> The walkthrough below clones the repo so you also get the seed scripts and the enterprise-demo dataset.
+Or start the local browser UI:
 
 ```bash
-git clone https://github.com/OpenDCAI/DataMind.git && cd DataMind
+python -m uvicorn datamind.server:app --port 8000
+# open http://127.0.0.1:8000
+```
+
+The protocol is explicit and shared by the outer agent loop and internal
+generation paths (NL2SQL, multi-query retrieval, Memory, and graph extraction).
+Model names never select a protocol implicitly. See [ADR 0001](./docs/adr/0001-protocol-neutral-model-clients.md).
+
+### Optional providers
+
+```bash
+pip install 'datamind[mysql]'       # MySQL dialect
+pip install 'datamind[postgres]'    # PostgreSQL dialect
+pip install 'datamind[voyage]'      # Voyage embeddings
+pip install 'datamind[huggingface]' # local BGE / e5 embeddings
+pip install 'datamind[dev]'         # pytest + build + twine
+```
+
+## See it in action
+
+The repository includes a realistic enterprise demo with 17 documents, 64
+graph nodes, 6 tables, and 101 rows:
+
+```bash
+git clone https://github.com/OpenDCAI/DataMind.git
+cd DataMind
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
 cp .env.datamind.example .env.datamind
-$EDITOR .env.datamind     # set DATAMIND__LLM__API_KEY at minimum
+$EDITOR .env.datamind              # set DATAMIND__LLM__API_KEY
 
-# 1. Smoke-test the gateway (~2 s)
 python -m datamind.scripts.hello_sdk
-
-# 2. Seed a realistic enterprise dataset (17 docs / 64 graph nodes / 6 tables / 101 rows)
 python -m datamind.scripts.seed_enterprise_demo
-
-# 3. Watch the agent answer 8 cross-backend questions on its own
 DATAMIND__DATA__PROFILE=enterprise_demo \
   python -m datamind.scripts.hello_enterprise
-
-# 4. Or just open the browser UI
-DATAMIND__DATA__PROFILE=enterprise_demo \
-  python -m uvicorn datamind.server:app --port 8000
-# → http://127.0.0.1:8000  — drag any .md / .csv / .txt into the dropzone, ask questions, watch tools fire
 ```
 
-More detail in [`GETTING_STARTED.md`](./GETTING_STARTED.md). The generic
-long-running evaluation interface, checkpoint format, and resume guarantees are
-documented in [`Benchmark runner`](./docs/BENCHMARK_RUNNER.md).
-
----
-
-## What "agentic" actually means here
-
-Ask: **"工程部 Shanghai 的员工工资加起来是多少？"**
-
-RetrieveAgent can recover from a failed SQL attempt by inspecting the schema and rewriting the query, combine Graph with KB/Skills, and return evidence. "Remember this for me" is handled by StoreAgent through `memory_save`; RetrieveAgent never receives that write tool.
-
-Both agents support the same two interchangeable loop backends and share the SSE protocol, services, and safety HookChain:
-
-```
-DATAMIND__AGENT__BACKEND=native   # default — built-in protocol-neutral loop
-DATAMIND__LLM__PROTOCOL=anthropic # or openai_chat_completions
-DATAMIND__AGENT__BACKEND=sdk      # claude-agent-sdk + claude-code-router (CCR)
-                                  # use this to sit on an OpenAI-format gateway
-                                  # (CCR translates); adds Subagents / Compaction
-```
-
-DataMind's `HookChain` (path allow-list, destructive-SQL gate, tamper-evident audit) is enforced on **both** backends — at the dispatch chokepoint on `native`, inside each MCP tool wrapper on `sdk`. Both verified end-to-end against the same 8 enterprise-demo questions ([numbers here](./GETTING_STARTED.md#10-bench)).
-
----
-
-## Protocol support and the optional CCR bridge
-
-The native loop directly supports Anthropic `/v1/messages` and OpenAI
-`/v1/chat/completions`, including tool calls and streaming. Set
-`DATAMIND__LLM__PROTOCOL` explicitly; the same client is injected into internal
-generation paths.
-
-CCR remains useful when choosing the Claude Agent SDK backend, because that SDK
-speaks Anthropic protocol while many gateways expose OpenAI Chat Completions:
-
-**[claude-code-router (CCR)](https://github.com/musistudio/claude-code-router)** — a
-local proxy that accepts Anthropic `/v1/messages` requests and forwards them to an
-OpenAI-format upstream, translating the payloads (and the streaming events) in both
-directions.
-
-```
-DataMind ──Anthropic /v1/messages──▶  CCR (localhost)  ──OpenAI /v1/chat/completions──▶  your gateway
-   (sdk backend)                     translates both ways                                (OpenAI-format key)
-```
-
-So DataMind never changes: it always thinks it's talking to Anthropic. CCR absorbs
-the format mismatch. This is exactly what the `sdk` agent backend is wired for.
-
-### When do I need it?
-
-| Your upstream gateway speaks… | What to do |
-|---|---|
-| **Anthropic** (`/v1/messages`, `sk-ant` key) | Nothing. Use `BACKEND=native`, point `DATAMIND__LLM__API_BASE` straight at it. |
-| **OpenAI** (`/v1/chat/completions`) | Use `BACKEND=native` with `LLM__PROTOCOL=openai_chat_completions`; use CCR only with `BACKEND=sdk`. |
-
-### Setup (OpenAI-format upstream)
+Want the UI instead?
 
 ```bash
-# 1. Install CCR (Node ≥ 18)
-npm install -g @musistudio/claude-code-router
-#    …or clone https://github.com/musistudio/claude-code-router and build it.
-
-# 2. Launch the local bridge. It writes a config that registers your
-#    OpenAI-format upstream and applies the `anthropic` transformer.
-UPSTREAM_BASE=https://your-openai-gateway.example.com/v1 \
-UPSTREAM_KEY=sk-your-openai-format-key \
-UPSTREAM_MODEL=claude-sonnet-4-6 \
-  ./scripts/start_ccr.sh
-# → [ccr] listen = http://127.0.0.1:13456
-
-# 3. Point DataMind's sdk backend at CCR (in .env.datamind):
-DATAMIND__AGENT__BACKEND=sdk
-DATAMIND__AGENT__CCR_BASE_URL=http://127.0.0.1:13456
-DATAMIND__AGENT__CCR_API_KEY=dummy       # CCR holds the real key; this is unused
+DATAMIND__DATA__PROFILE=enterprise_demo \
+  python -m uvicorn datamind.server:app --port 8000
 ```
 
-`scripts/start_ccr.sh` generates CCR's `config.json` for you, normalises the upstream
-URL to `/v1/chat/completions`, and maps the `default` / `background` / `think` routes
-onto your primary and fallback models. Override `CCR_PORT`, `UPSTREAM_FALLBACK`, or
-`CCR_SERVER_ENTRY` (path to CCR's `packages/server/dist/index.js`) via env vars — see
-the header comment in that script.
+Drag `.md`, `.csv`, or `.txt` files into the dropzone, ask a question, and
+watch the role-scoped tools fire. The full walkthrough is in
+[GETTING_STARTED.md](./GETTING_STARTED.md).
 
----
-
-## Add data by talking
-
-StoreAgent owns every write tool while RetrieveAgent remains strictly read-only:
+## A conversation can change the data plane
 
 ```bash
 datamind store "Import /Users/foo/sales-q2.csv as table q2_sales"
 datamind store "Remember that weekly reports default to Chinese"
+datamind chat
 ```
 
-```
-you  → "把 /Users/foo/sales-q2.csv 导入成数据表 q2_sales"
-StoreAgent → calls db_import_csv(path=..., table='q2_sales')   ✓ 18 rows inserted
-you  → "Q2 sales pipeline 里 in-pipeline 单子总额是多少？哪个 sales rep 单子最多？"
-RetrieveAgent → calls db_query_sql(...)                    ✓ answers from the freshly-imported table
-```
+The next retrieval can use the new data immediately:
 
-Or drop the file into the browser dropzone and click **导入**. Or say "把这段加进图谱：陈诚晋升 Tech Lead，向 Ann 汇报" → agent calls `graph_add_triples_from_text`, LLM extracts triples, graph upserts them. No restart, no reindex.
-
----
-
-## Why the rewrite (v0.1 → v1.0)
-
-The v0.1 prototype was functional but coupled: a global `AppState`, hard-wired modules, vendor-locked to the `claude` CLI. The current architecture reshapes it around:
-
-- **Protocols + registries** — every capability is a `Protocol`; concrete classes register under a short name. New DB dialect / embedding provider / retriever strategy = one file.
-- **Pluggable agent loop** — `native` (anthropic SDK) or `sdk` (claude-agent-sdk + CCR), one ENV switch.
-- **Real SSE streaming** through FastAPI — not v0.1's fake character-sliced streaming.
-- **Zero global state** — every request owns its own `RequestContext` with a trace id.
-- **Side-by-side with v0.1** — the original code paths are untouched, so you can diff old against new.
-
-See [Architecture](https://opendcai.github.io/DataMind-Doc/en/guide/basicinfo/architecture/) for full detail.
-
----
-
-## Repo layout
-
-```
-DataMind/
-├── datamind/                     # ── current codebase ────────────────
-│   ├── agent/                    # base.py + loop_native.py + loop_sdk.py
-│   ├── capabilities/             # kb / graph / db / skills / memory /
-│   │                             #   ingest / embedding
-│   ├── core/                     # Protocol, Registry, Logging, Tools, Hooks
-│   ├── config.py                 # Settings (LLM / embedding / retrieval / …)
-│   ├── scripts/                  # hello_*.py + seed_enterprise_demo.py
-│   ├── cli.py                    # `python -m datamind ...`
-│   ├── server.py                 # FastAPI + real SSE + /api/upload
-│   └── tests/                    # no-network unit and contract tests
-│
-├── .claude/skills/               # SDK-style knowledge skills (SKILL.md)
-├── assets/inference-time-data-plane.png # README architecture banner
-├── static/app.html               # browser UI (drag-drop + tool cards + sidebar)
-├── scripts/start_ccr.sh          # one-line CCR launcher (for sdk backend)
-├── demo-uploads/                 # 6 sample files to drag-drop into the UI
-│
-├── benchmark/                    # current-stack checkpoint/resume runner
-├── modules/ core/ main.py server.py              # ── v0.1 legacy ─
-│
-├── data/profiles/<profile>/      # per-profile raw inputs
-├── storage/<profile>/            # per-profile indexes & DBs
-├── pyproject.toml                # install + CLI entry
-├── requirements-legacy.txt       # v0.1-only dependency snapshot
-├── LICENSE                       # Apache-2.0
-└── .env.datamind.example         # nested env template
+```text
+you            → "Which sales rep has the largest Q2 pipeline?"
+RetrieveAgent  → db_query_sql(...) → answer + source table evidence
 ```
 
----
+The same pattern works for documents, graph facts, and profile-scoped skills.
+StoreAgent returns a write receipt; RetrieveAgent returns normalized evidence.
 
-## Profiles
+## Choose a runtime
 
-One environment variable switches data + storage directories in lockstep:
+The stable default is the built-in `native` loop. The optional `sdk` loop is
+useful when you need Claude Agent SDK features such as Subagents or Compaction.
+
+| Backend | Protocol | Status | Use when |
+|---|---|---|---|
+| `native` | Anthropic `/v1/messages` | **Stable** | You want the smallest supported path. |
+| `native` | OpenAI `/v1/chat/completions` | **Stable** | Your gateway is OpenAI-compatible. |
+| `sdk` | Anthropic | Integration | You already run Claude Agent SDK / CLI. |
+| `sdk` | OpenAI-compatible via CCR | Integration | You need the SDK loop behind an OpenAI-format gateway. |
+
+Set both switches explicitly:
 
 ```bash
-DATAMIND__DATA__PROFILE=customer_a python -m datamind chat
+DATAMIND__AGENT__BACKEND=native
+DATAMIND__LLM__PROTOCOL=anthropic
 ```
 
-Maps to `data/profiles/customer_a/` and `storage/customer_a/`.
+See the complete [native / SDK support matrix](./docs/SUPPORT_MATRIX.md). For
+the SDK + OpenAI-compatible path, [CCR](https://github.com/musistudio/claude-code-router)
+is a local Anthropic ↔ OpenAI protocol bridge:
 
----
-
-## Tests
+<details>
+<summary>SDK + CCR setup</summary>
 
 ```bash
-pytest datamind/tests/
+npm install -g @musistudio/claude-code-router   # Node >= 18
+
+UPSTREAM_BASE=https://your-openai-gateway.example.com/v1 \
+UPSTREAM_KEY=sk-your-openai-format-key \
+UPSTREAM_MODEL=claude-sonnet-4-6 \
+  ./scripts/start_ccr.sh
+
+DATAMIND__AGENT__BACKEND=sdk
+DATAMIND__AGENT__CCR_BASE_URL=http://127.0.0.1:13456
+DATAMIND__AGENT__CCR_API_KEY=dummy
 ```
 
-Run the deterministic, no-network SQLite verification separately:
+CCR holds the real upstream key. Do not put it in a browser-facing environment
+or commit generated CCR configuration.
+</details>
+
+## Python and HTTP APIs
+
+The preferred Python facade is small and async:
+
+```python
+from datamind.agent import build_datamind
+from datamind.config import Settings
+
+async def answer() -> str:
+    system = await build_datamind(Settings())
+    try:
+        await system.ingest("Remember that weekly reports use Chinese.")
+        result = await system.query("What language should weekly reports use?")
+        return result["answer"]
+    finally:
+        await system.aclose()
+```
+
+The bundled FastAPI server exposes:
+
+| Route | Purpose |
+|---|---|
+| `GET /api/health` | Liveness, active profile, protocol, and tool counts |
+| `GET /api/tools` | Role-scoped tool catalogue and schemas |
+| `POST /api/ask` | Read-only RetrieveAgent request |
+| `POST /api/store` | StoreAgent request with receipts |
+| `POST /api/chat` | Real SSE stream (`text`, `tool_use`, `tool_result`, `done`) |
+| `POST /api/upload` | Save an upload and return suggested store prompts |
+
+The stable result shapes and compatibility policy live in
+[Stable API](./docs/STABLE_API.md).
+
+## Safety and deployment boundary
+
+DataMind is designed to be embedded behind your own authentication and
+authorization layer. The public server does not replace one. Before exposing
+it to the internet, read [Public deployment security boundaries](./docs/SECURITY_BOUNDARIES.md):
+
+- bind to loopback for local use;
+- put authentication, authorization, rate limits, and TLS at the edge;
+- isolate profile/storage directories and restrict upload paths;
+- treat evidence provenance as useful metadata, not as an authorization grant.
+
+## Development
 
 ```bash
+pytest
 python -m datamind.scripts.verify_sqlite_demo
 ```
 
-Plus live smoke + benchmark scripts:
-`hello_sdk`, `hello_kb`, `hello_db`, `hello_graph`, `hello_skills`, `hello_memory`, `hello_agent`,
-`seed_enterprise_demo`, `hello_enterprise` (8 cross-backend questions).
+The first command runs the no-network unit and contract suite. The second is a
+one-command SQLite smoke test. Long-running evaluations, checkpoint/resume,
+and benchmark details are in [docs/BENCHMARK_RUNNER.md](./docs/BENCHMARK_RUNNER.md).
 
----
+## Project map
 
-## Full documentation
+<details>
+<summary>Show repository layout</summary>
 
-See **[DataMind-Doc](https://opendcai.github.io/DataMind-Doc/en/)** for architecture, configuration reference, per-capability deep dives, and tutorials in English and Chinese. The repository-level [stable API](./docs/STABLE_API.md), [support matrix](./docs/SUPPORT_MATRIX.md), [security boundary](./docs/SECURITY_BOUNDARIES.md), and [concepts guide](./docs/CONCEPTS.md) define the v1.x release contract.
+```text
+DataMind/
+├── datamind/                 # current v1.x package
+│   ├── agent/                # StoreAgent / RetrieveAgent loops
+│   ├── capabilities/         # kb / graph / db / skills / memory / ingest
+│   ├── core/                 # protocols, registries, hooks, contracts
+│   ├── scripts/               # hello_*.py and verification demos
+│   ├── cli.py                 # datamind CLI
+│   └── server.py              # FastAPI + SSE + upload API
+├── docs/                     # stable API, support, security, concepts
+├── assets/                   # README architecture graphic
+├── demo-uploads/              # browser drag-and-drop examples
+├── benchmark/                # checkpoint/resume runner
+├── data/profiles/<profile>/   # profile-scoped inputs
+├── storage/<profile>/         # profile-scoped indexes and databases
+├── modules/ core/ main.py    # v0.1 prototype kept for comparison
+├── pyproject.toml             # package and CLI metadata
+└── LICENSE                    # Apache-2.0
+```
+
+The original v0.1 paths remain in-tree for comparison; the supported v1.x
+facade lives under `datamind/`.
+</details>
+
+## Documentation and release notes
+
+- [Getting started](./GETTING_STARTED.md)
+- [Stable API](./docs/STABLE_API.md)
+- [Native / SDK support matrix](./docs/SUPPORT_MATRIX.md)
+- [Security boundaries](./docs/SECURITY_BOUNDARIES.md)
+- [Concepts and terminology](./docs/CONCEPTS.md) — how inference-time data differs from RAG, ETL, and Agent Memory
+- [CHANGELOG](./CHANGELOG.md)
+- [DataMind-Doc](https://opendcai.github.io/DataMind-Doc/en/)
+
+## License
+
+DataMind is released under the [Apache License 2.0](./LICENSE).
