@@ -5,4 +5,4 @@ New agent stack built on claude-agent-sdk. The legacy `modules/`, `core/`,
 stacks coexist during the migration. Prefer `datamind.*` for new code.
 """
 
-__version__ = "0.3.2"
+__version__ = "1.0.0"

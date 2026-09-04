@@ -8,7 +8,11 @@
 
 面向 inference-time data 的双 agent 工具：**StoreAgent** 负责把数据自主路由到五个数据面，**RetrieveAgent** 只读地跨面取数、组合证据并回答问题。五个数据面是 RAG、数据库、图谱、Skills 和 Memory；系统不使用 DataOp、DataPlan 或执行 DAG。
 
-> **v0.3.0 是发布在 PyPI 上的预览版。** 当前代码位于 [`datamind/`](./datamind/) 目录；最初的 v0.1 原型（`main.py` / `server.py` / `modules/`）仅作对比参考而保留在仓库中。完整上手流程见 [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [文档站](https://opendcai.github.io/DataMind-Doc/zh/)。
+![DataMind inference-time data plane](./assets/inference-time-data-plane.png)
+
+*暖色路径表示 StoreAgent 的写入/入库流，冷色路径表示 RetrieveAgent 跨数据面读取证据并回答的流。*
+
+> **v1.0.0 是 DataMind inference-time data plane 的首个稳定版本。** native 后端和本地 profile 工作流构成稳定核心；可选的 SDK/CCR 以及远程数据库集成仍建议先在你的环境中验证。当前代码位于 [`datamind/`](./datamind/) 目录；最初的 v0.1 原型（`main.py` / `server.py` / `modules/`）仅作对比参考而保留在仓库中。完整上手流程见 [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [文档站](https://opendcai.github.io/DataMind-Doc/zh/)。
 
 ---
 
@@ -188,7 +192,7 @@ RetrieveAgent → 调用 db_query_sql(...)                    ✓ 从刚导入�
 
 ---
 
-## 为什么要重写（v0.1 → v0.3）
+## 为什么要重写（v0.1 → v1.0）
 
 v0.1 原型能跑，但耦合严重：一个全局 `AppState`、写死的模块、被 `claude` CLI 供应商锁定。当前架构围绕以下几点重塑：
 
@@ -218,6 +222,7 @@ DataMind/
 │   └── tests/                    # 无网络单元测试与协议合同测试
 │
 ├── .claude/skills/               # SDK 风格的知识技能（SKILL.md）
+├── assets/inference-time-data-plane.png # README 架构图
 ├── static/app.html               # 浏览器界面（拖拽 + 工具卡片 + 侧边栏）
 ├── scripts/start_ccr.sh          # 一行命令启动 CCR（用于 sdk 后端）
 ├── demo-uploads/                 # 6 个可拖进界面的示例文件
@@ -228,6 +233,7 @@ DataMind/
 ├── data/profiles/<profile>/      # 每个 profile 的原始输入
 ├── storage/<profile>/            # 每个 profile 的索引与数据库
 ├── pyproject.toml                # 安装 + CLI 入口
+├── LICENSE                       # Apache-2.0
 └── .env.datamind.example         # 嵌套式环境变量模板
 ```
 

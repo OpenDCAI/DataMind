@@ -7,7 +7,7 @@ name = "datamind"
 description = "Two-agent inference-time data system over RAG, Graph, DB, Skills, and Memory"
 requires-python = ">=3.11"
 readme = {file = "README.md", content-type = "text/markdown"}
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 authors = [
     {name = "Hao Liang", email = "hao.liang@stu.pku.edu.cn"},
     {name = "Wentao Zhang", email = "wentao.zhang@pku.edu.cn"},
@@ -17,10 +17,9 @@ keywords = [
     "knowledge-graph", "memory", "MCP", "data-agent", "claude",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

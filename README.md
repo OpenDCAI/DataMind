@@ -8,7 +8,11 @@
 
 An inference-time data system with two cooperating agents. **StoreAgent** routes writes across five data surfaces; **RetrieveAgent** performs strictly read-only cross-surface retrieval and evidence synthesis. The five surfaces are RAG, database, graph, Skills, and Memory. There is no DataOp, DataPlan, or execution DAG.
 
-> **v0.3.0 is a preview release on PyPI.** The current codebase lives under [`datamind/`](./datamind/); the original v0.1 prototype (`main.py` / `server.py` / `modules/`) is kept in-tree for comparison only. End-to-end walkthrough: [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [docs site](https://opendcai.github.io/DataMind-Doc/en/).
+![DataMind inference-time data plane](./assets/inference-time-data-plane.png)
+
+*The warm path is StoreAgent's write/ingest flow; the cool path is RetrieveAgent's read/retrieve flow across the shared data plane.*
+
+> **v1.0.0 is the first stable release of DataMind's inference-time data plane.** The native backend and local profile workflow form the stable core; optional SDK/CCR and remote database integrations should still be validated in your environment. The current codebase lives under [`datamind/`](./datamind/); the original v0.1 prototype (`main.py` / `server.py` / `modules/`) is kept in-tree for comparison only. End-to-end walkthrough: [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [docs site](https://opendcai.github.io/DataMind-Doc/en/).
 
 ---
 
@@ -196,7 +200,7 @@ Or drop the file into the browser dropzone and click **导入**. Or say "把这�
 
 ---
 
-## Why the rewrite (v0.1 → v0.3)
+## Why the rewrite (v0.1 → v1.0)
 
 The v0.1 prototype was functional but coupled: a global `AppState`, hard-wired modules, vendor-locked to the `claude` CLI. The current architecture reshapes it around:
 
@@ -226,6 +230,7 @@ DataMind/
 │   └── tests/                    # no-network unit and contract tests
 │
 ├── .claude/skills/               # SDK-style knowledge skills (SKILL.md)
+├── assets/inference-time-data-plane.png # README architecture banner
 ├── static/app.html               # browser UI (drag-drop + tool cards + sidebar)
 ├── scripts/start_ccr.sh          # one-line CCR launcher (for sdk backend)
 ├── demo-uploads/                 # 6 sample files to drag-drop into the UI
@@ -236,6 +241,7 @@ DataMind/
 ├── data/profiles/<profile>/      # per-profile raw inputs
 ├── storage/<profile>/            # per-profile indexes & DBs
 ├── pyproject.toml                # install + CLI entry
+├── LICENSE                       # Apache-2.0
 └── .env.datamind.example         # nested env template
 ```
 
