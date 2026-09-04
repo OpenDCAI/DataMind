@@ -9,6 +9,9 @@ Usage:
     DATAMIND__LLM__API_BASE=https://gateway.example.com
     DATAMIND__LLM__API_KEY=sk-...
     python -m datamind.scripts.hello_db
+
+For a deterministic, no-network SQLite check, use
+``python -m datamind.scripts.verify_sqlite_demo`` instead.
 """
 from __future__ import annotations
 

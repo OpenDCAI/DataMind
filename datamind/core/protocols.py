@@ -169,13 +169,13 @@ class QueryResult(BaseModel):
 class MemoryItem(BaseModel):
     """A single long-term memory entry.
 
-    `scope` (global / profile / session) is the v0.3 multi-tenant boundary.
+    `scope` (global / profile / session) is the v1.0 multi-tenant boundary.
     `kind` is a typed tag agent/UI can filter on.
     `status` distinguishes active vs archived (soft-deleted) without losing
     the audit trail.
 
     `namespace` is retained for v0.2 backward compatibility — providers
-    that haven't migrated still surface it; v0.3 callers should rely on
+    that haven't migrated still surface it; v1.0 callers should rely on
     (scope, profile, session_id) instead.
     """
 
@@ -336,7 +336,7 @@ class DatabaseDialect(Protocol):
 
 @runtime_checkable
 class MemoryStore(Protocol):
-    """Long-term memory storage with three-scope partitioning (v0.3).
+    """Long-term memory storage with three-scope partitioning (v1.0).
 
     Items live in one of three scopes:
       * ``global``  — applies to every tenant and session

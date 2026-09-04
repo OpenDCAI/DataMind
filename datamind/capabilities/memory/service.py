@@ -1,13 +1,13 @@
 """MemoryService — unifies short-term + long-term under one API.
 
 Short-term (in-memory rolling window) is cheap and always-on.
-Long-term (MemoryStore, v0.3) uses scope-typed storage:
+Long-term (MemoryStore, v1.0) uses scope-typed storage:
   - global  : applies everywhere ("respond in Chinese")
   - profile : tenant/project boundary
   - session : single conversation
 
 Recall takes (profile, session_id) and returns the union of three
-scope-conditioned top-k retrievals. This is the v0.3 multi-tenant
+scope-conditioned top-k retrievals. This is the v1.0 multi-tenant
 isolation primitive — see `core/protocols.py::MemoryStore`.
 """
 from __future__ import annotations

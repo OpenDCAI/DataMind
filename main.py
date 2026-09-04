@@ -11,7 +11,7 @@ DataMind 入口 (命令行模式)
 用法:
   1. 将文档放入 data/profiles/default/ 目录
   2. 复制 .env.example 为 .env 并填入你的 API Key
-  3. pip install -r requirements.txt
+  3. pip install -r requirements-legacy.txt
   4. python main.py
 """
 

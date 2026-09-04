@@ -277,7 +277,7 @@ async def memory_peek(
 ) -> dict:
     """Inspect long-term memory.
 
-    The path component is treated as a profile name (v0.3 scope='profile').
+    The path component is treated as a profile name (v1.0 scope='profile').
     For session-scoped peeks pass session_id explicitly via a query param if
     that becomes useful — the UI today only browses by tenant.
     """

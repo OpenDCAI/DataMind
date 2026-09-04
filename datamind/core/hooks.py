@@ -1,8 +1,8 @@
-"""Hook framework for sandboxed tool execution (v0.3 / Phase 8).
+"""Hook framework for sandboxed tool execution (v1.0 / Phase 8).
 
 The agent loop (`NativeAgentLoop` / `SdkAgentLoop`) dispatches every tool
 call through a single chokepoint. v0.2 had two void callbacks
-(`on_tool_start`, `on_tool_end`) that could observe but not steer; v0.3
+(`on_tool_start`, `on_tool_end`) that could observe but not steer; v1.0
 upgrades that seam to a richer `Hook` protocol that returns one of four
 decisions per call:
 

@@ -337,7 +337,7 @@ For a complete, realistic example see `python -m datamind.scripts.seed_enterpris
 
 ```bash
 pytest datamind/tests/
-# expected: 95 passed in <1s, no network used
+# expected: 161 passed, 5 optional SDK tests skipped, no network used
 ```
 
 ---
@@ -351,7 +351,7 @@ pytest datamind/tests/
 | `Unknown embedding provider 'openai'` | You're not running from the repo root. `cd` back and retry. |
 | `Agent not ready` from `/api/health` | Server is still warming up (loading skills index + graph). Wait ~5s. |
 | CLI output is empty / garbled | Pipe unavoidable — `rich` disables color for pipes. Run interactively or pass `--show-tools false`. |
-| `ModuleNotFoundError: claude_agent_sdk` | You don't need that SDK. Remove it from any local `requirements.txt` you edited. |
+| `ModuleNotFoundError: claude_agent_sdk` | You don't need that SDK for the native backend. Remove it from any local `requirements-legacy.txt` you edited, or install the optional SDK stack described in the support matrix. |
 | Gateway responds with a Chinese error page instead of JSON | You're hitting a HTML-only path. Check `DATAMIND__LLM__API_BASE` — it should be the root (`http://host:port`), not `http://host:port/v1`. |
 
 ---
@@ -361,4 +361,7 @@ pytest datamind/tests/
 - [Architecture overview](https://opendcai.github.io/DataMind-Doc/en/guide/basicinfo/architecture/) — how the protocols, registries, and tool framework fit together.
 - [Configuration reference](https://opendcai.github.io/DataMind-Doc/en/guide/advanced/config/) — every `DATAMIND__*` variable.
 - [Per-capability guides](https://opendcai.github.io/DataMind-Doc/en/guide/modules/rag/) — KB / Graph / DB / Skills / Memory deep dives.
+- [Native / SDK support matrix](./docs/SUPPORT_MATRIX.md) — supported protocols, dependencies, and parity.
+- [Stable API](./docs/STABLE_API.md) and [public deployment security boundary](./docs/SECURITY_BOUNDARIES.md).
+- [Concepts and terminology](./docs/CONCEPTS.md) — inference-time data vs RAG, ETL, and agent memory.
 - [Legacy v0.1 README](./README.md#repo-layout) — if you need to compare against the previous implementation, `python main.py` still works.

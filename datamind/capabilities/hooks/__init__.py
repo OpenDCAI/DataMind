@@ -1,4 +1,4 @@
-"""Built-in hook implementations for v0.3 Phase 8.
+"""Built-in hook implementations for v1.0 Phase 8.
 
 Three production hooks ship in this package:
 

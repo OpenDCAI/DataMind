@@ -1,8 +1,9 @@
-"""DataMind Python package.
+"""DataMind v1.0 Python package.
 
-New agent stack built on claude-agent-sdk. The legacy `modules/`, `core/`,
-`main.py`, `server.py` files remain untouched and continue to work — both
-stacks coexist during the migration. Prefer `datamind.*` for new code.
+The stable core uses the protocol-neutral native loop. The optional
+Claude Agent SDK / CCR backend and the legacy `modules/`, `core/`, `main.py`,
+and `server.py` paths remain available for integration and migration work.
+Prefer `datamind.*` for new code.
 """
 
 __version__ = "1.0.0"

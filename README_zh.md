@@ -14,6 +14,8 @@
 
 > **v1.0.0 是 DataMind inference-time data plane 的首个稳定版本。** native 后端和本地 profile 工作流构成稳定核心；可选的 SDK/CCR 以及远程数据库集成仍建议先在你的环境中验证。当前代码位于 [`datamind/`](./datamind/) 目录；最初的 v0.1 原型（`main.py` / `server.py` / `modules/`）仅作对比参考而保留在仓库中。完整上手流程见 [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [文档站](https://opendcai.github.io/DataMind-Doc/zh/)。
 
+发布参考：[CHANGELOG](./CHANGELOG.md) · [稳定 API](./docs/STABLE_API.md) · [native / SDK 支持矩阵](./docs/SUPPORT_MATRIX.md) · [公网部署安全边界](./docs/SECURITY_BOUNDARIES.md) · [术语与概念](./docs/CONCEPTS.md)
+
 ---
 
 ## 安装
@@ -233,6 +235,7 @@ DataMind/
 ├── data/profiles/<profile>/      # 每个 profile 的原始输入
 ├── storage/<profile>/            # 每个 profile 的索引与数据库
 ├── pyproject.toml                # 安装 + CLI 入口
+├── requirements-legacy.txt       # 仅供 v0.1 遗留栈复现
 ├── LICENSE                       # Apache-2.0
 └── .env.datamind.example         # 嵌套式环境变量模板
 ```
@@ -257,6 +260,12 @@ DATAMIND__DATA__PROFILE=customer_a python -m datamind chat
 pytest datamind/tests/
 ```
 
+单独运行确定性、无需联网的 SQLite 验证：
+
+```bash
+python -m datamind.scripts.verify_sqlite_demo
+```
+
 以及若干在线冒烟 + 基准脚本：
 `hello_sdk`、`hello_kb`、`hello_db`、`hello_graph`、`hello_skills`、`hello_memory`、`hello_agent`、
 `seed_enterprise_demo`、`hello_enterprise`（8 个跨后端问题）。
@@ -265,4 +274,4 @@ pytest datamind/tests/
 
 ## 完整文档
 
-架构、配置参考、各能力的深入讲解，以及中英文教程，请见 **[DataMind-Doc](https://opendcai.github.io/DataMind-Doc/zh/)**。
+架构、配置参考、各能力的深入讲解，以及中英文教程，请见 **[DataMind-Doc](https://opendcai.github.io/DataMind-Doc/zh/)**。仓库内的[稳定 API](./docs/STABLE_API.md)、[支持矩阵](./docs/SUPPORT_MATRIX.md)、[安全边界](./docs/SECURITY_BOUNDARIES.md)和[术语概念说明](./docs/CONCEPTS.md)定义了 v1.x 的发布契约。

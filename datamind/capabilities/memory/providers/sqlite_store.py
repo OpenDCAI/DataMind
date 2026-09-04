@@ -1,6 +1,6 @@
-"""SQLite-backed long-term memory with scope-typed recall (v0.3).
+"""SQLite-backed long-term memory with scope-typed recall (v1.0).
 
-Schema (v0.3):
+Schema (v1.0):
     CREATE TABLE memory_v2 (
         id          TEXT PRIMARY KEY,
         scope       TEXT NOT NULL CHECK(scope IN ('global','profile','session')),

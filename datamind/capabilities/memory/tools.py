@@ -1,4 +1,4 @@
-"""Memory tools exposed to the agent (v0.3 scope-typed).
+"""Memory tools exposed to the agent (v1.0 scope-typed).
 
 Tools accept an optional `scope` ∈ {global, profile, session}. The active
 profile and session_id come from `RequestContext` (injected by the agent

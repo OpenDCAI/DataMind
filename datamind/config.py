@@ -1,4 +1,4 @@
-"""DataMind v0.3 configuration.
+"""DataMind v1.0 configuration.
 
 Nested `pydantic-settings` with env prefix `DATAMIND__` and double-underscore
 delimiter. Example:
@@ -224,7 +224,7 @@ class HooksConfig(BaseModel):
     """Phase 8 — sandboxed tool execution.
 
     Hooks intercept every tool dispatch and can Allow / Deny / AskUser /
-    Rewrite. Three built-in hooks ship with v0.3:
+    Rewrite. Three built-in hooks ship with v1.0:
 
     - `path_allowlist`     — refuse paths outside the profile data dir
     - `destructive_sql`    — AskUser on DELETE/UPDATE/DROP, Deny on

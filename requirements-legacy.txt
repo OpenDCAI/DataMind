@@ -1,0 +1,23 @@
+# Legacy v0.1 compatibility dependencies only.
+#
+# The v1.0 package is configured in pyproject.toml. Install the current stack
+# with `pip install -e .` (or `pip install -e ".[dev]"` for test tooling).
+# Do not use this file for the `datamind/` package; it is retained so the
+# original main.py / server.py / modules/* prototype can still be reproduced.
+
+llama-index-core
+llama-index-llms-openai
+llama-index-embeddings-openai
+llama-index-vector-stores-chroma
+llama-index-readers-file
+chromadb
+python-dotenv
+pydantic-settings
+sqlalchemy
+fastapi
+uvicorn[standard]
+python-multipart
+
+# ---- Multi-Modal (按需安装) ----
+llama-index-multi-modal-llms-openai
+llama-index-embeddings-clip

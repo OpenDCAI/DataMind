@@ -14,6 +14,8 @@ An inference-time data system with two cooperating agents. **StoreAgent** routes
 
 > **v1.0.0 is the first stable release of DataMind's inference-time data plane.** The native backend and local profile workflow form the stable core; optional SDK/CCR and remote database integrations should still be validated in your environment. The current codebase lives under [`datamind/`](./datamind/); the original v0.1 prototype (`main.py` / `server.py` / `modules/`) is kept in-tree for comparison only. End-to-end walkthrough: [`GETTING_STARTED.md`](./GETTING_STARTED.md) · [docs site](https://opendcai.github.io/DataMind-Doc/en/).
 
+Release references: [CHANGELOG](./CHANGELOG.md) · [Stable API](./docs/STABLE_API.md) · [Native/SDK support matrix](./docs/SUPPORT_MATRIX.md) · [Public deployment security boundary](./docs/SECURITY_BOUNDARIES.md) · [Concepts and terminology](./docs/CONCEPTS.md)
+
 ---
 
 ## Install
@@ -241,6 +243,7 @@ DataMind/
 ├── data/profiles/<profile>/      # per-profile raw inputs
 ├── storage/<profile>/            # per-profile indexes & DBs
 ├── pyproject.toml                # install + CLI entry
+├── requirements-legacy.txt       # v0.1-only dependency snapshot
 ├── LICENSE                       # Apache-2.0
 └── .env.datamind.example         # nested env template
 ```
@@ -265,6 +268,12 @@ Maps to `data/profiles/customer_a/` and `storage/customer_a/`.
 pytest datamind/tests/
 ```
 
+Run the deterministic, no-network SQLite verification separately:
+
+```bash
+python -m datamind.scripts.verify_sqlite_demo
+```
+
 Plus live smoke + benchmark scripts:
 `hello_sdk`, `hello_kb`, `hello_db`, `hello_graph`, `hello_skills`, `hello_memory`, `hello_agent`,
 `seed_enterprise_demo`, `hello_enterprise` (8 cross-backend questions).
@@ -273,4 +282,4 @@ Plus live smoke + benchmark scripts:
 
 ## Full documentation
 
-See **[DataMind-Doc](https://opendcai.github.io/DataMind-Doc/en/)** for architecture, configuration reference, per-capability deep dives, and tutorials in English and Chinese.
+See **[DataMind-Doc](https://opendcai.github.io/DataMind-Doc/en/)** for architecture, configuration reference, per-capability deep dives, and tutorials in English and Chinese. The repository-level [stable API](./docs/STABLE_API.md), [support matrix](./docs/SUPPORT_MATRIX.md), [security boundary](./docs/SECURITY_BOUNDARIES.md), and [concepts guide](./docs/CONCEPTS.md) define the v1.x release contract.
