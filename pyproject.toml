@@ -65,7 +65,7 @@ dependencies = [
 
 [project.urls]
 Homepage      = "https://github.com/OpenDCAI/DataMind"
-Documentation = "https://haolpku.github.io/DataMind-Doc/"
+Documentation = "https://opendcai.github.io/DataMind-Doc/"
 Repository    = "https://github.com/OpenDCAI/DataMind"
 Issues        = "https://github.com/OpenDCAI/DataMind/issues"
 
