@@ -140,6 +140,35 @@ def profile_name(args: dict[str, Any]) -> str:
         raise ValueError("profile must contain only letters, numbers, '.', '_' or '-'")
     return value
 
+
+def enabled_surfaces(name: str) -> set[str] | None:
+    """Build only the capability services required by one MCP tool."""
+    if name in {"datamind_raw_file_read", "datamind_workspace_inspect",
+                "datamind_build_status", "datamind_build_start",
+                "datamind_build_freeze", "datamind_build_verify",
+                "datamind_build_export"}:
+        # Generic ingest/build tools need an ingest service but no data
+        # surface. Graph is the lightest surface because it does not
+        # initialise an embedding provider.
+        return {"graph"}
+    if name == "datamind_rag_query":
+        return {"kb"}
+    if name == "datamind_use_folder":
+        return {"kb", "graph"}
+    if name == "datamind_table_ingest":
+        return {"db"}
+    if name in {"datamind_graph_query", "datamind_graph_ingest",
+                "datamind_graph_build_lineage"}:
+        return {"graph"}
+    if name == "datamind_remember":
+        return {"memory"}
+    if name == "datamind_surface_ingest":
+        # Routing may target any combination supplied at call time.
+        return None
+    # Agent-level ask/store and status intentionally expose/warm all services.
+    return None
+
+
 async def execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
     from datamind.agent import build_datamind
     from datamind.config import Settings
@@ -149,7 +178,7 @@ async def execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
     profile = profile_name(args)
     settings = Settings()
     settings.data.profile = profile
-    system = await build_datamind(settings)
+    system = await build_datamind(settings, enable=enabled_surfaces(name))
     context = RequestContext(
         session_id=str(args.get("session_id") or "codex"),
         profile=profile,

@@ -173,6 +173,18 @@ async def test_http_api_routes_round_trip(configured_app):
         saved_to = Path(upload_body["saved_to"])
         assert saved_to == settings.data.data_dir / "uploads" / "note.md"
         assert saved_to.read_text(encoding="utf-8") == "hello from http"
+        assert upload_body["replaced"] is False
+
+        replacement = await client.post(
+            "/api/upload",
+            files={"file": ("note.md", b"corrected content", "text/markdown")},
+        )
+        assert replacement.status_code == 200
+        replacement_body = replacement.json()
+        assert Path(replacement_body["saved_to"]) == saved_to
+        assert replacement_body["filename"] == "note.md"
+        assert replacement_body["replaced"] is True
+        assert saved_to.read_text(encoding="utf-8") == "corrected content"
 
         docs = await client.get("/api/kb/documents")
         assert docs.json() == {"count": 1, "items": [{"source": "demo.md", "chunks": 1}]}

@@ -737,7 +737,9 @@ class IngestService:
                 "metadata": chunk.metadata,
             }, ensure_ascii=False) + "\n" for chunk in chunks), encoding="utf-8")
             parsed_chunks = str(chunk_file.relative_to(self._profile_dir))
-        await self._upsert_chunks(chunks)
+        await self._upsert_chunks(
+            chunks, replace_sources={source, str(resolved)},
+        )
         _log.info("kb_add_file", extra={
             "file": str(resolved), "chunks": len(chunks), "copied_to": copied_to
         })
@@ -801,9 +803,13 @@ class IngestService:
             "skipped_count": len(skipped),
         }
 
-    async def _upsert_chunks(self, chunks: list[Chunk]) -> None:
-        """Embed + write chunks straight into the same vector store the KB
-        retrievers read from.
+    async def _upsert_chunks(
+        self,
+        chunks: list[Chunk],
+        *,
+        replace_sources: set[str] | None = None,
+    ) -> None:
+        """Embed and write chunks, optionally replacing one source revision.
 
         Chunks are frozen dataclasses, so we keep the embedding vectors in
         a parallel list and pass them straight into the store's `add` API.
@@ -814,6 +820,16 @@ class IngestService:
         store = self._kb.vector_store
         texts = [c.text for c in chunks]
         vectors = await provider.embed_texts(texts)
+        stale_ids: list[str] = []
+        if replace_sources:
+            new_ids = {chunk.id for chunk in chunks}
+            for chunk_id, _text, metadata in await store.get_all_texts():
+                recorded_sources = {
+                    str(metadata.get("source") or ""),
+                    str(metadata.get("source_file") or ""),
+                }
+                if recorded_sources & replace_sources and chunk_id not in new_ids:
+                    stale_ids.append(chunk_id)
         await store.add(
             ids=[c.id for c in chunks],
             texts=texts,
@@ -823,6 +839,8 @@ class IngestService:
                 for c in chunks
             ],
         )
+        if stale_ids:
+            await store.delete(stale_ids)
         # Incremental writes must leave the same compatibility metadata that
         # a full KB reindex produces; otherwise the next process startup will
         # reject this otherwise valid persisted index.

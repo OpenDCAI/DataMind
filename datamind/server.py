@@ -331,17 +331,16 @@ async def upload_file(
     uploads_dir.mkdir(parents=True, exist_ok=True)
 
     target = uploads_dir / safe_name
-    # Avoid silent overwrite when the upload is a different file with the
-    # same name. Suffix with a content hash if collision.
-    if target.exists() and target.read_bytes() != body:
-        import hashlib
-        suffix = hashlib.sha1(body).hexdigest()[:8]
-        target = uploads_dir / f"{Path(safe_name).stem}-{suffix}{Path(safe_name).suffix}"
+    # A same-name upload represents a new revision of the same user document.
+    # Keep its stable path so re-ingestion can replace KB chunks and graph
+    # edges that came from the previous revision.
+    replaced = target.exists() and target.read_bytes() != body
     target.write_bytes(body)
 
     return {
         "saved_to": str(target),
         "filename": target.name,
+        "replaced": replaced,
         "bytes": len(body),
         "content_type": getattr(upload, "content_type", None),
         # Help the frontend craft the follow-up prompt to the agent.

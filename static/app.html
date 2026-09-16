@@ -1265,7 +1265,7 @@ async function uploadOne(file) {
       return null;
     }
     const data = await res.json();
-    uploadStatus(`已上传 ${data.filename} (${formatBytes(data.bytes)})`, 'success');
+    uploadStatus(`${data.replaced ? '已覆盖' : '已上传'} ${data.filename} (${formatBytes(data.bytes)})`, 'success');
     return data;
   } catch (err) {
     uploadStatus(`上传出错: ${err.message}`, 'error');
