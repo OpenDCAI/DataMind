@@ -59,6 +59,8 @@ class SkillsService:
         self._by_name = {m.name: m for m in manifests}
         manifests = list(self._by_name.values())
         indexed = 0
+        if not manifests and self._embedding and self._store:
+            await self._store.reset()
         if manifests and self._embedding and self._store:
             ids = [m.name for m in manifests]
             texts = [m.full_text for m in manifests]
