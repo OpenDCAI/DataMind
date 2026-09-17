@@ -106,6 +106,8 @@ class BaseSQLDialect:
     ) -> QueryResult:
         if not sql or not sql.strip():
             raise CapabilityError("db", "Empty SQL")
+        if row_limit < 1:
+            raise CapabilityError("db", "row_limit must be at least 1")
         if contains_multiple_statements(sql):
             raise MultiStatementSQLError(
                 "multiple statements are not allowed (use a single SELECT)"
