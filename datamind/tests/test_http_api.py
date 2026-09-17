@@ -53,6 +53,12 @@ class _FakeLoop:
         })
 
 
+class _FailingStreamLoop(_FakeLoop):
+    async def stream_turn(self, *, user_message: str, history=None, final_contract=None):
+        yield AgentEvent("text", {"delta": "partial"})
+        raise RuntimeError("provider unavailable")
+
+
 class _FakeKB:
     async def list_documents(self):
         return [{"source": "demo.md", "chunks": 1}]
@@ -197,3 +203,18 @@ async def test_http_api_routes_round_trip(configured_app):
 
         graph = await client.get("/api/graph/stats")
         assert graph.json() == {"nodes": 2, "edges": 1}
+
+
+@pytest.mark.asyncio
+async def test_chat_converts_stream_failure_to_sse_error(configured_app):
+    test_app, _settings = configured_app
+    test_app.state.datamind.system.retrieve.loop = _FailingStreamLoop("retrieve")
+    transport = httpx.ASGITransport(app=test_app, raise_app_exceptions=True)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/chat", json={"message": "stream this"})
+
+    assert response.status_code == 200
+    assert '"type": "text"' in response.text
+    assert '"type": "error"' in response.text
+    assert '"message": "stream failed: RuntimeError"' in response.text

@@ -235,12 +235,19 @@ async def chat(
     async def stream() -> AsyncIterator[bytes]:
         context = RequestContext(session_id=session, profile=st.settings.data.profile)
         with bind_context(context):
-            async for event in st.system.retrieve.loop.stream_turn(
-                user_message=req.message,
-                history=req.history or [],
-            ):
+            try:
+                async for event in st.system.retrieve.loop.stream_turn(
+                    user_message=req.message,
+                    history=req.history or [],
+                ):
+                    payload = json.dumps(
+                        {"type": event.type, **event.data},
+                        ensure_ascii=False,
+                    )
+                    yield f"data: {payload}\n\n".encode("utf-8")
+            except Exception as exc:  # noqa: BLE001 - convert provider errors to SSE
                 payload = json.dumps(
-                    {"type": event.type, **event.data},
+                    {"type": "error", "message": f"stream failed: {type(exc).__name__}"},
                     ensure_ascii=False,
                 )
                 yield f"data: {payload}\n\n".encode("utf-8")
