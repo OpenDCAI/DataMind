@@ -725,6 +725,9 @@ class IngestService:
             ))
 
         if not chunks:
+            await self._upsert_chunks(
+                chunks, replace_sources={source, str(resolved)},
+            )
             return {"file": str(resolved), "chunks_added": 0, "note": "file was empty"}
 
         parsed_chunks = None
@@ -830,6 +833,11 @@ class IngestService:
                 }
                 if recorded_sources & replace_sources and chunk_id not in new_ids:
                     stale_ids.append(chunk_id)
+        if not chunks:
+            if stale_ids:
+                await store.delete(stale_ids)
+            await self._kb.record_incremental_ingest()
+            return
         await store.add(
             ids=[c.id for c in chunks],
             texts=texts,
