@@ -112,6 +112,21 @@ Receipt status is one of `stored`, `unchanged`, or `failed`. A receipt records
 what DataMind observed and attempted; it is not a two-phase commit with an
 external database or sink.
 
+## NetworkX graph traversal
+
+`NetworkXGraphStore.traverse` returns paths distinguished by their exact stored
+edge sequences, not just their node sequences. Parallel relations and the same
+relation from distinct origins remain separate evidence paths; relation,
+weight, and source properties are preserved. Upserting an existing edge identity
+still replaces that edge rather than creating another path.
+
+Traversal uses breadth-first expansion in deterministic target/relation/edge-key
+order. `relation_filter` applies at every hop, no path repeats a node, and
+`max_hops` and `max_results` bound expansion. Non-positive limits return no paths.
+Each emitted prefix counts toward `max_results`, so reaching the cap stops
+expansion rather than enumerating all combinations of parallel edges. Selected
+paths are sorted by descending score; this is not a global top-k guarantee.
+
 ## HTTP API contract
 
 The bundled FastAPI app is a thin transport over the same facade. Request body
