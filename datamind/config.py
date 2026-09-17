@@ -20,10 +20,11 @@ Design choices:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AnyUrl, BaseModel, Field, SecretStr, field_validator
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root — one up from `datamind/`.
@@ -128,9 +129,20 @@ class MemoryConfig(BaseModel):
 class DataConfig(BaseModel):
     """Profile-based data layout. Paths derive from `profile`."""
 
+    model_config = ConfigDict(validate_assignment=True)
+
     profile: str = "default"
     # Root resolved at import time; tests / benchmarks can override.
     base_dir: Path = _REPO_ROOT
+
+    @field_validator("profile")
+    @classmethod
+    def _profile_name(cls, value: str) -> str:
+        if value in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            raise ValueError(
+                "profile must contain only letters, numbers, '.', '_' or '-'"
+            )
+        return value
 
     @property
     def data_dir(self) -> Path:
