@@ -112,7 +112,7 @@ class DBConfig(BaseModel):
     dialect: str = "sqlite"  # sqlite | mysql | postgres | ...
     dsn: str | None = None   # e.g. mysql+pymysql://user:pw@host/db
     read_only: bool = True
-    row_limit: int = 1000
+    row_limit: int = Field(default=1000, ge=1)
     query_timeout_s: float = 10.0
 
 
