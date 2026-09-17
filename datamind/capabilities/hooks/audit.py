@@ -16,9 +16,9 @@ UTF-8, LF-terminated.
 
 Secret redaction: arg values whose KEY matches a redaction regex
 (`api_key`, `password`, `token`, `secret`, ...) are replaced with
-`"[REDACTED]"` before logging. Values are not scanned (we trust the
-caller to put secrets in well-named fields, which is true across
-DataMind's own tools).
+`"[REDACTED]"` before logging. Credential-shaped values in exception
+text are redacted as well because provider and transport errors commonly
+include the rejected request detail.
 
 Concurrency: writes are serialised via an asyncio.Lock per AuditLogHook
 instance. For multi-process deployments use one process per profile
@@ -45,6 +45,11 @@ _REDACT_KEY_RE = re.compile(
     r"(?i)(api[_-]?key|password|passwd|token|secret|authorization|bearer|access[_-]?key|client[_-]?secret)"
 )
 _REDACTED = "[REDACTED]"
+_BEARER_TEXT_RE = re.compile(r"(?i)\bBearer\s+([^\s,;]+)")
+_SECRET_TEXT_RE = re.compile(
+    r"(?i)\b(api[_-]?key|password|passwd|token|secret|authorization|access[_-]?key|client[_-]?secret)\b"
+    r"(\s*[:=]\s*)([^\s,;]+)"
+)
 
 _HASH_HEX_LEN = 16  # truncated SHA-256 hex; 64 bits of collision resistance
 
@@ -72,6 +77,14 @@ def _redact(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact(v) for v in value]
     return value
+
+
+def _redact_text(value: str) -> str:
+    """Redact common credential formats embedded in diagnostic text."""
+    value = _BEARER_TEXT_RE.sub(f"Bearer {_REDACTED}", value)
+    return _SECRET_TEXT_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}", value
+    )
 
 
 def _decision_to_record(decision: HookDecision) -> dict[str, Any]:
@@ -163,7 +176,7 @@ class AuditLogHook:
             "error": (
                 None
                 if error is None
-                else f"{type(error).__name__}: {error}"
+                else _redact_text(f"{type(error).__name__}: {error}")
             ),
         }
         await self._append(record)
