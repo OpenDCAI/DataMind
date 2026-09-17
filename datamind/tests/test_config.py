@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from datamind.config import Settings
+from datamind.config import DataConfig, Settings
 
 
 def test_nested_env_hydrates_required_llm(monkeypatch, tmp_path):
@@ -101,3 +101,18 @@ def test_ensure_dirs_is_idempotent(monkeypatch, tmp_path):
 
     assert (tmp_path / "data" / "profiles" / "tp").is_dir()
     assert (tmp_path / "storage" / "tp").is_dir()
+
+
+@pytest.mark.parametrize(
+    "profile",
+    ["../escape", r"..\escape", "nested/name", ".", "..", ""],
+)
+def test_profile_name_cannot_escape_profile_root(profile, tmp_path):
+    with pytest.raises(ValidationError):
+        DataConfig(base_dir=tmp_path, profile=profile)
+
+
+def test_profile_assignment_keeps_path_boundary(tmp_path):
+    config = DataConfig(base_dir=tmp_path)
+    with pytest.raises(ValidationError):
+        config.profile = "../escape"
