@@ -121,17 +121,39 @@ TOOLS: dict[str, dict[str, Any]] = {
 # MCP hosts use these hints to distinguish harmless inspection from operations
 # that need confirmation. Keep write-capable tools unannotated so Codex retains
 # its normal approval gate for ingestion and mutation.
-READ_ONLY_TOOLS = {
-    "datamind_raw_file_read",
-    "datamind_build_status",
-    "datamind_workspace_inspect",
-    "datamind_ask",
-    "datamind_build_verify",
-    "datamind_rag_query",
-    "datamind_graph_query",
-    "datamind_list_profiles",
-    "datamind_status",
+class McpRoute:
+    __slots__ = ("surfaces", "read_only")
+
+    def __init__(self, surfaces: frozenset[str] | None, read_only: bool = False) -> None:
+        self.surfaces = surfaces
+        self.read_only = read_only
+
+
+_ALL_SURFACES: frozenset[str] | None = None
+ROUTES: dict[str, McpRoute] = {
+    "datamind_raw_file_read": McpRoute(frozenset({"graph"}), True),
+    "datamind_build_status": McpRoute(frozenset({"graph"}), True),
+    "datamind_workspace_inspect": McpRoute(frozenset({"graph"}), True),
+    "datamind_ask": McpRoute(_ALL_SURFACES, True),
+    "datamind_store": McpRoute(_ALL_SURFACES),
+    "datamind_use_folder": McpRoute(frozenset({"kb", "graph"})),
+    "datamind_graph_ingest": McpRoute(frozenset({"graph"})),
+    "datamind_graph_build_lineage": McpRoute(frozenset({"graph"})),
+    "datamind_table_ingest": McpRoute(frozenset({"db"})),
+    "datamind_build_start": McpRoute(frozenset({"graph"})),
+    "datamind_build_freeze": McpRoute(frozenset({"graph"})),
+    "datamind_build_verify": McpRoute(frozenset({"graph"}), True),
+    "datamind_build_export": McpRoute(frozenset({"graph"})),
+    "datamind_surface_ingest": McpRoute(_ALL_SURFACES),
+    "datamind_rag_query": McpRoute(frozenset({"kb"}), True),
+    "datamind_graph_query": McpRoute(frozenset({"graph"}), True),
+    "datamind_remember": McpRoute(frozenset({"memory"})),
+    "datamind_list_profiles": McpRoute(frozenset(), True),
+    "datamind_status": McpRoute(_ALL_SURFACES, True),
 }
+
+if set(ROUTES) != set(TOOLS):
+    raise RuntimeError("MCP route table and tool catalogue are out of sync")
 
 def profile_name(args: dict[str, Any]) -> str:
     value = str(args.get("profile") or "default").strip()
@@ -143,105 +165,149 @@ def profile_name(args: dict[str, Any]) -> str:
 
 def enabled_surfaces(name: str) -> set[str] | None:
     """Build only the capability services required by one MCP tool."""
-    if name in {"datamind_raw_file_read", "datamind_workspace_inspect",
-                "datamind_build_status", "datamind_build_start",
-                "datamind_build_freeze", "datamind_build_verify",
-                "datamind_build_export"}:
-        # Generic ingest/build tools need an ingest service but no data
-        # surface. Graph is the lightest surface because it does not
-        # initialise an embedding provider.
-        return {"graph"}
-    if name == "datamind_rag_query":
-        return {"kb"}
-    if name == "datamind_use_folder":
-        return {"kb", "graph"}
-    if name == "datamind_table_ingest":
-        return {"db"}
-    if name in {"datamind_graph_query", "datamind_graph_ingest",
-                "datamind_graph_build_lineage"}:
-        return {"graph"}
-    if name == "datamind_remember":
-        return {"memory"}
-    if name == "datamind_surface_ingest":
-        # Routing may target any combination supplied at call time.
-        return None
-    # Agent-level ask/store and status intentionally expose/warm all services.
-    return None
+    try:
+        surfaces = ROUTES[name].surfaces
+    except KeyError as exc:
+        raise ValueError(f"unknown tool: {name}") from exc
+    return None if surfaces is None else set(surfaces)
 
 
-async def execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
-    from datamind.agent import build_datamind
-    from datamind.config import Settings
+class RuntimeEntry:
+    __slots__ = ("system", "settings", "warmup")
+
+    def __init__(self, *, system: Any, settings: Any, warmup: dict[str, Any]) -> None:
+        self.system = system
+        self.settings = settings
+        self.warmup = warmup
+
+
+class RuntimeFactory:
+    """Create one warmed DataMind runtime per profile and surface set."""
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, tuple[str, ...] | None], RuntimeEntry] = {}
+        self._locks: dict[tuple[str, tuple[str, ...] | None], asyncio.Lock] = {}
+        self._closed = False
+
+    @staticmethod
+    def _key(profile: str, surfaces: set[str] | None) -> tuple[str, tuple[str, ...] | None]:
+        return (profile, None if surfaces is None else tuple(sorted(surfaces)))
+
+    async def get(self, profile: str, surfaces: set[str] | None) -> RuntimeEntry:
+        if self._closed:
+            raise RuntimeError("DataMind runtime factory is closed")
+        key = self._key(profile, surfaces)
+        existing = self._entries.get(key)
+        if existing is not None:
+            return existing
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            existing = self._entries.get(key)
+            if existing is not None:
+                return existing
+            from datamind.agent import build_datamind
+            from datamind.config import Settings
+
+            settings = Settings()
+            settings.data.profile = profile
+            system = await build_datamind(settings, enable=surfaces)
+            try:
+                warmup = await system.warmup()
+            except BaseException:
+                await system.aclose()
+                raise
+            entry = RuntimeEntry(system=system, settings=settings, warmup=warmup)
+            self._entries[key] = entry
+            return entry
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        entries = list(self._entries.values())
+        self._entries.clear()
+        self._locks.clear()
+        for entry in entries:
+            await entry.system.aclose()
+
+
+_RUNTIME_FACTORY = RuntimeFactory()
+
+
+async def execute(
+    name: str,
+    args: dict[str, Any],
+    *,
+    runtime_factory: RuntimeFactory | None = None,
+) -> dict[str, Any]:
     from datamind.core.context import RequestContext
     from datamind.core.logging import bind_context
 
     profile = profile_name(args)
-    settings = Settings()
-    settings.data.profile = profile
-    system = await build_datamind(settings, enable=enabled_surfaces(name))
+    factory = runtime_factory or _RUNTIME_FACTORY
+    entry = await factory.get(profile, enabled_surfaces(name))
+    system = entry.system
+    settings = entry.settings
     context = RequestContext(
         session_id=str(args.get("session_id") or "codex"),
         profile=profile,
         user_id="codex",
     )
-    try:
-        with bind_context(context):
-            if name == "datamind_raw_file_read":
-                return await system.retrieve.tools.get("raw_file_read").handler(
-                    path=str(args["path"]), offset=int(args.get("offset", 0)), max_chars=int(args.get("max_chars", 20000)))
-            if name == "datamind_build_status":
-                return await system.retrieve.tools.get("build_status").handler(build_id=str(args["build_id"]))
-            if name == "datamind_workspace_inspect":
-                spec = system.retrieve.tools.get("workspace_inspect")
-                return await spec.handler(
-                    path=str(args["path"]),
-                    recursive=bool(args.get("recursive", True)),
-                    include_hash=bool(args.get("include_hash", True)),
-                    max_files=int(args.get("max_files", 2000)),
-                )
-            if name == "datamind_ask":
-                return await system.query(str(args["question"]))
-            if name == "datamind_store":
-                return await system.ingest(str(args["message"]))
-            if name == "datamind_use_folder":
-                spec = system.store.tools.get("kb_add_path")
-                result = {"kb": await spec.handler(path=str(args["path"]), recursive=bool(args.get("recursive", True)))}
-                if args.get("build_graph", True):
-                    graph_spec = system.store.tools.get("graph_add_path")
-                    result["graph"] = await graph_spec.handler(path=str(args["path"]), recursive=bool(args.get("recursive", True)))
-                return result
-            if name == "datamind_graph_ingest":
-                spec = system.store.tools.get("graph_add_path")
-                return await spec.handler(path=str(args["path"]), recursive=bool(args.get("recursive", True)), max_triples_per_file=int(args.get("max_triples_per_file", 30)))
-            if name == "datamind_graph_build_lineage":
-                spec = system.store.tools.get("graph_build_lineage")
-                return await spec.handler(path=str(args["path"]), recursive=bool(args.get("recursive", True)), max_files=int(args.get("max_files", 2000)), dependencies=args.get("dependencies"))
-            if name == "datamind_table_ingest":
-                spec = system.store.tools.get("db_import_path")
-                return await spec.handler(path=str(args["path"]), table_prefix=args.get("table_prefix"), if_exists=str(args.get("if_exists", "append")))
-            if name == "datamind_build_start":
-                return await system.store.tools.get("build_start").handler(path=str(args["path"]))
-            if name == "datamind_build_freeze":
-                return await system.store.tools.get("build_freeze").handler(build_id=str(args["build_id"]))
-            if name == "datamind_build_verify":
-                return await system.retrieve.tools.get("build_verify").handler(build_id=str(args["build_id"]))
-            if name == "datamind_build_export":
-                return await system.store.tools.get("build_export").handler(build_id=str(args["build_id"]), output_path=str(args["output_path"]))
-            if name == "datamind_surface_ingest":
-                return await system.store.tools.get("surface_ingest_path").handler(path=str(args["path"]), surfaces=args.get("surfaces"), recursive=bool(args.get("recursive", True)))
-            if name == "datamind_rag_query":
-                spec = system.retrieve.tools.get("kb_search")
-                return await spec.handler(query=str(args["query"]), top_k=int(args.get("top_k", 5)))
-            if name == "datamind_graph_query":
-                return await system.query("Answer using the knowledge graph and relationship tools where useful: " + str(args["query"]))
-            if name == "datamind_remember":
-                spec = system.store.tools.get("memory_save")
-                return await spec.handler(content=str(args["content"]), kind=str(args.get("kind", "fact")), scope=str(args.get("scope", "profile")), session_id=args.get("session_id"))
-            if name == "datamind_status":
-                return {"profile": profile, "data_dir": str(settings.data.data_dir), "storage_dir": str(settings.data.storage_dir), "warmup": await system.warmup()}
-            raise ValueError(f"unknown tool: {name}")
-    finally:
-        await system.aclose()
+    with bind_context(context):
+        if name == "datamind_raw_file_read":
+            return await system.retrieve.tools.get("raw_file_read").handler(
+                path=str(args["path"]), offset=int(args.get("offset", 0)), max_chars=int(args.get("max_chars", 20000)))
+        if name == "datamind_build_status":
+            return await system.retrieve.tools.get("build_status").handler(build_id=str(args["build_id"]))
+        if name == "datamind_workspace_inspect":
+            spec = system.retrieve.tools.get("workspace_inspect")
+            return await spec.handler(
+                path=str(args["path"]),
+                recursive=bool(args.get("recursive", True)),
+                include_hash=bool(args.get("include_hash", True)),
+                max_files=int(args.get("max_files", 2000)),
+            )
+        if name == "datamind_ask":
+            return await system.query(str(args["question"]))
+        if name == "datamind_store":
+            return await system.ingest(str(args["message"]))
+        if name == "datamind_use_folder":
+            spec = system.store.tools.get("kb_add_path")
+            result = {"kb": await spec.handler(path=str(args["path"]), recursive=bool(args.get("recursive", True)))}
+            if args.get("build_graph", True):
+                graph_spec = system.store.tools.get("graph_add_path")
+                result["graph"] = await graph_spec.handler(path=str(args["path"]), recursive=bool(args.get("recursive", True)))
+            return result
+        if name == "datamind_graph_ingest":
+            spec = system.store.tools.get("graph_add_path")
+            return await spec.handler(path=str(args["path"]), recursive=bool(args.get("recursive", True)), max_triples_per_file=int(args.get("max_triples_per_file", 30)))
+        if name == "datamind_graph_build_lineage":
+            spec = system.store.tools.get("graph_build_lineage")
+            return await spec.handler(path=str(args["path"]), recursive=bool(args.get("recursive", True)), max_files=int(args.get("max_files", 2000)), dependencies=args.get("dependencies"))
+        if name == "datamind_table_ingest":
+            spec = system.store.tools.get("db_import_path")
+            return await spec.handler(path=str(args["path"]), table_prefix=args.get("table_prefix"), if_exists=str(args.get("if_exists", "append")))
+        if name == "datamind_build_start":
+            return await system.store.tools.get("build_start").handler(path=str(args["path"]))
+        if name == "datamind_build_freeze":
+            return await system.store.tools.get("build_freeze").handler(build_id=str(args["build_id"]))
+        if name == "datamind_build_verify":
+            return await system.retrieve.tools.get("build_verify").handler(build_id=str(args["build_id"]))
+        if name == "datamind_build_export":
+            return await system.store.tools.get("build_export").handler(build_id=str(args["build_id"]), output_path=str(args["output_path"]))
+        if name == "datamind_surface_ingest":
+            return await system.store.tools.get("surface_ingest_path").handler(path=str(args["path"]), surfaces=args.get("surfaces"), recursive=bool(args.get("recursive", True)))
+        if name == "datamind_rag_query":
+            spec = system.retrieve.tools.get("kb_search")
+            return await spec.handler(query=str(args["query"]), top_k=int(args.get("top_k", 5)))
+        if name == "datamind_graph_query":
+            return await system.query("Answer using the knowledge graph and relationship tools where useful: " + str(args["query"]))
+        if name == "datamind_remember":
+            spec = system.store.tools.get("memory_save")
+            return await spec.handler(content=str(args["content"]), kind=str(args.get("kind", "fact")), scope=str(args.get("scope", "profile")), session_id=args.get("session_id"))
+        if name == "datamind_status":
+            return {"profile": profile, "data_dir": str(settings.data.data_dir), "storage_dir": str(settings.data.storage_dir), "warmup": entry.warmup}
+        raise ValueError(f"unknown tool: {name}")
 
 def list_profiles() -> dict[str, Any]:
     configured = os.environ.get("DATAMIND_DATA_ROOT", "").strip()
@@ -259,7 +325,7 @@ def tool_result(request_id: Any, value: Any) -> dict[str, Any]:
 def error(request_id: Any, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": {"isError": True, "content": [{"type": "text", "text": message}]}}
 
-def handle(message: dict[str, Any]) -> dict[str, Any] | None:
+async def handle(message: dict[str, Any]) -> dict[str, Any] | None:
     request_id = message.get("id")
     if request_id is None:
         return None
@@ -274,7 +340,7 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
             listed: list[dict[str, Any]] = []
             for name, spec in TOOLS.items():
                 item = {"name": name, **spec}
-                if name in READ_ONLY_TOOLS:
+                if ROUTES[name].read_only:
                     item["annotations"] = {
                         "readOnlyHint": True,
                         "destructiveHint": False,
@@ -287,21 +353,31 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
             name = str(params.get("name") or "")
             if name == "datamind_list_profiles":
                 return tool_result(request_id, list_profiles())
-            return tool_result(request_id, asyncio.run(execute(name, params.get("arguments") or {})))
+            return tool_result(request_id, await execute(name, params.get("arguments") or {}))
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
     except Exception as exc:
         return error(request_id, f"{type(exc).__name__}: {exc}")
 
+async def serve() -> None:
+    try:
+        while True:
+            line = await asyncio.to_thread(sys.stdin.readline)
+            if line == "":
+                break
+            if not line.strip():
+                continue
+            try:
+                reply = await handle(json.loads(line))
+            except json.JSONDecodeError as exc:
+                reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
+            if reply is not None:
+                print(json.dumps(reply, ensure_ascii=False, separators=(",", ":")), flush=True)
+    finally:
+        await _RUNTIME_FACTORY.aclose()
+
+
 def main() -> None:
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        try:
-            reply = handle(json.loads(line))
-        except json.JSONDecodeError as exc:
-            reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
-        if reply is not None:
-            print(json.dumps(reply, ensure_ascii=False, separators=(",", ":")), flush=True)
+    asyncio.run(serve())
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,5 @@
 """A historical receipt cannot establish the current contents of a table."""
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from datamind.capabilities.ingest.ledger import IngestLedger, with_receipts
 from datamind.capabilities.ingest.service import IngestService
 from datamind.capabilities.ingest.tools import build_ingest_tools
 from datamind.config import DBConfig
-from datamind.core.tools import ToolRegistry
+from datamind.core.tools import ToolRegistry, ToolSpec
 
 
 @pytest.fixture
@@ -77,3 +78,33 @@ async def test_append_retry_remains_deduplicated(database, tmp_path):
     assert second["results"][0]["status"] == "unchanged"
     assert second["revision"] == first["revision"]
     assert (await db.query_sql("SELECT amount FROM sales")).rows == [["200"]]
+
+
+@pytest.mark.asyncio
+async def test_independent_ledgers_deduplicate_concurrent_same_call(tmp_path):
+    calls = 0
+
+    async def handler(*, text):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return {"chunks_added": 1}
+
+    raw = ToolRegistry()
+    raw.add(ToolSpec(
+        name="kb_add_text",
+        description="test",
+        input_schema={"type": "object"},
+        handler=handler,
+        metadata={"surface": "kb", "access": "write"},
+    ))
+    first = with_receipts(raw, IngestLedger(storage_dir=tmp_path / "ledger", profile="test"))
+    second = with_receipts(raw, IngestLedger(storage_dir=tmp_path / "ledger", profile="test"))
+
+    results = await asyncio.gather(
+        first.get("kb_add_text").handler(text="same payload"),
+        second.get("kb_add_text").handler(text="same payload"),
+    )
+
+    assert calls == 1
+    assert sorted(item["results"][0]["status"] for item in results) == ["stored", "unchanged"]

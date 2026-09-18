@@ -115,7 +115,7 @@ class _SkillsToolProvider:
         s = services.get("skills_service")
         if s is None:
             raise ValueError("skills tool provider requires 'skills_service'")
-        return build_skills_tools(s)
+        return build_skills_tools(s) + build_skills_store_tools(s)
 
 
 __all__ = ["build_skills_tools", "build_skills_store_tools"]

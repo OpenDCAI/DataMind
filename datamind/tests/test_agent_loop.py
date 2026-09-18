@@ -258,6 +258,32 @@ async def test_tool_error_is_surfaced_as_tool_result():
     assert "RuntimeError" in error_blocks[0]["content"]
 
 
+def test_tool_context_truncation_keeps_count_and_evidence_locators():
+    registry = ToolRegistry()
+    registry.add(_tool_echo())
+    loop = NativeAgentLoop(
+        client=_FakeClient([]),
+        tools=registry,
+        config=AgentLoopConfig(model="m", max_tool_result_rows=1, max_tool_result_chars=200),
+    )
+    result = {
+        "results": [
+            {"id": "c1", "source": "doc.md", "text": "第一段", "score": 0.9},
+            {"id": "c2", "source": "doc.md", "text": "第二段", "score": 0.8},
+        ]
+    }
+    block = loop._tool_result_block("tool-1", result, None)
+    trace, evidence = loop._trace_and_evidence(
+        name="echo", tool_input={"query": "q"}, result=result, error=None,
+    )
+
+    assert block["_datamind_truncated"] is True
+    assert block["_datamind_total_count"] == 2
+    assert '"truncated": true' in block["content"]
+    assert [item["locator"]["chunk_id"] for item in evidence] == ["c1", "c2"]
+    assert trace["result_size_chars"] > 0
+
+
 @pytest.mark.asyncio
 async def test_max_tool_turns_enforced():
     # Script: infinite tool_use loops.

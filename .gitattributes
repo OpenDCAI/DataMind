@@ -1,0 +1,8 @@
+# Keep launcher and installer scripts executable in WSL and readable by
+# PowerShell.  Without this, a Windows checkout can pass CRLF into the bash
+# shebang and WSL reports `/usr/bin/env: bash\r: No such file or directory`.
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.py text eol=lf
+*.json text eol=lf
+*.toml text eol=lf

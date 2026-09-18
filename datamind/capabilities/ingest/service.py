@@ -820,6 +820,18 @@ class IngestService:
         store = self._kb.vector_store
         texts = [c.text for c in chunks]
         vectors = await provider.embed_texts(texts)
+        # Keep track of IDs that existed before this call.  If a third-party
+        # store fails after partially accepting a batch, only remove newly
+        # created IDs during rollback; an idempotent re-write must not erase
+        # the previous revision.
+        existing_ids: set[str] = set()
+        try:
+            existing_ids = {
+                str(chunk_id)
+                for chunk_id, _text, _metadata in await store.get_all_texts()
+            }
+        except Exception:  # noqa: BLE001 - rollback is best effort
+            pass
         stale_ids: list[str] = []
         if replace_sources:
             new_ids = {chunk.id for chunk in chunks}
@@ -830,15 +842,28 @@ class IngestService:
                 }
                 if recorded_sources & replace_sources and chunk_id not in new_ids:
                     stale_ids.append(chunk_id)
-        await store.add(
-            ids=[c.id for c in chunks],
-            texts=texts,
-            embeddings=vectors,
-            metadatas=[
-                {**(c.metadata or {}), "source": c.source or ""}
-                for c in chunks
-            ],
-        )
+        try:
+            await store.add(
+                ids=[c.id for c in chunks],
+                texts=texts,
+                embeddings=vectors,
+                metadatas=[
+                    {**(c.metadata or {}), "source": c.source or ""}
+                    for c in chunks
+                ],
+            )
+        except Exception:
+            rollback_ids = [c.id for c in chunks if c.id not in existing_ids]
+            delete = getattr(store, "delete", None)
+            if rollback_ids and callable(delete):
+                try:
+                    await delete(rollback_ids)
+                except Exception:  # noqa: BLE001 - preserve original write error
+                    _log.warning(
+                        "kb_partial_write_rollback_failed",
+                        extra={"chunk_ids": rollback_ids},
+                    )
+            raise
         if stale_ids:
             await store.delete(stale_ids)
         # Incremental writes must leave the same compatibility metadata that

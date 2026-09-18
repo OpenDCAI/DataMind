@@ -74,6 +74,10 @@ def _split_text(
     they fall inside the size window. Not fancy; deterministic; good
     enough for the default.
     """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be > 0")
+    if chunk_overlap < 0:
+        raise ValueError("chunk_overlap must be >= 0")
     if chunk_overlap >= chunk_size:
         raise ValueError("chunk_overlap must be < chunk_size")
     if len(text) <= chunk_size:

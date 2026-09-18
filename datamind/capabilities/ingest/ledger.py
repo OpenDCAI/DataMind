@@ -5,6 +5,8 @@ import asyncio
 import hashlib
 import inspect
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -116,8 +118,45 @@ class IngestLedger:
         self._profile = profile
         self._state_path = self._storage_dir / "ingest_state.json"
         self._receipts_path = self._storage_dir / "ingest_receipts.jsonl"
+        self._process_lock_path = self._storage_dir / "ingest.lock"
         self._lock = asyncio.Lock()
         self._storage_dir.mkdir(parents=True, exist_ok=True)
+
+    async def _acquire_process_lock(self) -> None:
+        """Serialize ledger read/execute/write across MCP processes.
+
+        The in-memory asyncio lock only protects one DataMind instance.  An
+        atomic lock-file claim extends the same idempotency boundary to a
+        second MCP process or a separately-created Ledger object.
+        """
+        while True:
+            try:
+                fd = os.open(
+                    self._process_lock_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                )
+                try:
+                    os.write(fd, f"{os.getpid()} {time.time():.6f}\n".encode())
+                finally:
+                    os.close(fd)
+                return
+            except FileExistsError:
+                try:
+                    age = time.time() - self._process_lock_path.stat().st_mtime
+                    if age > 3600:
+                        self._process_lock_path.unlink(missing_ok=True)
+                        continue
+                except FileNotFoundError:
+                    continue
+                await asyncio.sleep(0.02)
+
+    async def _release_process_lock(self) -> None:
+        try:
+            self._process_lock_path.unlink(missing_ok=True)
+        except OSError:
+            # The lock may have been recovered as stale by another process;
+            # the receipt/state writes remain the source of truth.
+            pass
 
     def _load_state(self) -> dict[str, Any]:
         if not self._state_path.is_file():
@@ -150,7 +189,21 @@ class IngestLedger:
         args: dict[str, Any],
         invoke: Callable[..., Awaitable[Any]],
     ) -> dict[str, Any]:
-        """Deduplicate retryable imports, but always apply explicit DB replacement."""
+        """Deduplicate retryable imports, including across MCP processes."""
+        await self._acquire_process_lock()
+        try:
+            return await self._execute_locked(spec=spec, args=args, invoke=invoke)
+        finally:
+            await self._release_process_lock()
+
+    async def _execute_locked(
+        self,
+        *,
+        spec: ToolSpec,
+        args: dict[str, Any],
+        invoke: Callable[..., Awaitable[Any]],
+    ) -> dict[str, Any]:
+        """Run one call while both ledger locks are held."""
         source = _source_from_call(spec, args)
         fingerprint = _hash_text(
             _canonical(
