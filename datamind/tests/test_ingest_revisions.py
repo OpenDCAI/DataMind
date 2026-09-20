@@ -7,6 +7,8 @@ from datamind.capabilities.ingest.service import IngestService
 
 class _Embedding:
     async def embed_texts(self, texts):
+        if not texts:
+            raise AssertionError("empty revisions must not call the embedding provider")
         return [[float(len(text))] for text in texts]
 
 

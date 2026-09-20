@@ -821,8 +821,6 @@ class IngestService:
             raise CapabilityError("ingest", "KB surface is disabled")
         provider = self._kb.embedding
         store = self._kb.vector_store
-        texts = [c.text for c in chunks]
-        vectors = await provider.embed_texts(texts)
         stale_ids: list[str] = []
         if replace_sources:
             new_ids = {chunk.id for chunk in chunks}
@@ -838,6 +836,8 @@ class IngestService:
                 await store.delete(stale_ids)
             await self._kb.record_incremental_ingest()
             return
+        texts = [c.text for c in chunks]
+        vectors = await provider.embed_texts(texts)
         await store.add(
             ids=[c.id for c in chunks],
             texts=texts,
@@ -896,19 +896,19 @@ class IngestService:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", col):
                 # Fall back to col_<idx> if header is unusable.
                 col = f"col_{index}"
-            if col in used_cols:
+            if col.casefold() in used_cols:
                 # SQL tables cannot contain duplicate column names. Keep the
                 # first header unchanged and give later occurrences a stable
                 # fallback name without losing their values in the row dict.
                 base = f"col_{index}"
                 col = base
                 suffix = 2
-                while col in used_cols:
+                while col.casefold() in used_cols:
                     suffix_text = f"_{suffix}"
                     col = f"{base[:64 - len(suffix_text)]}{suffix_text}"
                     suffix += 1
             safe_cols.append(col)
-            used_cols.add(col)
+            used_cols.add(col.casefold())
 
         rows: list[dict[str, str]] = []
         for raw_row in reader:

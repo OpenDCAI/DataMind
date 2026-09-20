@@ -343,6 +343,28 @@ async def test_audit_log_redacts_secrets_in_errors(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_audit_log_redacts_quoted_url_and_raw_secrets_in_errors(tmp_path: Path):
+    audit = tmp_path / "audit.jsonl"
+    hook = AuditLogHook(audit_path=audit)
+    secrets = ["sk-json-secret1", "sk-query-secret2", "sk-raw-secret3"]
+    await hook.post_tool_use(
+        _ctx(),
+        "fake_tool",
+        {},
+        result=None,
+        error=RuntimeError(
+            '{"api_key": "sk-json-secret1"} '
+            "https://example.test?access_token=sk-query-secret2 "
+            "provider rejected sk-raw-secret3"
+        ),
+    )
+
+    rec = json.loads(audit.read_text().splitlines()[-1])
+    assert all(secret not in rec["error"] for secret in secrets)
+    assert rec["error"].count("[REDACTED]") >= 3
+
+
+@pytest.mark.asyncio
 async def test_audit_log_records_denied_decision(tmp_path: Path):
     audit = tmp_path / "audit.jsonl"
     hook = AuditLogHook(audit_path=audit)

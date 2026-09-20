@@ -47,9 +47,11 @@ _REDACT_KEY_RE = re.compile(
 _REDACTED = "[REDACTED]"
 _BEARER_TEXT_RE = re.compile(r"(?i)\bBearer\s+([^\s,;]+)")
 _SECRET_TEXT_RE = re.compile(
-    r"(?i)\b(api[_-]?key|password|passwd|token|secret|authorization|access[_-]?key|client[_-]?secret)\b"
-    r"(\s*[:=]\s*)([^\s,;]+)"
+    r"(?i)([\"']?"
+    r"(?:api[_-]?key|password|passwd|token|secret|authorization|access[_-]?key|client[_-]?secret)"
+    r"[\"']?\s*[:=]\s*)([\"']?)([^\s,;}\"']+)([\"']?)"
 )
+_RAW_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 
 _HASH_HEX_LEN = 16  # truncated SHA-256 hex; 64 bits of collision resistance
 
@@ -82,9 +84,11 @@ def _redact(value: Any) -> Any:
 def _redact_text(value: str) -> str:
     """Redact common credential formats embedded in diagnostic text."""
     value = _BEARER_TEXT_RE.sub(f"Bearer {_REDACTED}", value)
-    return _SECRET_TEXT_RE.sub(
-        lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}", value
+    value = _SECRET_TEXT_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}{match.group(4)}",
+        value,
     )
+    return _RAW_SECRET_RE.sub(_REDACTED, value)
 
 
 def _decision_to_record(decision: HookDecision) -> dict[str, Any]:

@@ -91,3 +91,19 @@ async def test_csv_import_keeps_duplicate_headers_as_distinct_columns(database, 
 
     assert receipt["columns"] == ["a", "col_2"]
     assert (await db.query_sql("SELECT * FROM duplicate_columns")).rows == [["first", "second"]]
+
+
+@pytest.mark.asyncio
+async def test_csv_import_deduplicates_case_insensitive_headers(database, tmp_path):
+    db, raw = database
+    source = tmp_path / "case-columns.csv"
+    source.write_text("a,A,col_3,col_3\n1,2,3,4\n", encoding="utf-8")
+
+    receipt = await raw.get("db_import_csv").handler(
+        path=str(source), table="case_columns", if_exists="replace"
+    )
+
+    assert receipt["columns"] == ["a", "col_2", "col_3", "col_4"]
+    assert (await db.query_sql("SELECT * FROM case_columns")).rows == [
+        ["1", "2", "3", "4"]
+    ]
