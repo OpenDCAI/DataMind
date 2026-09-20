@@ -82,7 +82,11 @@ class KBService:
     ) -> list[dict[str, Any]]:
         if self._compatibility_error:
             raise ConfigError(self._compatibility_error)
-        k = top_k or self.retrieval_cfg.top_k
+        k = self.retrieval_cfg.top_k if top_k is None else top_k
+        if k <= 0:
+            raise ValueError("top_k must be > 0")
+        if not query or not query.strip():
+            raise ValueError("query must not be empty")
         chunks = await self.retriever.aretrieve(query, top_k=k, filters=filters)
         return [c.model_dump() for c in chunks]
 

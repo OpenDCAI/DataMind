@@ -9,6 +9,8 @@ Code skills are just ToolSpecs; they don't need an index.
 from __future__ import annotations
 
 import json
+import math
+import numbers
 import re
 from pathlib import Path
 from typing import Any
@@ -73,6 +75,30 @@ class SkillsService:
                 for m in manifests
             ]
             vectors = await self._embedding.embed_texts(texts)
+            expected_dimension = int(getattr(self._embedding, "dimension", 0) or 0)
+            if len(vectors) != len(manifests):
+                raise CapabilityError(
+                    "skills",
+                    f"embedding count mismatch: expected {len(manifests)}, got {len(vectors)}",
+                )
+            for index, vector in enumerate(vectors):
+                if not isinstance(vector, (list, tuple)) or not vector:
+                    raise CapabilityError("skills", f"embedding {index} must be a non-empty vector")
+                if expected_dimension and len(vector) != expected_dimension:
+                    raise CapabilityError(
+                        "skills",
+                        f"embedding dimension mismatch at item {index}: "
+                        f"expected {expected_dimension}, got {len(vector)}",
+                    )
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, numbers.Real)
+                    or not math.isfinite(float(value))
+                    for value in vector
+                ):
+                    raise CapabilityError(
+                        "skills", f"embedding {index} contains non-finite or non-numeric values",
+                    )
             await self._store.reset()
             await self._store.add(ids=ids, texts=texts, embeddings=vectors, metadatas=metas)
             indexed = len(ids)
@@ -118,6 +144,10 @@ class SkillsService:
         }
 
     async def search(self, query: str, *, top_k: int = 3) -> list[dict[str, Any]]:
+        if not isinstance(query, str) or not query.strip():
+            raise CapabilityError("skills", "query must be a non-empty string")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
+            raise CapabilityError("skills", "top_k must be a positive integer")
         if not self._embedding or not self._store:
             return []
         vec = await self._embedding.embed_query(query)
@@ -143,6 +173,14 @@ class SkillsService:
         overwrite: bool = True,
     ) -> dict[str, Any]:
         """Write a profile-scoped SKILL.md and refresh the live index."""
+        if not isinstance(name, str):
+            raise CapabilityError("skills", "skill name must be a string")
+        if not isinstance(description, str):
+            raise CapabilityError("skills", "skill description must be a string")
+        if not isinstance(body, str):
+            raise CapabilityError("skills", "skill body must be a string")
+        if keywords is not None and not isinstance(keywords, (list, tuple)):
+            raise CapabilityError("skills", "skill keywords must be an array")
         normalized = name.strip().lower()
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", normalized):
             raise CapabilityError(
@@ -161,9 +199,9 @@ class SkillsService:
             raise CapabilityError("skills", f"skill '{normalized}' already exists")
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        safe_keywords = [
-            str(k).strip() for k in (keywords or []) if str(k).strip()
-        ]
+        if any(not isinstance(keyword, str) for keyword in (keywords or [])):
+            raise CapabilityError("skills", "skill keywords must contain strings")
+        safe_keywords = [keyword.strip() for keyword in (keywords or []) if keyword.strip()]
         keyword_json = json.dumps(safe_keywords, ensure_ascii=False)
         description_json = json.dumps(description.strip(), ensure_ascii=False)
         text = (

@@ -99,6 +99,10 @@ class HybridRetriever:
         top_k: int = 5,
         filters: dict[str, Any] | None = None,
     ) -> list[RetrievedChunk]:
+        if top_k <= 0:
+            raise ValueError("top_k must be > 0")
+        if not query or not query.strip():
+            raise ValueError("query must not be empty")
         validate_metadata_filter(filters)
         await self._ensure_lexical()
         k_inner = top_k * self._cm

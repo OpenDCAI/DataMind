@@ -38,6 +38,8 @@ class ShortTermMemory:
     """Session-keyed rolling window of Turns."""
 
     def __init__(self, *, max_turns: int = 20) -> None:
+        if isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns <= 0:
+            raise ValueError("max_turns must be a positive integer")
         self._max = max_turns
         self._buffers: dict[str, deque[Turn]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -50,16 +52,28 @@ class ShortTermMemory:
         return lock
 
     async def append(self, session_id: str, role: str, content: str, **metadata: Any) -> None:
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id must be a non-empty string")
+        if role not in {"user", "assistant", "system"}:
+            raise ValueError("role must be user, assistant, or system")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("content must be a non-empty string")
         async with self._lock(session_id):
             buf = self._buffers.setdefault(session_id, deque(maxlen=self._max))
             buf.append(Turn(role=role, content=content, metadata=dict(metadata)))
 
     async def recent(self, session_id: str, *, limit: int | None = None) -> list[Turn]:
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id must be a non-empty string")
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 0):
+            raise ValueError("limit must be a non-negative integer")
         async with self._lock(session_id):
             buf = self._buffers.get(session_id)
             if not buf:
                 return []
             items = list(buf)
+            if limit == 0:
+                return []
             if limit is not None:
                 items = items[-limit:]
             return items

@@ -13,24 +13,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from datamind.capabilities.db import DBService, build_db_service, build_db_tools
+from datamind.capabilities.db import DBService, build_db_service
 from datamind.capabilities.embedding import build_embedding
-from datamind.capabilities.graph import GraphService, build_graph_service, build_graph_tools
+from datamind.capabilities.graph import GraphService, build_graph_service
 from datamind.capabilities.hooks import AuditLogHook, DestructiveSqlHook, PathAllowlistHook
 from datamind.capabilities.ingest import (
     IngestLedger,
     IngestService,
     build_ingest_service,
-    build_ingest_tools,
     with_receipts,
 )
-from datamind.capabilities.kb import KBService, build_kb_service, build_kb_tools
-from datamind.capabilities.memory import MemoryService, build_memory_service, build_memory_tools
+from datamind.capabilities.kb import KBService, build_kb_service
+from datamind.capabilities.memory import MemoryService, build_memory_service
 from datamind.capabilities.skills import (
     SkillsService,
     build_skills_service,
-    build_skills_store_tools,
-    build_skills_tools,
 )
 from datamind.config import Settings
 from datamind.core.contracts import ToolAccess
@@ -40,7 +37,7 @@ from datamind.core.logging import bind_context, current_context
 from datamind.core.context import RequestContext
 from datamind.core.model_clients import build_model_client
 from datamind.core.protocols import EmbeddingProvider, TextModelClient, ToolCallingModelClient
-from datamind.core.tools import ToolRegistry
+from datamind.core.tools import ToolRegistry, tool_provider_registry
 
 from .base import AgentLoopConfig, AgentLoopProtocol
 from .loop_native import NativeAgentLoop
@@ -63,6 +60,29 @@ class AgentServices:
     skills: SkillsService | None = None
     memory: MemoryService | None = None
     ingest: IngestService | None = None
+    _closed: bool = False
+
+    async def aclose(self) -> None:
+        """Close shared runtime resources once, regardless of facade owner."""
+        if self._closed:
+            return
+        self._closed = True
+        resources = [
+            self.db,
+            self.graph,
+            self.kb,
+            self.embedding,
+            self.fallback_client,
+            self.client,
+        ]
+        seen: set[int] = set()
+        for resource in resources:
+            if resource is None or id(resource) in seen:
+                continue
+            seen.add(id(resource))
+            close = getattr(resource, "aclose", None)
+            if callable(close):
+                await close()
 
 
 @dataclass
@@ -140,6 +160,9 @@ class RetrieveAgent:
             user_message=message, history=history, final_contract=final_contract,
         )
 
+    async def aclose(self) -> None:
+        await self.services.aclose()
+
 
 @dataclass
 class StoreAgent:
@@ -167,6 +190,9 @@ class StoreAgent:
     ) -> dict[str, Any]:
         return await self.loop.run_turn(user_message=message, history=history)
 
+    async def aclose(self) -> None:
+        await self.services.aclose()
+
 
 @dataclass
 class DataMind:
@@ -176,7 +202,6 @@ class DataMind:
     retrieve_agent: RetrieveAgent
     services: AgentServices
     profile: str = "default"
-    _closed: bool = False
 
     @property
     def store(self) -> StoreAgent:
@@ -224,25 +249,7 @@ class DataMind:
 
     async def aclose(self) -> None:
         """Idempotently close clients, engines, stores, and providers."""
-        if self._closed:
-            return
-        self._closed = True
-        resources = [
-            self.services.db,
-            self.services.graph,
-            self.services.kb,
-            self.services.embedding,
-            self.services.fallback_client,
-            self.services.client,
-        ]
-        seen: set[int] = set()
-        for resource in resources:
-            if resource is None or id(resource) in seen:
-                continue
-            seen.add(id(resource))
-            close = getattr(resource, "aclose", None)
-            if callable(close):
-                await close()
+        await self.services.aclose()
 
 
 def _build_hook_chain(settings: Settings) -> HookChain | None:
@@ -367,27 +374,22 @@ async def build_datamind(
     )
 
     catalogue = ToolRegistry()
-    ingest_tools = build_ingest_tools(ingest) if ingest is not None else []
-    catalogue.extend([t for t in ingest_tools if t.surface is None])
-    if "kb" in active:
-        assert kb is not None
-        catalogue.extend(build_kb_tools(kb))
-        catalogue.extend([t for t in ingest_tools if t.surface and t.surface.value == "kb"])
-    if "db" in active:
-        assert db is not None
-        catalogue.extend(build_db_tools(db))
-        catalogue.extend([t for t in ingest_tools if t.surface and t.surface.value == "db"])
-    if "graph" in active:
-        assert graph is not None
-        catalogue.extend(build_graph_tools(graph))
-        catalogue.extend([t for t in ingest_tools if t.surface and t.surface.value == "graph"])
-    if "skills" in active:
-        assert skills is not None
-        catalogue.extend(build_skills_tools(skills))
-        catalogue.extend(build_skills_store_tools(skills))
-    if "memory" in active:
-        assert memory is not None
-        catalogue.extend(build_memory_tools(memory))
+    provider_services = {
+        "kb_service": kb,
+        "db_service": db,
+        "graph_service": graph,
+        "skills_service": skills,
+        "memory_service": memory,
+        "ingest_service": ingest,
+    }
+    if ingest is not None:
+        ingest_provider = tool_provider_registry.create("ingest")
+        for spec in ingest_provider.build(**provider_services):
+            if spec.surface is None or spec.surface.value in active:
+                catalogue.add(spec)
+    for provider_name in sorted(active):
+        provider = tool_provider_registry.create(provider_name)
+        catalogue.extend(provider.build(**provider_services))
 
     retrieve_tools = catalogue.select(access={ToolAccess.READ, ToolAccess.UTILITY})
     raw_store_tools = catalogue.select(access={ToolAccess.WRITE})

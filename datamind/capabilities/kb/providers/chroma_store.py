@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Sequence
 
+from datamind.core.errors import CapabilityError
 from datamind.core.logging import get_logger
 from datamind.core.protocols import RetrievedChunk
 from datamind.core.registry import vector_store_registry
@@ -24,26 +25,39 @@ class ChromaVectorStore:
         collection_name: str,
         dimension: int,
     ) -> None:
-        import chromadb  # type: ignore
+        try:
+            import chromadb  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            raise CapabilityError("kb", "Chroma dependency is unavailable", cause=exc) from exc
 
         self.dimension = dimension
         self._persist_dir = Path(persist_dir)
         self._persist_dir.mkdir(parents=True, exist_ok=True)
         self._collection_name = collection_name
-        self._client = chromadb.PersistentClient(path=str(self._persist_dir))
-        # We supply our own embeddings — disable the default model download.
-        self._collection = self._client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=None,  # type: ignore[arg-type]
-            metadata={"hnsw:space": "cosine"},
-        )
-        self.existing_count = int(self._collection.count())
+        try:
+            self._client = chromadb.PersistentClient(path=str(self._persist_dir))
+            # We supply our own embeddings — disable the default model download.
+            self._collection = self._client.get_or_create_collection(
+                name=collection_name,
+                embedding_function=None,  # type: ignore[arg-type]
+                metadata={"hnsw:space": "cosine"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CapabilityError(
+                "kb", f"cannot open Chroma vector index at {self._persist_dir}: {exc}", cause=exc,
+            ) from exc
+        try:
+            self.existing_count = int(self._collection.count())
+        except Exception as exc:  # noqa: BLE001
+            raise CapabilityError(
+                "kb", f"cannot inspect Chroma vector index at {self._persist_dir}: {exc}", cause=exc,
+            ) from exc
         _log.info(
             "chroma_collection_ready",
             extra={
                 "collection": collection_name,
                 "path": str(self._persist_dir),
-                "count": self._collection.count(),
+                "count": self.existing_count,
             },
         )
 
@@ -77,13 +91,16 @@ class ChromaVectorStore:
         top_k: int = 5,
         where: dict[str, Any] | None = None,
     ) -> list[RetrievedChunk]:
-        result = await asyncio.to_thread(
-            self._collection.query,
-            query_embeddings=[list(embedding)],
-            n_results=top_k,
-            where=where,
-            include=["documents", "metadatas", "distances"],
-        )
+        try:
+            result = await asyncio.to_thread(
+                self._collection.query,
+                query_embeddings=[list(embedding)],
+                n_results=top_k,
+                where=where,
+                include=["documents", "metadatas", "distances"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CapabilityError("kb", f"vector index query failed: {exc}", cause=exc) from exc
         ids = (result.get("ids") or [[]])[0]
         docs = (result.get("documents") or [[]])[0]
         metas = (result.get("metadatas") or [[]])[0]

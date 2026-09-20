@@ -82,10 +82,23 @@ def load_skill(path: Path) -> SkillManifest | None:
     except OSError as exc:
         _log.warning("skill_read_failed", extra={"path": str(path), "err": str(exc)})
         return None
+    has_frontmatter = bool(_FRONTMATTER_RE.match(text))
+    if text.lstrip().startswith("---") and not has_frontmatter:
+        _log.warning("skill_manifest_invalid", extra={"path": str(path), "reason": "malformed frontmatter"})
+        return None
     meta, body = _parse_frontmatter(text)
-    name = str(meta.get("name") or path.parent.name).strip()
-    desc = str(meta.get("description") or "").strip()
-    if not desc:
+    if has_frontmatter:
+        name = str(meta.get("name") or "").strip()
+        desc = str(meta.get("description") or "").strip()
+        if not name or not desc:
+            _log.warning(
+                "skill_manifest_invalid",
+                extra={"path": str(path), "reason": "name and description are required"},
+            )
+            return None
+    else:
+        name = path.parent.name.strip()
+        desc = ""
         # Fall back to the first non-empty Markdown line so the skill is at
         # least searchable.
         for line in body.splitlines():
@@ -93,6 +106,12 @@ def load_skill(path: Path) -> SkillManifest | None:
             if s:
                 desc = s
                 break
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name):
+        _log.warning("skill_manifest_invalid", extra={"path": str(path), "reason": "invalid name"})
+        return None
+    if not body.strip():
+        _log.warning("skill_manifest_invalid", extra={"path": str(path), "reason": "empty body"})
+        return None
     keywords_raw = meta.get("keywords")
     if isinstance(keywords_raw, list):
         keywords = tuple(str(k) for k in keywords_raw)

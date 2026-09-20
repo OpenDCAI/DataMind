@@ -15,7 +15,7 @@ so they're easy to disable wholesale via permission policies later.
 """
 from __future__ import annotations
 
-from datamind.core.tools import ToolSpec
+from datamind.core.tools import ToolSpec, tool_provider_registry
 
 from .service import IngestService
 
@@ -446,6 +446,15 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
             metadata={"group": "ingest", "surface": "graph", "access": "write"},
         ),
     ]
+
+
+@tool_provider_registry.register("ingest")
+class _IngestToolProvider:
+    def build(self, **services: object) -> list[ToolSpec]:
+        ingest = services.get("ingest_service")
+        if not isinstance(ingest, IngestService):
+            raise ValueError("ingest tool provider requires 'ingest_service'")
+        return build_ingest_tools(ingest)
 
 
 __all__ = ["build_ingest_tools"]

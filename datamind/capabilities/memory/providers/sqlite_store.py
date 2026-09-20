@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import numbers
 import sqlite3
 import struct
 import time
@@ -77,6 +78,29 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if na == 0 or nb == 0:
         return 0.0
     return dot / (na * nb)
+
+
+def _validate_vector(
+    vector: Sequence[float], *, expected_dimension: int | None, label: str,
+) -> list[float]:
+    """Reject malformed vectors before they can poison memory recall."""
+    try:
+        values = list(vector)
+    except TypeError as exc:
+        raise CapabilityError("memory", f"{label} embedding is not a sequence", cause=exc) from exc
+    if expected_dimension and len(values) != expected_dimension:
+        raise CapabilityError(
+            "memory",
+            f"{label} embedding dimension mismatch: expected {expected_dimension}, got {len(values)}",
+        )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, numbers.Real)
+        or not math.isfinite(float(value))
+        for value in values
+    ):
+        raise CapabilityError("memory", f"{label} embedding contains non-finite or non-numeric values")
+    return [float(value) for value in values]
 
 
 def _row_to_item(row: tuple, *, score: float = 0.0) -> MemoryItem:
@@ -239,17 +263,39 @@ class SQLiteMemoryStore:
         kind: Kind = "fact",
         metadata: dict[str, Any] | None = None,
     ) -> str:
+        if not isinstance(content, str) or not content.strip():
+            raise CapabilityError("memory", "content must be a non-empty string")
+        if scope not in {"global", "profile", "session"}:
+            raise CapabilityError("memory", f"unsupported scope: {scope!r}")
+        if kind not in {"preference", "decision", "workflow", "summary", "skill", "fact"}:
+            raise CapabilityError("memory", f"unsupported kind: {kind!r}")
         if scope == "profile" and not profile:
             raise CapabilityError("memory", "scope='profile' requires profile= argument")
         if scope == "session" and not session_id:
             raise CapabilityError("memory", "scope='session' requires session_id= argument")
+        if scope == "global" and (profile or session_id):
+            raise CapabilityError("memory", "scope='global' cannot include profile or session_id")
+        if scope == "profile" and session_id:
+            raise CapabilityError("memory", "scope='profile' cannot include session_id")
+        if scope == "session" and profile:
+            raise CapabilityError("memory", "scope='session' cannot include profile")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise CapabilityError("memory", "metadata must be an object")
 
         item_id = uuid.uuid4().hex
         ts = time.time()
-        meta_json = json.dumps(metadata or {}, ensure_ascii=False)
+        try:
+            meta_json = json.dumps(metadata or {}, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise CapabilityError("memory", "metadata must be JSON-serializable", cause=exc) from exc
         emb: bytes | None = None
         if self._embedding is not None and content.strip():
             vec = await self._embedding.embed_query(content)
+            vec = _validate_vector(
+                vec,
+                expected_dimension=int(getattr(self._embedding, "dimension", 0) or 0) or None,
+                label="memory",
+            )
             emb = _pack(vec)
 
         def _run() -> None:
@@ -291,15 +337,37 @@ class SQLiteMemoryStore:
         # advanced — let callers tune the per-scope budget for ablation
         per_scope: dict[str, int] | None = None,
     ) -> list[MemoryItem]:
+        if not isinstance(query, str) or not query.strip():
+            raise CapabilityError("memory", "query must be a non-empty string")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
+            raise CapabilityError("memory", "top_k must be a positive integer")
+        allowed_kinds = {"preference", "decision", "workflow", "summary", "skill", "fact"}
+        if kinds is not None:
+            if not isinstance(kinds, (list, tuple)) or any(kind not in allowed_kinds for kind in kinds):
+                raise CapabilityError("memory", "kinds must contain only supported memory kinds")
         # Default per-scope budget: 2 (session) + 4 (profile) + 2 (global) = 8.
         budgets: dict[str, int] = {"session": 2, "profile": 4, "global": 2}
         if per_scope:
-            budgets.update({k: v for k, v in per_scope.items() if k in budgets})
+            if not isinstance(per_scope, dict):
+                raise CapabilityError("memory", "per_scope must be an object")
+            for key, value in per_scope.items():
+                if key not in budgets:
+                    raise CapabilityError("memory", f"unsupported memory scope budget: {key!r}")
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise CapabilityError("memory", f"per_scope[{key!r}] must be a non-negative integer")
+                budgets[key] = value
 
         # If no embedding, fall back to lexical scoring within the same
         # scope filters so the contract stays identical.
         scoring = self._score_with_embedding if self._embedding else self._score_lexical
-        qv = await self._embedding.embed_query(query) if self._embedding else None
+        qv = None
+        if self._embedding:
+            raw_qv = await self._embedding.embed_query(query)
+            qv = _validate_vector(
+                raw_qv,
+                expected_dimension=int(getattr(self._embedding, "dimension", 0) or 0) or None,
+                label="query",
+            )
 
         merged: list[MemoryItem] = []
         seen: set[str] = set()
@@ -470,7 +538,16 @@ class SQLiteMemoryStore:
         out: list[tuple[float, MemoryItem]] = []
         for row in rows:
             emb_blob = row[8]
-            score = _cosine(qvec, _unpack(emb_blob)) if (qvec and emb_blob) else 0.0
+            if qvec and emb_blob:
+                stored = _unpack(emb_blob)
+                if len(stored) != len(qvec):
+                    raise CapabilityError(
+                        "memory",
+                        f"stored embedding dimension mismatch: expected {len(qvec)}, got {len(stored)}",
+                    )
+                score = _cosine(qvec, stored)
+            else:
+                score = 0.0
             out.append((score, _row_to_item(row, score=score)))
         return out
 
