@@ -882,12 +882,25 @@ class IngestService:
 
         # Sanitise column names: same rule as table names.
         safe_cols: list[str] = []
-        for raw in header:
+        used_cols: set[str] = set()
+        for index, raw in enumerate(header, start=1):
             col = raw.strip()
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", col):
                 # Fall back to col_<idx> if header is unusable.
-                col = f"col_{len(safe_cols) + 1}"
+                col = f"col_{index}"
+            if col in used_cols:
+                # SQL tables cannot contain duplicate column names. Keep the
+                # first header unchanged and give later occurrences a stable
+                # fallback name without losing their values in the row dict.
+                base = f"col_{index}"
+                col = base
+                suffix = 2
+                while col in used_cols:
+                    suffix_text = f"_{suffix}"
+                    col = f"{base[:64 - len(suffix_text)]}{suffix_text}"
+                    suffix += 1
             safe_cols.append(col)
+            used_cols.add(col)
 
         rows: list[dict[str, str]] = []
         for raw_row in reader:
