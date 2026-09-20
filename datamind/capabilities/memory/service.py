@@ -92,14 +92,25 @@ class MemoryService:
         session_id: str | None = None,
         top_k: int = 8,
         kinds: Sequence[str] | None = None,
+        scope_filter: Sequence[str] | None = None,
         include_archived: bool = False,
     ) -> list[dict[str, Any]]:
+        allowed = None if scope_filter is None else set(scope_filter)
+        effective_profile = (
+            profile or self._default_profile
+            if allowed is None or "profile" in allowed
+            else None
+        )
+        effective_session = (
+            session_id if allowed is None or "session" in allowed else None
+        )
         hits = await self.long_term.recall(
             query,
-            profile=profile or self._default_profile,
-            session_id=session_id,
+            profile=effective_profile,
+            session_id=effective_session,
             top_k=top_k,
             kinds=kinds,
+            scope_filter=scope_filter,
             include_archived=include_archived,
         )
         return [h.model_dump() for h in hits]

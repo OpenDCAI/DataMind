@@ -287,14 +287,32 @@ class SQLiteMemoryStore:
         session_id: str | None = None,
         top_k: int = 8,
         kinds: Sequence[str] | None = None,
+        scope_filter: Sequence[str] | None = None,
         include_archived: bool = False,
         # advanced — let callers tune the per-scope budget for ablation
         per_scope: dict[str, int] | None = None,
     ) -> list[MemoryItem]:
+        valid_scopes = {"session", "profile", "global"}
+        allowed_scopes = valid_scopes if scope_filter is None else set(scope_filter)
+        invalid_scopes = allowed_scopes - valid_scopes
+        if invalid_scopes:
+            raise CapabilityError(
+                "memory", f"unsupported scope filter: {sorted(invalid_scopes)!r}"
+            )
+        if not allowed_scopes:
+            return []
+
         # Default per-scope budget: 2 (session) + 4 (profile) + 2 (global) = 8.
-        budgets: dict[str, int] = {"session": 2, "profile": 4, "global": 2}
+        budgets: dict[str, int] = {
+            "session": 2 if "session" in allowed_scopes else 0,
+            "profile": 4 if "profile" in allowed_scopes else 0,
+            "global": 2 if "global" in allowed_scopes else 0,
+        }
         if per_scope:
-            budgets.update({k: v for k, v in per_scope.items() if k in budgets})
+            budgets.update({
+                k: v for k, v in per_scope.items()
+                if k in budgets and k in allowed_scopes
+            })
 
         # If no embedding, fall back to lexical scoring within the same
         # scope filters so the contract stays identical.

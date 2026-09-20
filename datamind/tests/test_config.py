@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from datamind.config import DataConfig, Settings
+from datamind.config import DBConfig, DataConfig, Settings
 
 
 def test_nested_env_hydrates_required_llm(monkeypatch, tmp_path):
@@ -116,3 +116,8 @@ def test_profile_assignment_keeps_path_boundary(tmp_path):
     config = DataConfig(base_dir=tmp_path)
     with pytest.raises(ValidationError):
         config.profile = "../escape"
+
+
+def test_db_config_rejects_nonpositive_row_limit():
+    with pytest.raises(ValidationError):
+        DBConfig(row_limit=0)

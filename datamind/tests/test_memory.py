@@ -8,8 +8,10 @@ import pytest
 from datamind.capabilities.memory import (
     MemoryService,
     ShortTermMemory,
+    build_memory_tools,
 )
 from datamind.capabilities.memory.providers.sqlite_store import SQLiteMemoryStore
+from datamind.core.errors import CapabilityError
 from datamind.core.protocols import MemoryStore
 
 
@@ -274,6 +276,52 @@ async def test_service_combines_short_and_long(tmp_path):
     hits = await svc.recall("when does user like to meet")
     assert hits and "Monday" in hits[0]["content"]
     assert await svc.forget(rid)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scope_filter", "expected"),
+    [
+        (None, {"global", "profile", "session"}),
+        (["global"], {"global"}),
+        (["profile"], {"profile"}),
+        (["session"], {"session"}),
+        (["global", "profile"], {"global", "profile"}),
+        ([], set()),
+    ],
+)
+async def test_memory_recall_scope_filter_is_exact(tmp_path, scope_filter, expected):
+    lt = SQLiteMemoryStore(db_path=str(tmp_path / "m.db"), embedding=_FakeEmbed())
+    svc = MemoryService(
+        short_term=ShortTermMemory(max_turns=5),
+        long_term=lt,
+        default_profile="acme",
+    )
+    tools = {tool.name: tool.handler for tool in build_memory_tools(svc)}
+
+    await tools["memory_save"]("global fact", scope="global")
+    await tools["memory_save"]("profile fact", scope="profile", profile="acme")
+    await tools["memory_save"](
+        "session fact", scope="session", session_id="chat-1"
+    )
+
+    result = await tools["memory_recall"](
+        "fact",
+        profile="acme",
+        session_id="chat-1",
+        scope_filter=scope_filter,
+    )
+    assert {item["scope"] for item in result["results"]} == expected
+
+
+@pytest.mark.asyncio
+async def test_memory_recall_rejects_unknown_scope_filter(tmp_path):
+    lt = SQLiteMemoryStore(db_path=str(tmp_path / "m.db"), embedding=_FakeEmbed())
+    svc = MemoryService(
+        short_term=ShortTermMemory(max_turns=5), long_term=lt, default_profile="acme"
+    )
+    with pytest.raises(CapabilityError, match="unsupported scope filter"):
+        await svc.recall("fact", scope_filter=["other"])
 
 
 @pytest.mark.asyncio

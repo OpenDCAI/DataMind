@@ -374,6 +374,7 @@ class MemoryStore(Protocol):
         session_id: str | None = None,
         top_k: int = 8,
         kinds: Sequence[str] | None = None,
+        scope_filter: Sequence[str] | None = None,
         include_archived: bool = False,
     ) -> list[MemoryItem]: ...
 

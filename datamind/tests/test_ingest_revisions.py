@@ -7,6 +7,8 @@ from datamind.capabilities.ingest.service import IngestService
 
 class _Embedding:
     async def embed_texts(self, texts):
+        if not texts:
+            raise AssertionError("empty revisions must not call the embedding provider")
         return [[float(len(text))] for text in texts]
 
 
@@ -41,6 +43,34 @@ class _KB:
 class _Model:
     async def generate_text(self, prompt, **kwargs):
         return "[]"
+
+
+@pytest.mark.asyncio
+async def test_reingesting_empty_path_removes_old_kb_chunks(tmp_path: Path):
+    profile = tmp_path / "profile"
+    uploads = profile / "uploads"
+    uploads.mkdir(parents=True)
+    source = uploads / "release_note.txt"
+    kb = _KB()
+    service = IngestService(
+        kb=kb,
+        db=None,
+        graph=None,
+        llm_client=_Model(),
+        llm_model="test",
+        profile_data_dir=profile,
+        chunk_size=512,
+        chunk_overlap=64,
+    )
+
+    source.write_text("old release note", encoding="utf-8")
+    await service.kb_add_file(path=str(source))
+    source.write_text("\n\n", encoding="utf-8")
+
+    result = await service.kb_add_file(path=str(source))
+
+    assert result["chunks_added"] == 0
+    assert kb.vector_store.items == {}
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,8 @@ from datamind.capabilities.db.safeguard import (
     leading_verb,
     strip_comments,
 )
+from datamind.capabilities.db.providers.sqlite import SQLiteDialect
+from datamind.core.errors import CapabilityError
 
 
 @pytest.mark.parametrize(
@@ -67,3 +69,17 @@ def test_ensure_row_limit_strips_trailing_semicolon():
 def test_strip_comments():
     assert strip_comments("SELECT /* x */ 1") == "SELECT  1"
     assert strip_comments("-- line\nSELECT 1") == "\nSELECT 1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row_limit", [0, -1])
+async def test_execute_readonly_rejects_nonpositive_row_limit(tmp_path, row_limit):
+    dialect = SQLiteDialect()
+    engine = dialect.build_engine(
+        None, default_path=str(tmp_path / "db.sqlite")
+    )
+
+    with pytest.raises(CapabilityError, match="row_limit"):
+        await dialect.execute_readonly(
+            engine, "SELECT 1", row_limit=row_limit
+        )

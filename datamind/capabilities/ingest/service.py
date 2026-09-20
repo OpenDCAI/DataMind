@@ -725,6 +725,9 @@ class IngestService:
             ))
 
         if not chunks:
+            await self._upsert_chunks(
+                chunks, replace_sources={source, str(resolved)},
+            )
             return {"file": str(resolved), "chunks_added": 0, "note": "file was empty"}
 
         parsed_chunks = None
@@ -818,8 +821,6 @@ class IngestService:
             raise CapabilityError("ingest", "KB surface is disabled")
         provider = self._kb.embedding
         store = self._kb.vector_store
-        texts = [c.text for c in chunks]
-        vectors = await provider.embed_texts(texts)
         stale_ids: list[str] = []
         if replace_sources:
             new_ids = {chunk.id for chunk in chunks}
@@ -830,6 +831,13 @@ class IngestService:
                 }
                 if recorded_sources & replace_sources and chunk_id not in new_ids:
                     stale_ids.append(chunk_id)
+        if not chunks:
+            if stale_ids:
+                await store.delete(stale_ids)
+            await self._kb.record_incremental_ingest()
+            return
+        texts = [c.text for c in chunks]
+        vectors = await provider.embed_texts(texts)
         await store.add(
             ids=[c.id for c in chunks],
             texts=texts,
@@ -882,12 +890,25 @@ class IngestService:
 
         # Sanitise column names: same rule as table names.
         safe_cols: list[str] = []
-        for raw in header:
+        used_cols: set[str] = set()
+        for index, raw in enumerate(header, start=1):
             col = raw.strip()
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", col):
                 # Fall back to col_<idx> if header is unusable.
-                col = f"col_{len(safe_cols) + 1}"
+                col = f"col_{index}"
+            if col.casefold() in used_cols:
+                # SQL tables cannot contain duplicate column names. Keep the
+                # first header unchanged and give later occurrences a stable
+                # fallback name without losing their values in the row dict.
+                base = f"col_{index}"
+                col = base
+                suffix = 2
+                while col.casefold() in used_cols:
+                    suffix_text = f"_{suffix}"
+                    col = f"{base[:64 - len(suffix_text)]}{suffix_text}"
+                    suffix += 1
             safe_cols.append(col)
+            used_cols.add(col.casefold())
 
         rows: list[dict[str, str]] = []
         for raw_row in reader:
