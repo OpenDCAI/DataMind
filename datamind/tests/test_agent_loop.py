@@ -15,6 +15,7 @@ import pytest
 from datamind.agent.loop_native import NativeAgentLoop
 from datamind.agent.base import AgentLoopConfig
 from datamind.core.errors import FinalAnswerContractError
+from datamind.core.protocols import ModelStreamEvent
 from datamind.core.tools import ToolRegistry, ToolSpec
 
 
@@ -60,6 +61,23 @@ class _FakeMessages:
 class _FakeClient:
     def __init__(self, script: list[_Message]) -> None:
         self.messages = _FakeMessages(script)
+
+
+class _HangingStreamClient:
+    protocol = "test"
+
+    def __init__(self) -> None:
+        self.cancelled = asyncio.Event()
+
+    async def complete(self, **kwargs: Any):
+        raise AssertionError("stream test should not call complete")
+
+    async def stream(self, **kwargs: Any):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.cancelled.set()
+        yield ModelStreamEvent(type="done")
 
 
 # ------------------------------------------------------- tiny tool ---
@@ -223,6 +241,28 @@ async def test_slow_tool_is_cut_off_to_preserve_contract_finalization_budget():
     assert out["answer"] == '["ok"]'
     assert out["contract_valid"] is True
     assert out["tool_trace"][0]["error_type"] == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_enforces_model_wall_clock_deadline():
+    client = _HangingStreamClient()
+    loop = NativeAgentLoop(
+        client=client,
+        tools=ToolRegistry(),
+        config=AgentLoopConfig(model="m", wall_clock_timeout_s=0.1),
+    )
+
+    async def collect():
+        return [event async for event in loop.stream_turn(user_message="hello")]
+
+    try:
+        events = await asyncio.wait_for(collect(), timeout=0.5)
+    except asyncio.TimeoutError:
+        pytest.fail("stream_turn ignored the configured wall-clock deadline")
+
+    assert events[-1].type == "error"
+    assert "timed out" in events[-1].data["message"]
+    assert client.cancelled.is_set()
 
 
 @pytest.mark.asyncio
