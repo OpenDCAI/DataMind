@@ -298,19 +298,29 @@ class NetworkXGraphStore:
         relation_filter: list[str] | None = None,
         max_results: int = 100,
     ) -> list[GraphPath]:
-        if not self._g.has_node(start):
+        """Return edge-distinct simple paths, including parallel relations.
+
+        Traverse breadth-first in stable target/relation/edge-key order and
+        stop after ``max_results`` paths. Sort that bounded selection by score;
+        this is not an exhaustive global top-k search. Each path excludes
+        repeated nodes, while different edge identities may share its nodes.
+        """
+        if max_hops <= 0 or max_results <= 0 or not self._g.has_node(start):
             return []
         allowed = set(relation_filter) if relation_filter else None
 
         # BFS over (node, path_edges) up to max_hops.
         paths: list[GraphPath] = []
-        visited: set[tuple[str, ...]] = set()
         frontier: list[tuple[str, list[Edge], set[str]]] = [(start, [], {start})]
         depth = 0
         while frontier and depth < max_hops:
             next_frontier: list[tuple[str, list[Edge], set[str]]] = []
             for node, edges_so_far, seen in frontier:
-                for u, v, d in self._g.out_edges(node, data=True):
+                outgoing = sorted(
+                    self._g.out_edges(node, keys=True, data=True),
+                    key=lambda e: (e[1], str(e[3].get("relation", "related")), str(e[2])),
+                )
+                for u, v, _edge_key, d in outgoing:
                     rel = d.get("relation", "related")
                     if allowed is not None and rel not in allowed:
                         continue
@@ -319,10 +329,9 @@ class NetworkXGraphStore:
                     edge_obj = self._edge(u, v, d)
                     path_edges = edges_so_far + [edge_obj]
                     nodes = [start] + [e.target for e in path_edges]
-                    key = tuple(nodes)
-                    if key in visited:
-                        continue
-                    visited.add(key)
+                    # Each frontier entry is an exact edge-sequence prefix.
+                    # Extending it once per keyed edge already enumerates
+                    # distinct paths; node-only dedup loses parallel evidence.
                     paths.append(
                         GraphPath(
                             nodes=nodes,
