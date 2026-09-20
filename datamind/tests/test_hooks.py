@@ -323,6 +323,26 @@ async def test_audit_log_redacts_secret_keys(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_audit_log_redacts_secrets_in_errors(tmp_path: Path):
+    audit = tmp_path / "audit.jsonl"
+    hook = AuditLogHook(audit_path=audit)
+    await hook.post_tool_use(
+        _ctx(),
+        "fake_tool",
+        {},
+        result=None,
+        error=RuntimeError(
+            "request failed: api_key=sk-live-secret Authorization: Bearer bearer-secret"
+        ),
+    )
+
+    rec = json.loads(audit.read_text().splitlines()[-1])
+    assert "sk-live-secret" not in rec["error"]
+    assert "bearer-secret" not in rec["error"]
+    assert "[REDACTED]" in rec["error"]
+
+
+@pytest.mark.asyncio
 async def test_audit_log_records_denied_decision(tmp_path: Path):
     audit = tmp_path / "audit.jsonl"
     hook = AuditLogHook(audit_path=audit)
