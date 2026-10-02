@@ -29,8 +29,11 @@ import re
 import shutil
 import time
 import uuid
+import asyncio
+
 from pathlib import Path
 from typing import Any, Iterable
+from collections import defaultdict
 
 from sqlalchemy import text as sql_text
 
@@ -131,6 +134,7 @@ class IngestService:
         profile_data_dir: Path,
         chunk_size: int,
         chunk_overlap: int,
+        ingest_mode: str = "direct",
         allowed_roots: list[Path] | None = None,
     ) -> None:
         self._kb = kb
@@ -141,6 +145,7 @@ class IngestService:
         self._profile_dir = profile_data_dir
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
+        self.ingest_mode = ingest_mode
         # Default allow-list: this profile's data dir + cwd + cwd parent
         # + system temp + macOS-specific /tmp aliases.
         # The parent-of-cwd entry is what lets users keep demo data in
@@ -163,7 +168,8 @@ class IngestService:
             Path("/private/tmp"),
             *(allowed_roots or []),
         ]
-
+        self._coco_backend = None
+    
     def _locate_file(self, raw_path: str) -> Path:
         """Resolve a user-supplied path to an actual file on disk.
 
@@ -607,7 +613,15 @@ class IngestService:
         return {"build_id": build_id, "output_path": str(target), "artifacts_exported": copied}
 
     # ------------------------------------------------------------- KB
-
+    async def _record_file_version(self, previous_version) -> dict[str, Any] | None:
+        version = getattr(self._kb.vector_store, "latest_version", None)
+        if version is None:
+            return None
+        return await self._kb.vector_store.add_version(
+            version,
+            previous_version=previous_version,
+        )
+      
     async def kb_add_text(
         self,
         *,
@@ -640,6 +654,17 @@ class IngestService:
             target.write_text(content + "\n", encoding="utf-8")
             stored_source = str(target.relative_to(self._profile_dir))
 
+        if self.ingest_mode == "cocoindex":
+            # CocoIndex only watches the workspace directory, so inline text
+            # must be persisted there first. With persist=False the text
+            # never reaches disk and CocoIndex would never index it.
+            if not persist: 
+                raise CapabilityError(
+                    "ingest",
+                    "persist=True is required when ingesting inline text with ingest_mode='cocoindex'",
+                )
+            return await self.kb_update_workspace()
+        
         chunks = [
             Chunk(
                 id=_hash(segment, stored_source, ordinal=ordinal),
@@ -655,7 +680,16 @@ class IngestService:
                 )
             )
         ]
+        
+        previous_version = getattr(self._kb.vector_store, "latest_version", None)
+
         await self._upsert_chunks(chunks)
+        
+        # Commit the deletion as a new version and return the change summary
+        # (added / deleted / updated) between `previous_version` and the new one.
+        # LanceDB-only; other backends return None.
+        await self._record_file_version(previous_version)
+        
         return {
             "source": stored_source,
             "chunks_added": len(chunks),
@@ -681,8 +715,8 @@ class IngestService:
             )
         try:
             extracted = extract_document(resolved)
-        except RuntimeError as exc:
-            raise CapabilityError("ingest", str(exc)) from exc
+        except Exception as exc:
+            raise CapabilityError("ingest", f"failed to parse {resolved}: {exc}") from exc
         text = extracted.text
         if copy_to_profile:
             dest_dir = self._profile_dir / "uploads"
@@ -705,9 +739,23 @@ class IngestService:
                 copied_to = str(dest.relative_to(self._profile_dir))
         else:
             copied_to = None
-
+        
         # Build chunks identical in shape to indexer's raw path.
         source = copied_to or str(resolved)
+        
+        if self.ingest_mode == "cocoindex":
+            # CocoIndex only watches the workspace directory, so the file must
+            # live inside it. copy_to_profile=True is required to bring an
+            # external file in; otherwise CocoIndex would never see it.
+            if not copy_to_profile:
+                raise CapabilityError(
+                    "ingest",
+                    "CocoIndex can only ingest files inside the workspace. "
+                    "Pass copy_to_profile=True to ensure the file is under "
+                    f"{self._profile_dir}, or copy it in first: {resolved}"
+                )
+            return await self.kb_update_workspace()
+        
         chunks: list[Chunk] = []
         for ordinal, seg in enumerate(
             _split_text(
@@ -724,37 +772,74 @@ class IngestService:
                           "source_file": str(resolved), "source_sha256": self._file_hash(resolved)},
             ))
 
-        if not chunks:
-            await self._upsert_chunks(
-                chunks, replace_sources={source, str(resolved)},
-            )
-            return {"file": str(resolved), "chunks_added": 0, "note": "file was empty"}
-
-        parsed_chunks = None
+        previous_version = getattr(self._kb.vector_store, "latest_version", None)
+        
+        chunk_file = None
         if copy_to_profile and resolved.suffix.lower() not in _TEXT_EXTS:
             chunk_dir = self._profile_dir / "chunks"
             chunk_dir.mkdir(parents=True, exist_ok=True)
             chunk_file = chunk_dir / f"ingest-{_hash(source, 'parsed')}.jsonl"
+        
+        if not chunks:
+            changes = await self._upsert_chunks(
+                chunks, replace_sources={source, str(resolved)},
+            )
+            parsed_chunks = None
+            
+            # Empty file (or file that produced no chunks after splitting): make sure
+            # any previously cached chunks are removed, both from the store and from
+            # the on-disk jsonl.
+            if chunk_file and chunk_file.is_file():
+                chunk_file.unlink()
+                parsed_chunks = str(chunk_file.relative_to(self._profile_dir))
+            version_info = await self._record_file_version(previous_version)
+            return {
+                "file": str(resolved),
+                "source": source,
+                "chunks_added": changes["chunks_added"],
+                "chunks_deleted": changes["chunks_deleted"],
+                "delete_parsed_chunks": parsed_chunks,
+                "version": version_info.get("version") if version_info else None,
+                "msg": version_info.get("msg") if version_info else None,
+                "note": changes.get("note", "file was empty"),
+            }
+
+        parsed_chunks = None
+        if chunk_file:
+            # Persist parsed chunks for non-text files so later workspace syncs
+            # (and manual inspection) can see them.
             chunk_file.write_text("".join(json.dumps({
                 "id": chunk.id, "text": chunk.text, "source": chunk.source,
                 "metadata": chunk.metadata,
             }, ensure_ascii=False) + "\n" for chunk in chunks), encoding="utf-8")
             parsed_chunks = str(chunk_file.relative_to(self._profile_dir))
-        await self._upsert_chunks(
+        
+        changes = await self._upsert_chunks(
             chunks, replace_sources={source, str(resolved)},
         )
+        
+        # Commit as a new version and return the diff since `previous_version` (LanceDB only, else None).
+        version_info = await self._record_file_version(previous_version)
+            
         _log.info("kb_add_file", extra={
             "file": str(resolved), "chunks": len(chunks), "copied_to": copied_to
         })
+        
+        chunks_added = changes.get("chunks_added", 0) if not version_info else version_info.get("chunks_added", 0)
+        chunks_deleted = changes.get("chunks_deleted", 0) if not version_info else version_info.get("chunks_deleted", 0)
         return {
             "file": str(resolved),
-            "chunks_added": len(chunks),
+            "chunks_added": chunks_added,
+            "chunks_deleted": chunks_deleted,
             "copied_to": copied_to,
             "source": source,
             "parsed_chunks": parsed_chunks,
             "format": extracted.format,
             "blocks": len(extracted.blocks),
             "warnings": extracted.warnings,
+            "version": version_info.get("version") if version_info else None,
+            "msg": version_info.get("msg") if version_info else None,
+            "note": changes.get("note", ""),
         }
 
     async def kb_add_path(
@@ -835,7 +920,7 @@ class IngestService:
             if stale_ids:
                 await store.delete(stale_ids)
             await self._kb.record_incremental_ingest()
-            return
+            return {"chunks_added": 0, "chunks_deleted": len(stale_ids), "note": "file was empty"}
         texts = [c.text for c in chunks]
         vectors = await provider.embed_texts(texts)
         await store.add(
@@ -853,34 +938,223 @@ class IngestService:
         # a full KB reindex produces; otherwise the next process startup will
         # reject this otherwise valid persisted index.
         await self._kb.record_incremental_ingest()
+        return {
+            "chunks_added": len(chunks), 
+            "chunks_deleted": len(stale_ids), 
+            "note": "file updated" if stale_ids else "file ingested",
+        }
+     
+    async def kb_delete_file(self, *, path: str):
+        """Delete a file from the workspace and remove its chunks from the KB.
 
-    # ------------------------------------------------------------- DB
+        The file is removed from disk first (if it still exists), then the KB
+        is synced so the chunks become invisible to retrieval.
 
-    async def db_import_csv(
-        self,
-        *,
-        path: str,
-        table: str,
-        if_exists: str = "append",
-        delimiter: str = ",",
-    ) -> dict[str, Any]:
-        """Import a CSV into a SQLite/MySQL/Postgres table.
-
-        - Schema is inferred from the header row (all columns TEXT).
-        - if_exists: "append" (default) | "replace" | "fail"
-        - table name is validated to prevent SQL injection.
+        Behavior by ingest_mode:
+            - cocoindex: triggers a workspace-wide sync; CocoIndex drops the
+            chunks because the file no longer exists on disk.
+            - direct: deletes matching chunks from the vector store by source
+            path, and removes any cached parsed-chunk file under
+            <profile>/chunks/.
         """
-        if self._db is None:
-            raise CapabilityError("ingest", "DB surface is disabled")
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", table):
-            raise CapabilityError("ingest", f"invalid table name '{table}'. Use letters/digits/underscore only.")
-        if if_exists not in ("append", "replace", "fail"):
-            raise CapabilityError("ingest", f"if_exists must be append|replace|fail, got '{if_exists}'")
-
+        if self._kb is None:
+            raise CapabilityError("ingest", "KB surface is disabled")
+        store = self._kb.vector_store
+        
         resolved = self._locate_file(path)
-        if not resolved.is_file():
-            raise CapabilityError("ingest", f"not a file: {resolved}")
+        
+        # Refuse to delete anything outside the workspace.
+        try:
+            resolved.relative_to(self._profile_dir.resolve())
+        except:
+            raise CapabilityError(
+                "ingest", f"Path is not inside the workspace: {resolved}"
+            ) from None
+        
+        if resolved.is_dir():
+            raise CapabilityError("ingest", f"Cannot delete a directory: {resolved}")
+        if resolved.is_file():
+            # Remove the file from disk if it is still there.
+            resolved.unlink()
+        
+        if self.ingest_mode == "cocoindex":
+            # CocoIndex notices the missing file on the next sync 
+            # and drops its chunks.
+            return await self.kb_update_workspace()
+        
+        # Build chunks identical in shape to indexer's raw path.
+        source = str(resolved)
+        
+        delete_ids = []
+        for chunk_id, _text, metadata in await store.get_all_texts():
+            recorded_sources = {
+                str(metadata.get("source") or ""),
+                str(metadata.get("source_file") or ""),
+            }
+            if recorded_sources & {source, str(resolved)}:
+                delete_ids.append(chunk_id)
+        
+        previous_version = getattr(self._kb.vector_store, "latest_version", None)
 
+        if delete_ids:
+            await store.delete(delete_ids) 
+        
+        # Non-text files (e.g. .py, .pdf) get their parsed chunks cached as a
+        # jsonl under <profile>/chunks/. Remove it so the next ingest starts fresh.
+        # Text files are read directly by CocoIndex, so they have no cache to clean.
+        parsed_chunks = None
+        if resolved.suffix.lower() not in _TEXT_EXTS:
+            chunk_dir = self._profile_dir / "chunks"
+            chunk_dir.mkdir(parents=True, exist_ok=True)
+            chunk_file = chunk_dir / f"ingest-{_hash(source, 'parsed')}.jsonl"
+            if chunk_file.is_file():
+                chunk_file.unlink()
+                parsed_chunks = str(chunk_file.relative_to(self._profile_dir))
+        
+        version_info = await self._record_file_version(previous_version)
+        
+        await self._kb.record_incremental_ingest()
+        return {
+            "file": str(resolved),
+            "source": source,
+            "chunks_deleted": len(delete_ids),
+            "version": version_info.get("version") if version_info else None,
+            "msg": version_info.get("msg") if version_info else None,
+            "delete_parsed_chunks": parsed_chunks
+        }
+    
+    def _sync_prechunked_files(
+        self,
+        added_chunks: list[Any],
+        deleted_chunks: list[Any],
+    ) -> list[str]:
+        """Update per-source .jsonl caches for non-text files.
+
+        Each cache mirrors the chunks currently stored for that source:
+        added chunks are appended, deleted chunks are removed, and an empty
+        cache is unlinked. Files are read once, updated in memory, written once.
+        """
+        chunks_dir = self._profile_dir / "chunks"
+
+        # 1) Group deltas by source
+        adds: dict[str, list[Any]] = defaultdict(list)
+        deletes: dict[str, set[str]] = defaultdict(set)
+        for c in added_chunks:
+            adds[str(c["source"])].append(c)
+        for c in deleted_chunks:
+            deletes[str(c["source"])].add(str(c["id"]))
+
+        parsed_chunks = []     
+        delete_parsed_chunks = []     
+        for source in set(adds) | set(deletes):
+            resolved = _resolve_safe_path(source, self._allowed_roots)
+
+            # Text files are handled directly by CocoIndex; no cache needed.
+            if resolved.suffix.lower() in _TEXT_EXTS:
+                continue
+
+            chunk_file = chunks_dir / f"ingest-{_hash(source, 'parsed')}.jsonl"
+            chunk_file_existed = chunk_file.is_file()
+            # 2) Load existing records (id -> record)
+            records: dict[str, dict[str, Any]] = {}
+            if chunk_file.is_file():
+                for line in chunk_file.read_text(encoding="utf-8").splitlines():
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(rec, dict) and rec.get("id"):
+                        records[str(rec["id"])] = rec
+
+            # 3) Apply deletes, then adds
+            for cid in deletes.get(source, ()):
+                records.pop(cid, None)
+                
+            for chunk in adds.get(source, ()):
+                records[str(chunk["id"])] = {
+                    "id": str(chunk["id"]),
+                    "text": chunk["text"],
+                    "source": chunk["source"],
+                    "metadata": chunk["metadata"],
+                }
+
+            # 4) Write back, or remove if empty
+            
+            if records:
+                chunks_dir.mkdir(parents=True, exist_ok=True)
+                chunk_file.write_text(
+                    "".join(
+                        json.dumps(r, ensure_ascii=False) + "\n"
+                        for r in records.values()
+                    ),
+                    encoding="utf-8",
+                )
+                
+                parsed_chunks.append(str(chunk_file.relative_to(self._profile_dir)))
+            else:
+                if chunk_file_existed:
+                    delete_parsed_chunks.append(str(chunk_file.relative_to(self._profile_dir)))
+                    chunk_file.unlink(missing_ok=True)
+        
+        return {
+            "parsed_chunks": parsed_chunks,
+            "delete_parsed_chunks": delete_parsed_chunks
+        }
+             
+    async def kb_update_workspace(
+        self,
+    ) -> dict[str, Any]:
+        """Uniformly use cocoindex to manage the ingestion of the knowledge base"""
+        if self.ingest_mode != "cocoindex":
+             raise CapabilityError(
+                "ingest",
+                "kb_update_workspace requires ingest_mode='cocoindex'; "
+                f"current mode is '{self.ingest_mode}'",
+            )
+        if self._kb.vector_store.name != "lancedb":
+            raise CapabilityError(
+                "ingest",
+                "CocoIndex is only supported with the LanceDB vector store; "
+                f"current vector store is '{self._kb.vector_store.name}'",
+            )
+            
+        store = self._kb.vector_store
+        if self._coco_backend is None:
+            from datamind.capabilities.ingest.providers.cocoindex import get_backend
+            self._coco_backend = get_backend(
+                data_dir=self._profile_dir,
+                storage_dir=self._profile_dir,
+                table_name=str(store._collection_name),
+                lancedb_uri=str(store._persist_dir),
+                embedding_provider=self._kb.embedding,
+                chunk_size=self._chunk_size,
+                chunk_overlap=self._chunk_overlap,
+                allow_roots=self._allowed_roots,
+            )
+        
+        previous_version = getattr(self._kb.vector_store, "latest_version", None)
+        await self._coco_backend.update()
+        # Check out the latest version of the vector store
+        await store._checkout_latest()
+        
+        version_info = await self._record_file_version(previous_version)
+        
+        added_chunks = version_info.get("added_chunks", []) if version_info else []
+        deleted_chunks = version_info.get("deleted_chunks", []) if version_info else []
+        parsed = self._sync_prechunked_files(added_chunks, deleted_chunks)
+        
+        await self._kb.record_incremental_ingest()
+        return {
+            "chunks_added": version_info.get("chunks_added", 0),
+            "chunks_deleted": version_info.get("chunks_deleted", 0),
+            "version": version_info.get("version"),
+            "msg": version_info.get("msg"),
+            "note": "Update the whole workspace",
+            **parsed,
+        }
+     
+    # ------------------------------------------------------------- DB
+    def _read_from_csv(self, resolved: Path, delimiter: str = ","):
         text = resolved.read_text(encoding="utf-8", errors="replace")
         reader = csv.reader(io.StringIO(text), delimiter=delimiter)
         try:
@@ -891,6 +1165,7 @@ class IngestService:
         # Sanitise column names: same rule as table names.
         safe_cols: list[str] = []
         used_cols: set[str] = set()
+        
         for index, raw in enumerate(header, start=1):
             col = raw.strip()
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", col):
@@ -907,49 +1182,138 @@ class IngestService:
                     suffix_text = f"_{suffix}"
                     col = f"{base[:64 - len(suffix_text)]}{suffix_text}"
                     suffix += 1
+                    
             safe_cols.append(col)
             used_cols.add(col.casefold())
-
+        
+        file_col = "_source_file"
+        if file_col.casefold() in used_cols:
+            # CSV already had a column with this name; rename the synthetic one.
+            suffix = 2
+            while f"{file_col}_{suffix}".casefold() in used_cols:
+                suffix += 1
+            file_col = f"{file_col}_{suffix}"
+        safe_cols.append(file_col)
+        
+        data_col_count = len(safe_cols) - 1
         rows: list[dict[str, str]] = []
         for raw_row in reader:
-                # Pad short rows / truncate long rows to header length.
-                trimmed = list(raw_row[: len(safe_cols)])
-                while len(trimmed) < len(safe_cols):
-                    trimmed.append("")
-                rows.append(dict(zip(safe_cols, trimmed)))
+            # Pad short rows / truncate long rows to header length.
+            trimmed = list(raw_row[:data_col_count])
+            while len(trimmed) < data_col_count:
+                trimmed.append("")
+            row_dict = dict(zip(safe_cols[:-1], trimmed))
+            row_dict[file_col] = str(resolved)
+            rows.append(row_dict)
+            
+        return safe_cols, rows
+    
+    async def _ingest_rows(
+        self,
+        *,
+        table: str,
+        rows: list[dict],
+        safe_cols: list[str],
+        if_exists: str,
+        source_file: str | None = None,
+    ) -> dict:
+        engine = self._db.engine
+        dialect = self._db.dialect
+        q = dialect._quote_ident
+        quoted_table = q(table)
+        col_defs = ", ".join(f"{q(c)} TEXT" for c in safe_cols)
 
+        table_names = await dialect.list_tables(engine)
+        existing = table in table_names
+
+        existing_cols: set[str] = set()
+        if existing:
+            schema = await dialect.describe(engine, table)
+            existing_cols = {c.name for c in schema.columns}
+            
+        with engine.begin() as conn:
+            if dialect.name == "sqlite":
+                conn.exec_driver_sql("PRAGMA query_only = OFF")
+
+            if if_exists == "fail" and existing:
+                raise CapabilityError("ingest", f"table '{table}' already exists")
+
+            # If the table is missing, create it
+            if not existing:
+                conn.execute(sql_text(f'CREATE TABLE {quoted_table} ({col_defs})'))
+            else:
+                # Table exists → align schema: only ADD COLUMN, never DROP
+                for col in safe_cols:
+                    if col not in existing_cols:
+                        conn.execute(
+                            sql_text(f'ALTER TABLE {quoted_table} ADD COLUMN {q(col)} TEXT')
+                        )
+
+            if if_exists == "replace":
+                # replace semantics: clear the rows this import will re-populate.
+                # Scoped to the current source when known, so other files' rows survive.
+                conn.execute(sql_text(f'DELETE FROM {quoted_table}'))
+            elif if_exists == "update":
+                conn.execute(
+                    sql_text(f'DELETE FROM {quoted_table} WHERE _source_file = :f'),
+                    {"f": source_file},
+                )
+
+            # Insert rows; _source_file is auto-populated
+            if rows:
+                insert_cols = list(safe_cols)
+                quoted_columns = ", ".join(q(c) for c in insert_cols)
+                placeholders = ", ".join(f":{c}" for c in insert_cols)
+                conn.execute(
+                    sql_text(f'INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})'),
+                    rows,
+                )
+
+        commit_hash = None
+        if dialect.name == "dolt":
+            # Dolt-only: record a commit so this write shows up in version history.
+            commit_hash = await dialect.commit_version(
+                engine,
+                f"{if_exists} the {table}" + (f" from {source_file}" if source_file else ""),
+            )
+        return {
+            "commit_hash": commit_hash
+        }
+
+    async def db_import_csv(
+        self,
+        *,
+        path: str,
+        table: str,
+        if_exists: str = "append",
+        delimiter: str = ",",
+    ) -> dict[str, Any]:
+        """Import a CSV into a SQLite/MySQL/Dolt table.
+
+        - Schema is inferred from the header row (all columns TEXT).
+        - if_exists: "append" (default) | "replace" | "fail"
+        - table name is validated to prevent SQL injection.
+        """
+        if self._db is None:
+            raise CapabilityError("ingest", "DB surface is disabled")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", table):
+            raise CapabilityError("ingest", f"invalid table name '{table}'. Use letters/digits/underscore only.")
+        if if_exists not in ("append", "replace", "fail"):
+            raise CapabilityError("ingest", f"if_exists must be append|replace|fail (use db_update_csv for update file), got '{if_exists}'")
+
+        resolved = self._locate_file(path)
+        if not resolved.is_file():
+            raise CapabilityError("ingest", f"not a file: {resolved}")
+
+        safe_cols, rows = self._read_from_csv(resolved, delimiter)
         if not rows:
             return {"table": table, "rows_inserted": 0, "note": "CSV had header but no data rows"}
 
-        # SQLAlchemy: use bulk insert with parameter binding.
-        engine = self._db.engine
-        col_defs = ", ".join(f'"{c}" TEXT' for c in safe_cols)
-        placeholders = ", ".join(f":{c}" for c in safe_cols)
-        insert_cols = ", ".join(f'"{c}"' for c in safe_cols)
-
-        with engine.begin() as conn:
-            # RetrieveAgent marks pooled SQLite connections query-only.
-            # StoreAgent explicitly re-enables writes when it checks one out.
-            if self._db.dialect.name == "sqlite":
-                conn.exec_driver_sql("PRAGMA query_only = OFF")
-            # Probe existence once.
-            existing = self._db.dialect.name in {"sqlite"} and conn.execute(
-                sql_text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
-            ).fetchone()
-
-            if if_exists == "replace":
-                conn.execute(sql_text(f'DROP TABLE IF EXISTS "{table}"'))
-                conn.execute(sql_text(f'CREATE TABLE "{table}" ({col_defs})'))
-            elif if_exists == "fail" and existing:
-                raise CapabilityError("ingest", f"table '{table}' already exists")
-            else:  # append
-                conn.execute(sql_text(f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})'))
-
-            conn.execute(
-                sql_text(f'INSERT INTO "{table}" ({insert_cols}) VALUES ({placeholders})'),
-                rows,
-            )
-
+        result = await self._ingest_rows(
+            table=table, rows=rows, safe_cols=safe_cols,
+            if_exists=if_exists, source_file=str(resolved),
+        )
+            
         _log.info("db_import_csv", extra={
             "file": str(resolved), "table": table,
             "rows": len(rows), "cols": len(safe_cols),
@@ -961,29 +1325,10 @@ class IngestService:
             "rows_inserted": len(rows),
             "if_exists": if_exists,
             "source_file": str(resolved),
+            **result,
         }
 
-    async def db_import_records(
-        self,
-        *,
-        table: str,
-        records: list[dict[str, Any]],
-        if_exists: str = "append",
-    ) -> dict[str, Any]:
-        """Import inline JSON-like records into a table as TEXT columns."""
-        if self._db is None:
-            raise CapabilityError("ingest", "DB surface is disabled")
-        if not records:
-            raise CapabilityError("ingest", "records must be a non-empty array")
-        if not all(isinstance(row, dict) for row in records):
-            raise CapabilityError("ingest", "every record must be an object")
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", table):
-            raise CapabilityError("ingest", f"invalid table name '{table}'")
-        if if_exists not in ("append", "replace", "fail"):
-            raise CapabilityError(
-                "ingest", f"if_exists must be append|replace|fail, got '{if_exists}'"
-            )
-
+    def _read_from_records(self, records: list[dict[str, Any]], source_file: str):
         original_cols: list[str] = []
         for row in records:
             for key in row:
@@ -996,16 +1341,34 @@ class IngestService:
         used: set[str] = set()
         for index, raw in enumerate(original_cols, 1):
             col = raw.strip()
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", col) or col in used:
-                col = f"col_{index}"
-            used.add(col)
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", col) or col.casefold() in used:
+                base = f"col_{index}"
+                col = base
+                suffix = 2
+                while col.casefold() in used:
+                    suffix_text = f"_{suffix}"
+                    col = f"{base[:64 - len(suffix_text)]}{suffix_text}"
+                    suffix += 1
+                    
             safe_cols.append(col)
+            used.add(col.casefold())
 
+        file_col = "_source_file"
+        if file_col.casefold() in used:
+            # CSV already had a column with this name; rename the synthetic one.
+            suffix = 2
+            while f"{file_col}_{suffix}".casefold() in used:
+                suffix += 1
+            file_col = f"{file_col}_{suffix}"
+        safe_cols.append(file_col)
+        
         rows: list[dict[str, str | None]] = []
         for record in records:
             converted: dict[str, str | None] = {}
             string_keys = {str(k): value for k, value in record.items()}
-            for original, safe in zip(original_cols, safe_cols):
+            
+            data_cols = safe_cols[:-1]
+            for original, safe in zip(original_cols, data_cols):
                 value = string_keys.get(original)
                 if value is None:
                     converted[safe] = None
@@ -1013,35 +1376,53 @@ class IngestService:
                     converted[safe] = json.dumps(value, ensure_ascii=False)
                 else:
                     converted[safe] = str(value)
-            rows.append(converted)
 
-        col_defs = ", ".join(f'"{c}" TEXT' for c in safe_cols)
-        placeholders = ", ".join(f":{c}" for c in safe_cols)
-        insert_cols = ", ".join(f'"{c}"' for c in safe_cols)
-        with self._db.engine.begin() as conn:
-            if self._db.dialect.name == "sqlite":
-                conn.exec_driver_sql("PRAGMA query_only = OFF")
-            existing = self._db.dialect.name == "sqlite" and conn.execute(
-                sql_text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
-            ).fetchone()
-            if if_exists == "replace":
-                conn.execute(sql_text(f'DROP TABLE IF EXISTS "{table}"'))
-                conn.execute(sql_text(f'CREATE TABLE "{table}" ({col_defs})'))
-            elif if_exists == "fail" and existing:
-                raise CapabilityError("ingest", f"table '{table}' already exists")
-            else:
-                conn.execute(sql_text(f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})'))
-            conn.execute(
-                sql_text(f'INSERT INTO "{table}" ({insert_cols}) VALUES ({placeholders})'),
-                rows,
+            converted[file_col] = str(source_file) if source_file is not None else "inline_records"
+            rows.append(converted)
+        
+        return safe_cols, rows
+    
+    async def db_import_records(
+        self,
+        *,
+        table: str,
+        records: list[dict[str, Any]],
+        if_exists: str = "append",
+        source_file: str = None,
+    ) -> dict[str, Any]:
+        """Import inline JSON-like records into a table as TEXT columns."""
+        if self._db is None:
+            raise CapabilityError("ingest", "DB surface is disabled")
+        if not records:
+            raise CapabilityError("ingest", "records must be a non-empty array")
+        if not all(isinstance(row, dict) for row in records):
+            raise CapabilityError("ingest", "every record must be an object")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", table):
+            raise CapabilityError("ingest", f"invalid table name '{table}'")
+        if if_exists not in ("append", "replace", "fail"):
+            raise CapabilityError(
+                "ingest", f"if_exists must be append|replace|fail (use db_update_records for update), got '{if_exists}'"
             )
+
+        source_file = source_file if source_file is not None else "inline_records"
+        safe_cols, rows = self._read_from_records(
+            records=records, 
+            source_file=source_file,
+        )
+
+        result = await self._ingest_rows(
+            table=table, rows=rows, safe_cols=safe_cols,
+            if_exists=if_exists, source_file=source_file,
+        )
+            
         self._db.invalidate_schema_cache()
         return {
             "table": table,
             "columns": safe_cols,
             "rows_inserted": len(rows),
             "if_exists": if_exists,
-            "source": "inline_records",
+            "source": source_file,
+            **result,
         }
 
     async def db_import_path(
@@ -1071,7 +1452,7 @@ class IngestService:
             raise CapabilityError("ingest", "db_import_path supports .csv, .tsv, .xlsx and .xls")
         try:
             sheets = extract_tabular(resolved)
-        except RuntimeError as exc:
+        except Exception as exc:
             raise CapabilityError("ingest", str(exc)) from exc
         prefix = table_prefix or _infer_table_name(resolved.stem)
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,48}", prefix):
@@ -1082,11 +1463,290 @@ class IngestService:
                 continue
             safe_sheet = re.sub(r"[^A-Za-z0-9_]+", "_", sheet_name).strip("_") or "sheet"
             table = f"{prefix}_{safe_sheet}"[:64]
-            results.append(await self.db_import_records(table=table, records=rows, if_exists=if_exists))
+            results.append(await self.db_import_records(table=table, records=rows, if_exists=if_exists, source_file=str(resolved)))
             results[-1]["sheet"] = sheet_name
             results[-1]["source_file"] = str(resolved)
         return {"source_file": str(resolved), "tables": results, "tables_processed": len(results)}
+    
+    async def _get_candidate_tables(self, engine, dialect, file_path, table=None):
+        table_names = await dialect.list_tables(engine)
 
+        # ---- candidate discovery (same shape as db_update_csv) ----
+        if table is not None:
+            if table not in table_names:
+                raise CapabilityError("ingest", f"table '{table}' does not exist")
+            schema = await dialect.describe(engine, table)
+            if "_source_file" not in {column.name for column in schema.columns}:
+                return []
+            candidate_tables = [table]
+        else:
+            candidate_tables = []
+            for candidate in table_names:
+                schema = await dialect.describe(engine, candidate)
+                if "_source_file" not in {column.name for column in schema.columns}:
+                    continue
+                count = await dialect.count_by_source(
+                    engine, candidate, source_file=file_path
+                )
+                if count:
+                    candidate_tables.append(candidate)
+        
+        return candidate_tables
+         
+    async def db_update_csv(
+        self,
+        *,
+        path: str,
+        delimiter: str = ",",
+        table: str | None = None,
+    ) -> dict:
+        """Replace rows previously imported from this CSV file."""
+        if self._db is None:
+            raise CapabilityError("ingest", "DB surface is disabled")
+        if table and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", table):
+            raise CapabilityError("ingest", f"invalid table name '{table}'. Use letters/digits/underscore only.")
+        
+        resolved = self._locate_file(path)
+        if not resolved.is_file():
+            raise CapabilityError("ingest", f"not a file: {resolved}")
+        source_file = str(resolved)
+        engine = self._db.engine
+
+        dialect = self._db.dialect
+        candidate_tables = await self._get_candidate_tables(engine, dialect, source_file, table=table)
+
+        if len(candidate_tables) > 1:
+            raise CapabilityError(
+                "ingest",
+                "CSV source is present in multiple tables; pass the table parameter: "
+                f"{sorted(candidate_tables)}",
+            )
+        if not candidate_tables:
+            raise CapabilityError(
+                "ingest",
+                f"Cannot Update: no imported table found for CSV source '{source_file}'"
+                + (f" in table '{table}'" if table else ""),
+            )
+        table_name = candidate_tables[0]
+        safe_cols, rows = self._read_from_csv(resolved, delimiter)
+
+        result = await self._ingest_rows(
+            table=table_name, rows=rows, safe_cols=safe_cols,
+            if_exists="update", source_file=source_file,
+        )
+
+        self._db.invalidate_schema_cache()
+        return {
+            "table": table_name,
+            "rows_new": len(rows),
+            **result,
+        }
+    
+    async def db_update_records(
+        self,
+        *,
+        records: list[dict[str, Any]],
+        path: str = None,
+        table: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace rows for a source file from inline records.
+
+        If `path` is provided, the rows previously imported from that file
+        are replaced (scoped by `_source_file`). If `path` is None, the
+        records are treated as ad-hoc inline data and **appended** — there
+        is no source key to locate what would otherwise be replaced.
+        """
+        if self._db is None:
+            raise CapabilityError("ingest", "DB surface is disabled")
+        if not records:
+            raise CapabilityError("ingest", "records must be a non-empty array")
+        if not all(isinstance(row, dict) for row in records):
+            raise CapabilityError("ingest", "every record must be an object")
+        if table and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", table):
+            raise CapabilityError("ingest", f"invalid table name '{table}'")
+        
+        dialect = self._db.dialect
+        
+        if not records:
+            raise CapabilityError("ingest", "records must be a non-empty array")
+        if not all(isinstance(row, dict) for row in records):
+            raise CapabilityError("ingest", "every record must be an object")
+        
+        if path is not None:
+            resolved = self._locate_file(path)
+            source_file = str(resolved)
+            if not resolved.is_file():
+                raise CapabilityError("ingest", f"not a file: {resolved}")
+        else:
+            source_file = "inline_records"
+            
+        engine = self._db.engine
+        candidate_tables = await self._get_candidate_tables(engine, dialect, source_file, table=table)
+
+        if len(candidate_tables) > 1:
+            raise CapabilityError(
+                "ingest",
+                "source_file is present in multiple tables; pass the table parameter: "
+                f"{sorted(candidate_tables)}",
+            )
+        if not candidate_tables:
+            raise CapabilityError(
+                "ingest",
+                f"no imported table found for source_file '{source_file}'",
+            )
+        table_name = candidate_tables[0]
+        safe_cols, rows = self._read_from_records(
+            records=records,
+            source_file=source_file,
+        )
+        result = await self._ingest_rows(
+            table=table_name, 
+            rows=rows, 
+            safe_cols=safe_cols,
+            if_exists="append" if path is None else "update",
+            source_file=source_file,
+        )
+        self._db.invalidate_schema_cache()
+        return {
+            "table": table_name,
+            "source": source_file,
+            "rows_new": len(rows),
+            **result,
+        }
+        
+    async def db_update_path(
+        self,
+        *,
+        path: str,
+        table_prefix: str | None = None,
+        delimiter: str = ",",
+    ):
+        """Update DB tables from CSV/TSV files or each sheet in an XLSX workbook."""
+        if self._db is None:
+            raise CapabilityError("ingest", "DB surface is disabled")
+        resolved = self._locate_file(path)
+        if not resolved.is_file():
+            raise CapabilityError("ingest", f"not a file: {resolved}")
+        suffix = resolved.suffix.lower()
+        if suffix in {".csv", ".tsv"}:
+            result = await self.db_update_csv(
+                path=str(resolved),
+                table=table_prefix or _infer_table_name(resolved.stem),
+                delimiter=delimiter,
+            )
+            return {"source_file": str(resolved), "tables": [result], "tables_processed": 1}
+        if suffix not in TABLE_EXTS:
+            raise CapabilityError("ingest", "db_update_path supports .csv, .tsv, .xlsx and .xls")
+        try:
+            sheets = extract_tabular(resolved)
+        except Exception as exc:
+            raise CapabilityError("ingest", str(exc)) from exc
+        prefix = table_prefix or _infer_table_name(resolved.stem)
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,48}", prefix):
+            raise CapabilityError("ingest", "table_prefix must contain letters, digits and underscores")
+        
+        results: list[dict[str, Any]] = []
+        for sheet_name, _columns, rows in sheets:
+            if not rows:
+                continue
+            safe_sheet = re.sub(r"[^A-Za-z0-9_]+", "_", sheet_name).strip("_") or "sheet"
+            table = f"{prefix}_{safe_sheet}"[:64]
+            results.append(await self.db_update_records(records=rows, path=str(resolved), table=table))
+            results[-1]["sheet"] = sheet_name
+            results[-1]["source_file"] = str(resolved)
+        
+        return {
+            "source_file": str(resolved), 
+            "tables": results, 
+            "tables_processed": len(results)
+        }
+       
+    async def db_delete_path(
+        self,
+        *,
+        path: str,
+    ) -> dict[str, Any]:
+        """Delete a file and remove its rows from **every** table that tracked it.
+
+        Unlike ``db_update_*``, no ``table=`` parameter is offered: the intent
+        is to make the file disappear from the database entirely, so all
+        candidate tables are cleaned in a single transaction.
+        """
+        if self._db is None:
+            raise CapabilityError("ingest", "DB surface is disabled")
+
+        resolved = self._locate_file(path)
+        file_path = str(resolved)
+        if resolved.is_dir():
+            raise CapabilityError("ingest", f"Cannot delete a directory: {resolved}")
+        
+        # Remove the file first.
+        if resolved.is_file():
+            resolved.unlink() 
+
+        engine = self._db.engine
+        dialect = self._db.dialect
+
+        # Find every table whose _source_file column references this path.
+        candidate_tables = await self._get_candidate_tables(engine, dialect, file_path)
+
+        if not candidate_tables:
+            return {
+                "file": file_path,
+                "tables": [],
+                "rows_deleted": 0,
+                "rows_deleted_by_table": {},
+                "commit_hash": None,
+                "status": "unchanged",
+            }
+        
+        # Delete inside a single transaction so either all tables are cleaned
+        # or none are. `_get_candidate_tables` already filtered to tables that
+        # have `_source_file` and hold rows for this path.
+        rows_deleted_by_table: dict[str, int] = {}
+        with engine.begin() as conn:
+            if dialect.name == "sqlite":
+                conn.exec_driver_sql("PRAGMA query_only = OFF")
+            for table_name in candidate_tables:
+                quoted = dialect._quote_ident(table_name)
+                result = conn.execute(
+                    sql_text(f"DELETE FROM {quoted} WHERE _source_file = :file_path"),
+                    {"file_path": file_path},
+                )
+                if result.rowcount:
+                    rows_deleted_by_table[table_name] = result.rowcount
+
+        deleted_count = sum(rows_deleted_by_table.values())
+        if not deleted_count:
+            return {
+                "file": file_path,
+                "tables": [],
+                "rows_deleted": 0,
+                "rows_deleted_by_table": {},
+                "commit_hash": None,
+                "status": "unchanged",
+            }
+
+        commit_hash = None
+        if dialect.name == "dolt":
+            # Dolt records a commit for the deletion
+            table_summary = ", ".join(sorted(rows_deleted_by_table))
+            commit_msg = (
+                f"Dolt: Delete {deleted_count} rows from {table_summary} "
+                f"(source: {file_path})"
+            )
+            commit_hash = await dialect.commit_version(engine, commit_msg)
+
+        self._db.invalidate_schema_cache()
+        return {
+            "file": file_path,
+            "tables": sorted(rows_deleted_by_table),
+            "rows_deleted": deleted_count,
+            "rows_deleted_by_table": rows_deleted_by_table,
+            "commit_hash": commit_hash,
+            "status": "deleted and committed" if commit_hash else "deleted",
+        }
+    
     async def surface_ingest_path(
         self,
         *,
@@ -1375,6 +2035,7 @@ def build_ingest_service(
         profile_data_dir=settings.data.data_dir,
         chunk_size=settings.retrieval.chunk_size,
         chunk_overlap=settings.retrieval.chunk_overlap,
+        ingest_mode=settings.kb.ingest_mode,
     )
 
 

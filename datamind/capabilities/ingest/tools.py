@@ -78,6 +78,16 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         return await svc.kb_add_path(
             path=path, recursive=recursive, copy_to_profile=copy_to_profile
         )
+        
+    async def _kb_delete_file(
+        path: str
+    ) -> dict:
+        return await svc.kb_delete_file(
+            path=path
+        )
+        
+    async def _kb_update_worksapce() -> dict:
+        return await svc.kb_update_worksapce()
 
     async def _db_import_csv(
         path: str, table: str, if_exists: str = "append", delimiter: str = ","
@@ -90,11 +100,13 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         table: str,
         records: list[dict],
         if_exists: str = "append",
+        source_file: str = None
     ) -> dict:
         return await svc.db_import_records(
             table=table,
             records=records,
             if_exists=if_exists,
+            source_file=source_file,
         )
 
     async def _db_import_path(
@@ -105,6 +117,38 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
     ) -> dict:
         return await svc.db_import_path(
             path=path, table_prefix=table_prefix, if_exists=if_exists, delimiter=delimiter
+        )
+        
+    async def _db_update_csv(
+        path: str,
+        delimiter: str = ",",
+    ) -> dict:
+        return await svc.db_update_csv(
+            path=path, delimiter=delimiter
+        )
+        
+    async def _db_update_records(
+        path: str,
+        records: list[dict],
+        source_file: str = None
+    ) -> dict:
+        return await svc.db_update_records(
+            path=path, records=records, source_file=source_file,
+        )
+        
+    async def _db_update_path(
+        path: str,
+        delimiter: str = ",",
+    ) -> dict:
+        return await svc.db_update_path(
+            path=path, delimiter=delimiter,
+        )
+        
+    async def _db_delete_path(
+        path: str,
+    ) -> dict:
+        return await svc.db_delete_path(
+            path=path
         )
 
     async def _surface_ingest_path(
@@ -126,7 +170,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
             max_triples_per_file=max_triples_per_file,
         )
 
-    return [
+    tools = [
         ToolSpec(
             name="raw_file_read",
             description="Read paginated source text or extracted document text, with its source hash, without ingestion.",
@@ -231,6 +275,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
             handler=_graph_build_lineage,
             metadata={"group": "ingest", "surface": "graph", "access": "write"},
         ),
+        # KB
         ToolSpec(
             name="kb_add_text",
             description=(
@@ -253,13 +298,14 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         ToolSpec(
             name="kb_add_file",
             description=(
-                "Ingest a single text file (.md / .markdown / .txt) into the "
+                "Ingest a single document file (.md / .markdown / .txt) into the "
                 "knowledge base — chunked, embedded, and immediately searchable. "
-                "Use this when the user asks to add a specific file. The path "
-                "must be inside an allowed root (the active profile's data dir "
-                "or the current working directory). By default the file is also "
-                "copied under the profile's `uploads/` subdirectory so a future "
-                "kb_reindex picks it up too."
+                "Use this both when the user adds a NEW file and when they UPDATE "
+                "an existing one; re-ingesting the same path replaces its chunks "
+                "instead of duplicating them. The path must be inside an allowed root "
+                "(the active profile's data dir or the current working directory). "
+                "By default the file is also copied under the profile's `uploads/` "
+                "subdirectory so future updates can find it."
             ),
             input_schema={
                 "type": "object",
@@ -311,6 +357,25 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
             handler=_kb_add_path,
             metadata={"group": "ingest", "surface": "kb", "access": "write"},
         ),
+        ToolSpec(
+            name="kb_delete_file",
+            description=(
+                "Delete a file from the knowledge base."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to a file or directory.",
+                    },
+                },
+                "required": ["path"],
+            },
+            handler=_kb_delete_file,
+            metadata={"group": "ingest", "surface": "kb", "access": "write"},
+        ),
+        # DB
         ToolSpec(
             name="db_import_csv",
             description=(
@@ -368,6 +433,10 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                         "enum": ["append", "replace", "fail"],
                         "default": "append",
                     },
+                    "source_file": {
+                        "type": ["string", "null"],
+                        "description": "Source file path for provenance tracking, if available.",
+                    },
                 },
                 "required": ["table", "records"],
             },
@@ -393,6 +462,94 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
             handler=_db_import_path,
             metadata={"group": "ingest", "surface": "db", "access": "write"},
         ),
+        ToolSpec(
+            name="db_update_csv",
+            description=(
+                "Update table rows from a CSV file. The file's rows are matched by source file path "
+                "and replaced (old rows with same _source_file are deleted, new ones inserted). "
+                "Use this to sync CSV changes back to the database."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string", 
+                        "description": "Path to the CSV file."
+                    },
+                    "delimiter": {
+                        "type": "string",
+                        "description": "Field delimiter; default comma. Use '\\t' for TSV.",
+                        "default": ",",
+                    },
+                },
+                "required": ["path"],
+            },
+            handler=_db_update_csv,
+            metadata={"group": "ingest", "surface": "db", "access": "write"},
+        ),
+        ToolSpec(
+            name="db_update_records",
+            description=(
+                "Update table rows from inline JSON records. Use this when records are provided "
+                "directly in the conversation rather than from a file."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "records": {
+                        "type": "array",
+                        "items": {"type": "object", "additionalProperties": True},
+                        "description": "Array of JSON objects to update.",
+                    },
+                    "source_file": {
+                        "type": ["string", "null"],
+                        "description": "Source file path for provenance tracking.",
+                    },
+                },
+                "required": ["records"],
+            },
+            handler=_db_update_records,
+            metadata={"group": "ingest", "surface": "db", "access": "write"},
+        ),
+        ToolSpec(
+            name="db_update_path",
+            description=(
+                "Update table rows from a CSV/TSV file or every sheet in an XLSX workbook. "
+                "Each sheet becomes rows in its corresponding table. Rows are matched and replaced "
+                "based on source file path."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string", 
+                        "description": "Path to CSV/TSV/XLSX file.",
+                    },
+                    "delimiter": {"type": "string", "default": ","},
+                },
+                "required": ["path"],
+            },
+            handler=_db_update_path,
+            metadata={"group": "ingest", "surface": "db", "access": "write"},
+        ),
+        ToolSpec(
+            name="db_delete_path",
+            description=(
+                "Delete rows of a file in every database table that were imported from the specified "
+                "CSV/TSV/XLSX file, matching its _source_file value. This removes "
+                "database rows."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the source file to delete from database."},
+                },
+                "required": ["path"],
+            },
+            handler=_db_delete_path,
+            metadata={"group": "ingest", "surface": "db", "access": "write"},
+        ),
+        # Graph
         ToolSpec(
             name="graph_add_triples_from_text",
             description=(
@@ -447,5 +604,21 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         ),
     ]
 
+    if svc.ingest_mode == "cocoindex":
+        tools.extend([
+            ToolSpec(
+                name="kb_update_workspace",
+                description=(
+                    "Update the entire current workspace in the knowledge base using cocoindex backend. "
+                    "This scans all files in the current profile directory, detects changes (added, updated, deleted), "
+                    "and syncs them with the KB. Returns detailed change tracking with file and chunk counts."
+                ),
+                input_schema={"type": "object", "properties": {}},
+                handler=_kb_update_worksapce,
+                metadata={"group": "ingest", "surface": "kb", "access": "write"},
+            ),
+        ])
+
+    return tools
 
 __all__ = ["build_ingest_tools"]
