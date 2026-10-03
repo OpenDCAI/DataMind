@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import re
 import os
+import shutil
 import subprocess
 import socket, time
 import mysql.connector
@@ -91,6 +92,17 @@ class DoltDialect(BaseSQLDialect):
         if dsn.startswith("mysql://"):
             dsn = "mysql+pymysql://" + dsn[len("mysql://"):]
         
+        # Dolt is an external binary (not a pip package). Without this check,
+        # the first `subprocess.run(["dolt", ...])` below raises a bare
+        # FileNotFoundError with no hint about how to fix it.
+        if shutil.which("dolt") is None:
+            raise CapabilityError(
+                "db",
+                "The `dolt` binary was not found on PATH. "
+                "Install it from https://github.com/dolthub/dolt "
+                "(e.g. `brew install dolt`, or run the official install script), "
+                "or select another dialect such as 'sqlite' or 'mysql'.",
+            )
         cfg = self._parse_dolt_dsn(dsn)
         host, port, dbname = cfg["host"], cfg["port"], cfg["dbname"]
         user, password = cfg["user"], cfg["password"]

@@ -685,7 +685,7 @@ class IngestService:
 
         await self._upsert_chunks(chunks)
         
-        # Commit the deletion as a new version and return the change summary
+        # Commit as a new version and return the change summary
         # (added / deleted / updated) between `previous_version` and the new one.
         # LanceDB-only; other backends return None.
         await self._record_file_version(previous_version)
@@ -697,7 +697,7 @@ class IngestService:
         }
 
     async def kb_add_file(self, *, path: str, copy_to_profile: bool = True) -> dict[str, Any]:
-        """Ingest a single text file into the KB.
+        """Ingest/Update a single text file into the KB.
 
         path: absolute, cwd-relative, OR just a basename that exists under
             the profile's uploads/ dir (lets the user say "add foo.md"
@@ -792,6 +792,8 @@ class IngestService:
             if chunk_file and chunk_file.is_file():
                 chunk_file.unlink()
                 parsed_chunks = str(chunk_file.relative_to(self._profile_dir))
+            
+            # Commit the deletion as a new version
             version_info = await self._record_file_version(previous_version)
             return {
                 "file": str(resolved),
@@ -1035,7 +1037,8 @@ class IngestService:
         cache is unlinked. Files are read once, updated in memory, written once.
         """
         chunks_dir = self._profile_dir / "chunks"
-
+        chunks_dir.mkdir(parents=True, exist_ok=True)
+        
         # 1) Group deltas by source
         adds: dict[str, list[Any]] = defaultdict(list)
         deletes: dict[str, set[str]] = defaultdict(set)
@@ -1079,9 +1082,7 @@ class IngestService:
                 }
 
             # 4) Write back, or remove if empty
-            
             if records:
-                chunks_dir.mkdir(parents=True, exist_ok=True)
                 chunk_file.write_text(
                     "".join(
                         json.dumps(r, ensure_ascii=False) + "\n"
@@ -1274,7 +1275,7 @@ class IngestService:
             # Dolt-only: record a commit so this write shows up in version history.
             commit_hash = await dialect.commit_version(
                 engine,
-                f"{if_exists} the {table}" + (f" from {source_file}" if source_file else ""),
+                f"{if_exists} {table}" + (f" from {source_file}" if source_file else ""),
             )
         return {
             "commit_hash": commit_hash
@@ -1328,7 +1329,7 @@ class IngestService:
             **result,
         }
 
-    def _read_from_records(self, records: list[dict[str, Any]], source_file: str):
+    def _read_from_records(self, records: list[dict[str, Any]], source_file: str = None):
         original_cols: list[str] = []
         for row in records:
             for key in row:
@@ -1388,7 +1389,7 @@ class IngestService:
         table: str,
         records: list[dict[str, Any]],
         if_exists: str = "append",
-        source_file: str = None,
+        source_file: str | None = None,
     ) -> dict[str, Any]:
         """Import inline JSON-like records into a table as TEXT columns."""
         if self._db is None:
@@ -1549,12 +1550,15 @@ class IngestService:
         path: str = None,
         table: str | None = None,
     ) -> dict[str, Any]:
-        """Replace rows for a source file from inline records.
+        """Replace rows previously imported from a source file with inline records.
 
-        If `path` is provided, the rows previously imported from that file
-        are replaced (scoped by `_source_file`). If `path` is None, the
-        records are treated as ad-hoc inline data and **appended** — there
-        is no source key to locate what would otherwise be replaced.
+        Updates are scoped by `_source_file`, so a `path` is required: it is
+        resolved and matched against rows that were previously imported from
+        that file. Without it there is no source key to locate the rows to
+        replace — use `db_import_records` to ingest brand-new records instead.
+
+        If `path` matches rows in more than one table, `table` must be passed
+        to disambiguate.
         """
         if self._db is None:
             raise CapabilityError("ingest", "DB surface is disabled")
@@ -1578,7 +1582,12 @@ class IngestService:
             if not resolved.is_file():
                 raise CapabilityError("ingest", f"not a file: {resolved}")
         else:
-            source_file = "inline_records"
+            raise CapabilityError(
+                "ingest",
+                "db_update_records requires a `path`: it identifies the source "
+                "file whose previously imported rows should be replaced. To "
+                "ingest brand-new inline records, use db_import_records instead.",
+            )
             
         engine = self._db.engine
         candidate_tables = await self._get_candidate_tables(engine, dialect, source_file, table=table)
@@ -1603,7 +1612,7 @@ class IngestService:
             table=table_name, 
             rows=rows, 
             safe_cols=safe_cols,
-            if_exists="append" if path is None else "update",
+            if_exists="update",
             source_file=source_file,
         )
         self._db.invalidate_schema_cache()

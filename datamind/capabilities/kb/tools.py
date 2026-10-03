@@ -172,7 +172,7 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
             ),
             ToolSpec(
                 name="kb_rollback",
-                description="Restore the knowledge base to a previous version, creating a new snapshot of that state.",
+                description="Rollback the knowledge base to a previous version, creating a new snapshot of that state.",
                 input_schema={
                     "type": "object",
                     "properties": {

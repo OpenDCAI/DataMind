@@ -1,5 +1,31 @@
-"""
-providers/cocoindex.py
+"""CocoIndex-backed KB indexer for the store_agent surface.
+
+This module wires `CocoIndex <https://cocoindex.io/>`_ into DataMind as a
+drop-in KB backend. It walks a source directory, extracts document text
+via `datamind.capabilities.ingest.formats`, splits it into chunks using
+the same helpers as `datamind.capabilities.kb.indexer`, embeds each chunk
+with the configured embedding provider, and writes the results into a
+LanceDB table.
+
+CocoIndex handles the incremental bookkeeping: on each `update()` only
+files whose contents or embedder identity changed are reprocessed, and
+derived rows are refreshed accordingly. State is kept under
+`storage_dir/<name>_state` so re-runs are cheap.
+
+Key pieces:
+    - `KBRecord`          : the LanceDB row schema (id / document /
+                            embedding / metadata).
+    - `process_file`      : per-file flow, memoized on file + chunking
+                            params.
+    - `process_chunk`     : per-chunk embed + `declare_row`.
+    - `app_main`          : mounts the file walker and the LanceDB target.
+    - `CocoIndexBackend`  : async wrapper exposing `update()` to the rest
+                            of DataMind; lazily builds the CocoIndex `App`
+                            on first call.
+
+Path safety: every file is resolved through `_resolve_safe_path` against
+`allow_roots` before extraction, so a symlink or `..` cannot escape the
+configured data roots.
 """
 
 from __future__ import annotations
@@ -24,7 +50,6 @@ from datamind.capabilities.kb.indexer import (
     Chunk,
     _hash,
     _split_text,
-    _TEXT_EXTS,
 )
 from datamind.capabilities.ingest.formats import extract_document, DOCUMENT_EXTS
 from datamind.capabilities.ingest.service import _resolve_safe_path
@@ -47,7 +72,6 @@ async def process_chunk(
     table: lancedb.TableTarget[Any],
 ) -> None:
     provider = coco.use_context(EMBEDDER)
-    
     embedding = (await provider.embed_texts([chunk.text]))[0]
     table.declare_row(
         row=KBRecord(
@@ -134,7 +158,7 @@ class CocoIndexBackend:
         chunk_size: int,
         chunk_overlap: int,
         allow_roots: list[Path]
-    ) -> None:
+    ):
         self._data_dir = pathlib.Path(data_dir).resolve()
         self._storage_dir = pathlib.Path(storage_dir).resolve()
         self._table_name = table_name

@@ -122,18 +122,19 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
     async def _db_update_csv(
         path: str,
         delimiter: str = ",",
+        table: str | None = None,
     ) -> dict:
         return await svc.db_update_csv(
-            path=path, delimiter=delimiter
+            path=path, delimiter=delimiter, table=table,
         )
         
     async def _db_update_records(
-        path: str,
         records: list[dict],
-        source_file: str = None
+        path: str,
+        table: str | None = None,
     ) -> dict:
         return await svc.db_update_records(
-            path=path, records=records, source_file=source_file,
+            records=records, path=path, table=table,
         )
         
     async def _db_update_path(
@@ -382,9 +383,13 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                 "Import a CSV file into a SQL table. The first row is treated "
                 "as the header — columns are created as TEXT, since this is an "
                 "ad-hoc loader (run a follow-up SQL ALTER if you need typed "
-                "columns). `if_exists` controls behaviour when the target "
+                "columns).  The resolved file path is recorded on every row as "
+                "_source_file, so a later incremental update can replace only "
+                "this file's rows.`if_exists` controls behaviour when the target "
                 "table already exists: 'append' (default) inserts into the "
-                "existing table, 'replace' drops and recreates, 'fail' raises. "
+                "existing table, 'replace' clears all existing rows and "
+                "re-inserts (table schema is preserved; missing TEXT columns are "
+                "added), 'fail' raises. "
                 "Use this when the user asks to import a CSV / spreadsheet."
             ),
             input_schema={
@@ -435,8 +440,11 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                     },
                     "source_file": {
                         "type": ["string", "null"],
-                        "description": "Source file path for provenance tracking, if available.",
-                    },
+                        "description": (
+                            "Source file path recorded per row as _source_file; used by later "
+                            "incremental updates to replace only this source's rows."
+                        ),
+                    },  
                 },
                 "required": ["table", "records"],
             },
@@ -465,9 +473,12 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         ToolSpec(
             name="db_update_csv",
             description=(
-                "Update table rows from a CSV file. The file's rows are matched by source file path "
-                "and replaced (old rows with same _source_file are deleted, new ones inserted). "
-                "Use this to sync CSV changes back to the database."
+                "Sync a CSV file's current contents back into the table(s) it was "
+                "previously imported into. Matching is by resolved file path stored "
+                "as _source_file: rows with that _source_file are deleted and the "
+                "file's current rows are re-inserted. Use this after editing a CSV "
+                "that was already imported with db_import_csv, instead of "
+                "re-importing with if_exists='replace'."
             ),
             input_schema={
                 "type": "object",
@@ -481,6 +492,17 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                         "description": "Field delimiter; default comma. Use '\\t' for TSV.",
                         "default": ",",
                     },
+                    "table": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Optional target table. If provided, only that table is "
+                            "checked — an error is raised if this CSV was not "
+                            "previously imported into it. If omitted, all tables are "
+                            "searched for rows with this CSV's path as _source_file; "
+                            "if more than one table matches, you must pass `table` to "
+                            "disambiguate."
+                        ),
+                    },
                 },
                 "required": ["path"],
             },
@@ -490,8 +512,12 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         ToolSpec(
             name="db_update_records",
             description=(
-                "Update table rows from inline JSON records. Use this when records are provided "
-                "directly in the conversation rather than from a file."
+                "Replace rows previously imported from a source file with new "
+                "inline JSON records. Matching is by the file path stored as "
+                "_source_file: rows with that _source_file are deleted and the "
+                "given records are re-inserted. `path` is required — without a "
+                "prior import key there is nothing to update; use db_import_records "
+                "to ingest brand-new inline records instead."
             ),
             input_schema={
                 "type": "object",
@@ -501,12 +527,28 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                         "items": {"type": "object", "additionalProperties": True},
                         "description": "Array of JSON objects to update.",
                     },
-                    "source_file": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Path of the source file whose rows should be replaced. "
+                            "Its resolved path must match the _source_file recorded "
+                            "at import time; if no table has that _source_file, an "
+                            "error is raised."
+                        ),
+                    },
+                    "table": {
                         "type": ["string", "null"],
-                        "description": "Source file path for provenance tracking.",
+                        "description": (
+                            "Optional target table. If provided, only that table is "
+                            "checked — an error is raised if the source file was not "
+                            "previously imported into it. If omitted, all tables are "
+                            "searched for rows with this path as _source_file; if "
+                            "more than one table matches, you must pass `table` to "
+                            "disambiguate."
+                        ),
                     },
                 },
-                "required": ["records"],
+                "required": ["records", "path"],
             },
             handler=_db_update_records,
             metadata={"group": "ingest", "surface": "db", "access": "write"},
@@ -535,14 +577,25 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         ToolSpec(
             name="db_delete_path",
             description=(
-                "Delete rows of a file in every database table that were imported from the specified "
-                "CSV/TSV/XLSX file, matching its _source_file value. This removes "
-                "database rows."
+                "Delete a source file and every database row imported from it. "
+                "The file is removed from disk, and all tables that tracked it via "
+                "_source_file have their rows for this path deleted in a single "
+                "transaction (on Dolt, a commit is recorded). Use this to fully "
+                "retract a file — both the on-disk artifact and its database "
+                "traces. If the file is already missing on disk, only the database "
+                "rows are removed."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to the source file to delete from database."},
+                    "path": {
+                        "type": "string", 
+                        "description": (
+                            "Path to the source file to retract. Its resolved path "
+                            "is used to match _source_file across all tables; the "
+                            "file itself is also deleted from disk if it exists."
+                        ),
+                    },
                 },
                 "required": ["path"],
             },

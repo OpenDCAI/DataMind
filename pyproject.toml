@@ -42,6 +42,10 @@ dependencies = [
     # KB
     "chromadb>=1.0",
     "rank-bm25>=0.2",
+    "lancedb>=0.39",  
+
+    # KB Ingest
+    "cocoindex>=1.0",
 
     # Graph
     "networkx>=3.0",
