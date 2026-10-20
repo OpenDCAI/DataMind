@@ -157,3 +157,20 @@ class BaseSQLDialect:
     def _quote_ident(self, name: str) -> str:
         """Default identifier quoting; dialects override for back-ticks etc."""
         return '"' + name.replace('"', '""') + '"'
+
+    async def count_by_source(
+        self,
+        engine: Engine,
+        table: str,
+        *,
+        source_file: str,
+        source_column: str = "_source_file",
+    ) -> int:
+        q = self._quote_ident
+        sql = f"SELECT COUNT(*) FROM {q(table)} WHERE {q(source_column)} = :sf"
+
+        def _run() -> int:
+            with engine.connect() as conn:
+                return int(conn.execute(text(sql), {"sf": source_file}).scalar() or 0)
+
+        return await asyncio.to_thread(_run)

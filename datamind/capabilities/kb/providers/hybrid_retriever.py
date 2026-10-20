@@ -85,6 +85,22 @@ class HybridRetriever:
             tokenised = [_tokenize(t) for t in self._texts]
             self._bm25 = BM25Okapi(tokenised)
             _log.info("bm25_built", extra={"docs": len(self._ids)})
+            
+    async def _ensure_lexical_at_version(
+        self, version: int | None = None,
+    ) -> tuple[BM25Okapi, list[str], list[str], list[dict[str, Any]]]:
+        async with self._lock:
+            records = await self._store.get_all_texts(version=version)
+            if not records:
+                _bm25 = BM25Okapi([[""]])  # empty-safe
+                _ids, _texts, _metas = [], [], []
+            else:
+                _ids = [r[0] for r in records]
+                _texts = [r[1] for r in records]
+                _metas = [r[2] for r in records]
+                tokenised = [_tokenize(t) for t in _texts]
+                _bm25 = BM25Okapi(tokenised)
+            return _bm25, _ids, _texts, _metas
 
     async def rebuild_lexical(self) -> None:
         """Force a rebuild after adding documents to the vector store."""
@@ -165,6 +181,85 @@ class HybridRetriever:
                 "vec_hits": len(vec_ranked),
                 "bm25_hits": len(bm25_ranked),
                 "fused": len(out),
+            },
+        )
+        return out
+    
+    async def aretrieve_at_version(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        filters: dict[str, Any] | None = None,
+        version: int = None,
+    ) -> list[RetrievedChunk]:
+        validate_metadata_filter(filters)
+        _bm25, _ids, _texts, _metas = await self._ensure_lexical_at_version(version=version)
+        k_inner = top_k * self._cm
+
+        # Vector side
+        vec = await self._embed.embed_query(query)
+        vec_hits = await self._store.query(vec, top_k=k_inner, where=filters, version=version)
+        vec_ranked = {ch.id: (rank, ch) for rank, ch in enumerate(vec_hits)}
+
+        # BM25 must use the exact same candidate scope as the vector branch.
+        # Filtering after fusion would allow an out-of-scope lexical hit to
+        # displace a valid vector candidate.
+        if _bm25 is not None and _ids:
+            scores = _bm25.get_scores(_tokenize(query))
+            eligible = [
+                i for i in range(len(scores))
+                if matches_metadata(_metas[i], filters)
+            ]
+            order = sorted(eligible, key=lambda i: -scores[i])[:k_inner]
+            bm25_ranked = {
+                _ids[i]: (
+                    rank,
+                    RetrievedChunk(
+                        id=_ids[i],
+                        text=_texts[i],
+                        score=float(scores[i]),
+                        source=_metas[i].get("source"),
+                        metadata=_metas[i],
+                    ),
+                )
+                for rank, i in enumerate(order)
+                if scores[i] > 0
+            }
+        else:
+            bm25_ranked = {}
+
+        # Reciprocal Rank Fusion
+        fused: dict[str, tuple[float, RetrievedChunk]] = {}
+        for idmap, weight in ((vec_ranked, self._vw), (bm25_ranked, self._bw)):
+            for cid, (rank, ch) in idmap.items():
+                contrib = weight / (self._rrf_k + rank + 1)
+                if cid in fused:
+                    prev_score, prev_ch = fused[cid]
+                    fused[cid] = (prev_score + contrib, prev_ch)
+                else:
+                    fused[cid] = (contrib, ch)
+
+        top = sorted(fused.values(), key=lambda sc: -sc[0])[:top_k]
+        # Preserve fused score so callers can reason about it.
+        out = [
+            RetrievedChunk(
+                id=ch.id,
+                text=ch.text,
+                score=float(score),
+                source=ch.source,
+                metadata=ch.metadata,
+            )
+            for score, ch in top
+        ]
+        _log.info(
+            "retrieved",
+            extra={
+                "top_k": top_k,
+                "vec_hits": len(vec_ranked),
+                "bm25_hits": len(bm25_ranked),
+                "fused": len(out),
+                "version": version,
             },
         )
         return out

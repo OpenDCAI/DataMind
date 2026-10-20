@@ -177,7 +177,12 @@ class IngestLedger:
                 spec.name in {"db_import_records", "db_import_csv", "db_import_path"}
                 and args.get("if_exists") == "replace"
             )
-            if previous and not replaces_table:
+            replaces_source = spec.name in {
+                "kb_add_file", "kb_add_path", "kb_update_workspace", "kb_delete_file",
+                "graph_add_path", "graph_add_triples_from_text", "graph_upsert_triples",
+                "db_update_csv", "db_update_path", "db_update_records", "db_delete_path",
+            }
+            if previous and not replaces_table and not replaces_source:
                 receipt = IngestReceipt(
                     profile=self._profile,
                     revision=int(state["revision"]),
@@ -214,6 +219,15 @@ class IngestLedger:
                 self._append(receipt)
                 return receipt.model_dump(mode="json")
 
+            if isinstance(result, dict) and result.get("skipped_count", 0):
+                receipt = IngestReceipt(
+                    profile=self._profile, revision=int(state["revision"]), source=source,
+                    results=[SurfaceWriteResult(surface=surface, operation=spec.name,
+                        status="failed", items_written=_items_written(result), details=result,
+                        error="Some sources failed; successful writes may exist. Retry failed sources.")],
+                )
+                self._append(receipt)
+                return receipt.model_dump(mode="json")
             state["revision"] = int(state["revision"]) + 1
             receipt = IngestReceipt(
                 profile=self._profile,
