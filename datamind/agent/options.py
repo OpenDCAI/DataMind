@@ -9,6 +9,8 @@ separated by ToolRegistry before the tool catalogue reaches the model:
 """
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,7 @@ from datamind.core.context import RequestContext
 from datamind.core.model_clients import build_model_client
 from datamind.core.protocols import EmbeddingProvider, TextModelClient, ToolCallingModelClient
 from datamind.core.tools import ToolRegistry
+from datamind.core.recovery import recovery_summary
 
 from .base import AgentLoopConfig, AgentLoopProtocol
 from .loop_native import NativeAgentLoop
@@ -137,9 +140,22 @@ class RetrieveAgent:
         history: list[dict] | None = None,
         final_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return await self.loop.run_turn(
-            user_message=message, history=history, final_contract=final_contract,
-        )
+        parent = current_context()
+        ctx = (replace(parent, extra=dict(parent.extra)) if parent else
+               RequestContext.new(profile=self.ledger._profile if self.ledger else "default"))
+        ctx.extra["recovery_events"] = []
+        deadline = time.monotonic() + getattr(getattr(self.loop, "_cfg", None), "wall_clock_timeout_s", 300.)
+        ctx.extra["query_deadline"] = min(deadline, ctx.extra.get("query_deadline", deadline))
+        with bind_context(ctx):
+            try:
+                async with asyncio.timeout(max(0., ctx.extra["query_deadline"] - time.monotonic())):
+                    result = await self.loop.run_turn(
+                        user_message=message, history=history, final_contract=final_contract,
+                    )
+            finally:
+                if parent is not None:
+                    parent.extra.setdefault("recovery_events", []).extend(ctx.extra["recovery_events"])
+        return {**result, "recovery": recovery_summary(ctx.extra["recovery_events"])}
 
 
 @dataclass

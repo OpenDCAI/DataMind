@@ -228,6 +228,7 @@ async def _run_one(
             "surfaces_used": (result or {}).get("surfaces_used", []),
             "tool_trace": (result or {}).get("tool_trace", []),
             "evidence": (result or {}).get("evidence", []),
+            "recovery": (result or {}).get("recovery", {}),
             "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         for passthrough in ("reference_answer", "metadata"):

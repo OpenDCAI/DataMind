@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 import uuid
 from dataclasses import replace
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ from datamind.core.context import RequestContext
 from datamind.core.errors import CapabilityError, ConfigError, ExternalServiceError
 from datamind.core.logging import bind_context, current_context
 from datamind.core.protocols import GraphTriple
+from datamind.core.recovery import recover_read, recovery_summary
 
 
 def _digest(value: bytes) -> str:
@@ -130,6 +132,52 @@ class Workspace:
         return inventory
 
     async def update(self, path: str, *, surfaces=('kb', 'graph', 'db'), relation_types=None, max_triples_per_file=200) -> dict[str, Any]:
+        """Publish a generation and report logical compute/materialization costs.
+
+        Metrics are per attempt, including unsuccessful attempts. Provider usage
+        is reported only when available; absent token usage is not a zero cost.
+        """
+        metrics = {"sources_total": 0, "sources_reused": 0, "sources_computed": 0,
+                   "sources_completed": 0, "embedding_calls": 0, "embedding_texts": 0,
+                   "graph_extraction_calls": 0, "parsed_table_files": 0,
+                   "inventory_ms": 0., "setup_ms": 0., "source_copy_ms": 0.,
+                   "checkpoint_read_ms": 0., "checkpoint_write_ms": 0.,
+                   "source_compute_ms": 0., "materialization_ms": 0., "publication_ms": 0.}
+        parent = current_context()
+        ctx = replace(parent, extra=dict(parent.extra)) if parent else RequestContext.new(profile=self.settings.data.profile)
+        ctx.extra.update(nested_model_usage=[], embedding_usage=[])
+        started = time.monotonic()
+        try:
+            with bind_context(ctx):
+                result = await self._update(path, surfaces=surfaces, relation_types=relation_types,
+                    max_triples_per_file=max_triples_per_file, metrics=metrics)
+            metrics["status"] = "published"
+            return {**result, "metrics": metrics}
+        except BaseException as exc:
+            metrics.update(status="failed", error_type=type(exc).__name__)
+            raise
+        finally:
+            metrics["total_ms"] = round((time.monotonic() - started) * 1000, 3)
+            usage = ctx.extra.get("nested_model_usage", [])
+            embed_usage = ctx.extra.get("embedding_usage", [])
+            metrics["model_usage_records"] = usage
+            metrics["embedding_usage_records"] = embed_usage
+            metrics["reported_model_input_tokens"] = sum(x.get("input_tokens", 0) for x in usage) if usage else None
+            metrics["reported_model_output_tokens"] = sum(x.get("output_tokens", 0) for x in usage) if usage else None
+            metrics["reported_embedding_tokens"] = sum(x.get("total_tokens", 0) for x in embed_usage) if embed_usage else None
+            if parent is not None:
+                parent.extra.setdefault("nested_model_usage", []).extend(usage)
+                parent.extra.setdefault("embedding_usage", []).extend(embed_usage)
+            if metrics.get("workspace_revision"):
+                report = self._settings_for(metrics["workspace_revision"]).data.base_dir / "build_metrics.json"
+                try:
+                    _atomic_json(report, metrics)
+                except OSError:
+                    # An observability failure must not undo a published head or
+                    # replace the original build error.
+                    metrics["metrics_persisted"] = False
+
+    async def _update(self, path: str, *, surfaces, relation_types, max_triples_per_file, metrics) -> dict[str, Any]:
         """Prepare and publish one generation, retaining the previous one on failure.
 
         Cached complete-source results are reused. Index materialization is currently
@@ -145,7 +193,10 @@ class Workspace:
         ):
             raise ConfigError('workspace snapshots currently require local NetworkX and SQLite without an external DSN')
         source = Path(path).expanduser().resolve()
+        stage_started = time.monotonic()
         inventory = await asyncio.to_thread(self._inventory, source)
+        metrics['inventory_ms'] = (time.monotonic() - stage_started) * 1000
+        metrics['sources_total'] = len(inventory)
         pipeline = {'version': 'workspace-v1', 'surfaces': sorted(selected),
                     'embedding': self.settings.embedding.model_dump(mode='json', exclude={'api_key'}),
                     'model': self.settings.llm.fallback_model or self.settings.llm.model,
@@ -158,6 +209,7 @@ class Workspace:
         # Persist only the fingerprint; configuration can include private endpoints.
         pipeline_hash = _digest(json.dumps(pipeline, sort_keys=True, default=str).encode())
         revision = 'revision-' + uuid.uuid4().hex
+        metrics['workspace_revision'] = revision
         with self._connect() as conn:
             parent, parent_epoch = conn.execute('SELECT revision, epoch FROM head WHERE singleton=1').fetchone()
             conn.execute('INSERT INTO revisions VALUES (?, ?, ?, NULL)', (revision, parent, 'BUILDING'))
@@ -168,11 +220,14 @@ class Workspace:
         truncated_sources = []
         bindings = {}
         try:
+            stage_started = time.monotonic()
             system = await self._system(settings, selected)
+            metrics['setup_ms'] = (time.monotonic() - stage_started) * 1000
             ingest = system.services.ingest
             (settings.data.data_dir / 'uploads').mkdir(parents=True, exist_ok=True)
             graph_triples = []
             for item in inventory:
+                stage_started = time.monotonic()
                 original = Path(item['uri'])
                 snapshot = settings.data.data_dir / 'uploads' / item['relative_path']
                 snapshot.parent.mkdir(parents=True, exist_ok=True)
@@ -180,12 +235,16 @@ class Workspace:
                 if 'sha256:' + _digest(raw) != item['version']:
                     raise CapabilityError('workspace', 'source changed during build; retry')
                 snapshot.write_bytes(raw)
+                metrics['source_copy_ms'] += (time.monotonic() - stage_started) * 1000
                 source_id = 'file:' + _digest(item['uri'].encode())
                 cache_key = _digest(json.dumps([source_id, item['version'], pipeline_hash]).encode())
                 cache_path = self.root / 'checkpoints' / (cache_key + '.json')
+                stage_started = time.monotonic()
                 if cache_path.is_file():
                     prepared = json.loads(cache_path.read_text())
                     reused += 1
+                    metrics['sources_reused'] += 1
+                    metrics['checkpoint_read_ms'] += (time.monotonic() - stage_started) * 1000
                 else:
                     prepared = {'chunks': [], 'vectors': [], 'triples': [], 'tables': [], 'truncated': False}
                     is_table = original.suffix.lower() in TABLE_EXTS
@@ -200,6 +259,8 @@ class Workspace:
                             for i, part in enumerate(parts)
                         ]
                         if parts:
+                            metrics['embedding_calls'] += 1
+                            metrics['embedding_texts'] += len(parts)
                             prepared['vectors'] = await system.services.kb.embedding.embed_texts(parts)
                     if 'graph' in selected and text and not is_table:
                         parts = _split_text(text, chunk_size=settings.retrieval.chunk_size, chunk_overlap=0)
@@ -208,6 +269,7 @@ class Workspace:
                             if remaining <= 0:
                                 prepared['truncated'] = True
                                 break
+                            metrics['graph_extraction_calls'] += 1
                             triples = await ingest._extract_graph_triples(
                                 text=part, max_triples=min(30, remaining), source=item['uri'],
                                 source_version=item['version'], locator={'part': i},
@@ -217,9 +279,15 @@ class Workspace:
                             if len(triples) >= min(30, remaining):
                                 prepared['truncated'] = True
                     if 'db' in selected and is_table:
+                        metrics['parsed_table_files'] += 1
                         prepared['tables'] = await asyncio.to_thread(extract_tabular, snapshot)
+                    metrics['source_compute_ms'] += (time.monotonic() - stage_started) * 1000
+                    metrics['sources_computed'] += 1
+                    stage_started = time.monotonic()
                     _atomic_json(cache_path, prepared, overwrite=False)
                     prepared = json.loads(cache_path.read_text())
+                    metrics['checkpoint_write_ms'] += (time.monotonic() - stage_started) * 1000
+                stage_started = time.monotonic()
                 if prepared.get('truncated'):
                     truncated_sources.append(item['uri'])
                 if prepared['chunks']:
@@ -237,6 +305,9 @@ class Workspace:
                                               if_exists='replace', source_file=item['uri'])
                 manifest_sources.append({**item, 'source_id': source_id,
                     'snapshot': str(snapshot.relative_to(settings.data.base_dir))})
+                metrics['sources_completed'] += 1
+                metrics['materialization_ms'] += (time.monotonic() - stage_started) * 1000
+            stage_started = time.monotonic()
             if 'graph' in selected:
                 await system.services.graph.store.upsert_triples(graph_triples)
                 await system.services.graph.store.persist()
@@ -257,6 +328,8 @@ class Workspace:
                     'path': str(db_path.relative_to(settings.data.base_dir))}
             await system.aclose()
             system = None
+            metrics['materialization_ms'] += (time.monotonic() - stage_started) * 1000
+            stage_started = time.monotonic()
             if await asyncio.to_thread(self._inventory, source) != inventory:
                 raise CapabilityError('workspace', 'workspace changed during build; retry')
             manifest = {'workspace_revision': revision, 'parent_revision': parent, 'source_root': str(source), 'parent_epoch': parent_epoch,
@@ -272,6 +345,7 @@ class Workspace:
                     raise CapabilityError('workspace', 'publication conflict; another build published first')
                 conn.execute('UPDATE revisions SET state=? WHERE id=?', ('PUBLISHED', revision))
                 conn.execute('UPDATE head SET revision=?, epoch=epoch+1 WHERE singleton=1', (revision,))
+            metrics['publication_ms'] = (time.monotonic() - stage_started) * 1000
             return manifest
         except BaseException as exc:
             with self._connect() as conn:
@@ -291,7 +365,8 @@ class Workspace:
         settings = self._settings_for(revision)
         system = await self._system(settings, manifest['surfaces'])
         try:
-            reader = WorkspaceReader(system, manifest, settings.data.base_dir, read_retries=read_retries)
+            reader = WorkspaceReader(system, manifest, settings.data.base_dir, read_retries=read_retries,
+                                     timeout_s=settings.agent.wall_clock_timeout_s)
             yield reader
         finally:
             await system.aclose()
@@ -304,10 +379,11 @@ class Workspace:
 class WorkspaceReader:
     """Read-only facade fixed to a retained generation, including raw evidence."""
 
-    def __init__(self, system, manifest, root, *, read_retries=1):
+    def __init__(self, system, manifest, root, *, read_retries=1, timeout_s=300.):
         if not 0 <= read_retries <= 5:
             raise ValueError("read_retries must be between 0 and 5")
         self._system = system
+        self._timeout = timeout_s
         self.manifest = manifest
         self.revision = manifest['workspace_revision']
         mapping = {s['uri']: root / s['snapshot'] for s in manifest['sources']}
@@ -353,34 +429,26 @@ class WorkspaceReader:
             spec = system.retrieve.tools.get(name)
             original_handler = spec.handler
 
-            async def retry_read(_handler=original_handler, **kwargs):
-                for attempt in range(read_retries + 1):
-                    try:
-                        return await _handler(**kwargs)
-                    except Exception as exc:
-                        cause = exc.__cause__ if isinstance(exc, CapabilityError) else exc
-                        transient = isinstance(cause, (OSError, TimeoutError)) or (
-                            isinstance(cause, ExternalServiceError) and
-                            (cause.status_code is None or cause.status_code in {408, 429} or cause.status_code >= 500))
-                        if not transient or attempt == read_retries:
-                            raise
-                        context = current_context()
-                        if context is not None:
-                            context.extra['workspace_read_retries'] = context.extra.get('workspace_read_retries', 0) + 1
-                        await asyncio.sleep(0.05 * 2 ** attempt)
+            async def retry_read(_handler=original_handler, _name=name, **kwargs):
+                return await recover_read(lambda: _handler(**kwargs), component=_name,
+                                          retries=read_retries, manage_provider_retries=True)
             system.retrieve.tools.replace(replace(spec, handler=retry_read))
 
     async def call(self, name: str, **kwargs):
         context = RequestContext.new(profile=self._system.profile)
         context.extra['workspace_revision'] = self.revision
+        context.extra['query_deadline'] = time.monotonic() + self._timeout
         with bind_context(context):
             return await self._system.retrieve.tools.get(name).handler(**kwargs)
 
     async def query(self, message: str, **kwargs):
         context = RequestContext.new(profile=self._system.profile)
         context.extra['workspace_revision'] = self.revision
+        context.extra['query_deadline'] = time.monotonic() + self._timeout
         with bind_context(context):
-            result = await self._system.query(message, **kwargs)
+            async with asyncio.timeout(self._timeout):
+                result = await self._system.query(message, **kwargs)
         return {**result, 'workspace_revision': self.revision,
                 'truncated_sources': self.manifest.get('truncated_sources', []),
-                'workspace_read_retries': context.extra.get('workspace_read_retries', 0)}
+                'workspace_read_retries': recovery_summary(context.extra.get('recovery_events', []))['retries'],
+                'recovery': recovery_summary(context.extra.get('recovery_events', []))}

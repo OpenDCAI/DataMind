@@ -23,6 +23,7 @@ import httpx
 from datamind.core.errors import ExternalServiceError
 from datamind.core.logging import get_logger
 from datamind.core.registry import embedding_registry
+from datamind.core.recovery import read_retry_budget_active
 
 _log = get_logger("embedding.openai_compatible")
 
@@ -212,6 +213,17 @@ class OpenAICompatibleEmbedding:
                         "embedding_dimension_detected",
                         extra={"model": self._model, "dim": self.dimension},
                     )
+                # Provider-reported usage only. Never infer tokens from text
+                # length or label an unavailable usage report as zero cost.
+                from datamind.core.logging import current_context
+                ctx = current_context()
+                usage = body.get("usage")
+                if ctx is not None and isinstance(usage, dict):
+                    tokens = usage.get("total_tokens")
+                    if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
+                        ctx.extra.setdefault("embedding_usage", []).append({
+                            "model": self._model, "total_tokens": tokens,
+                        })
                 return vecs
             except httpx.HTTPStatusError as exc:
                 # Ordinary 4xx (especially 401/403) are deterministic.
@@ -228,6 +240,10 @@ class OpenAICompatibleEmbedding:
                     and getattr(exc, "status_code", None) in {408, 409, 429, 500, 502, 503, 504}
                 )
                 if not retriable:
+                    raise
+                if read_retry_budget_active():
+                    # Let the enclosing reader/retriever spend its one budget;
+                    # don't multiply HTTP retries by tool/vector retries.
                     raise
                 if attempt < self._max_retries:
                     retry_after = None

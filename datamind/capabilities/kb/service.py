@@ -309,6 +309,9 @@ def build_kb_service(
     elif strategy == "hybrid":
         retriever = retriever_registry.create(
             "hybrid", vector_store=vector_store, embedding=embedding,
+            vector_failure_fallback=settings.retrieval.vector_failure_fallback,
+            vector_retries=settings.retrieval.vector_retries,
+            vector_timeout_s=settings.retrieval.vector_timeout_s,
         )
     else:
         raise ConfigError(

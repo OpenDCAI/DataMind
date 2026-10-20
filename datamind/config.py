@@ -89,6 +89,10 @@ class RetrievalConfig(BaseModel):
     chunk_overlap: int = 64
     rerank: bool = False
     rerank_model: str | None = None
+    # Opt-in read degradation; no source/metadata/validation errors are hidden.
+    vector_failure_fallback: Literal["error", "bm25"] = "error"
+    vector_retries: int = Field(default=0, ge=0, le=5)
+    vector_timeout_s: float | None = Field(default=None, gt=0)
 
     @field_validator("chunk_overlap")
     @classmethod
