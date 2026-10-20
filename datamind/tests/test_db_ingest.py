@@ -566,3 +566,13 @@ async def test_reserved_source_column_cannot_break_replace_provenance(service, d
     await service.db_update_csv(path=str(source), table="reserved_source")
     result = await db_service.query_sql("SELECT col_1, value, _source_file FROM reserved_source")
     assert result.rows == [["new user data", "new", str(source.resolve())]]
+
+
+@pytest.mark.asyncio
+async def test_read_query_does_not_make_next_ingest_read_only(service, db_service, profile):
+    source = _write_csv(profile / "uploads" / "roundtrip.csv", ["value"], [["old"]])
+    await service.db_import_csv(path=str(source), table="roundtrip")
+    assert (await db_service.query_sql("SELECT value FROM roundtrip")).rows == [["old"]]
+    _write_csv(source, ["value"], [["new"]])
+    await service.db_update_csv(path=str(source), table="roundtrip")
+    assert (await db_service.query_sql("SELECT value FROM roundtrip")).rows == [["new"]]
