@@ -212,7 +212,7 @@ class IngestLedger:
                 and args.get("if_exists") == "replace"
             )
             replaces_source = spec.name in {
-                "kb_add_file", "kb_add_path", "kb_update_workspace", "kb_delete_file", "workspace_update",
+                "kb_add_file", "kb_add_path", "kb_update_workspace", "kb_delete_file", "workspace_update", "workspace_publish", "graph_replace_source", "graph_forget_source",
                 "graph_add_path", "graph_add_triples_from_text", "graph_upsert_triples",
                 "db_update_csv", "db_update_path", "db_update_records", "db_delete_path",
             }

@@ -116,10 +116,28 @@ jobs:
         working-directory: /tmp
         run: /tmp/datamind-wheel-env/bin/python "$GITHUB_WORKSPACE/scripts/ci_smoke_installed.py"
 
+  codex:
+    name: Official Codex SDK and direct data tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install official SDK integration
+        run: python -m pip install -e ".[dev,codex]"
+      - name: Require direct execution and offline SDK contracts
+        run: >-
+          python scripts/ci_required_tests.py -q
+          datamind/tests/test_direct_data_plane.py
+          datamind/tests/test_codex_host.py
+          plugins/datamind-context/tests/test_datamind_mcp.py
+
   gate:
     name: CI gate
     if: always()
-    needs: [test, versioning, databases, package]
+    needs: [test, versioning, databases, package, codex]
     runs-on: ubuntu-latest
     steps:
       - name: Require all test jobs to succeed

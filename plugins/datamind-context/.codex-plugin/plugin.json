@@ -1,7 +1,7 @@
 {
   "name": "datamind-context",
-  "version": "1.1.0",
-  "description": "Official Codex adapter for the DataMind v1 runtime.",
+  "version": "1.2.0",
+  "description": "Shared workspace data tools and Skills for Codex.",
   "author": {
     "name": "DataMind contributors",
     "url": "https://github.com/OpenDCAI/DataMind"
@@ -20,8 +20,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "DataMind Context",
-    "shortDescription": "Use DataMind RAG, GraphRAG, StoreAgent and RetrieveAgent from Codex",
-    "longDescription": "Connect Codex to the DataMind runtime. The plugin is an adapter only: DataMind owns profiles, storage, RAG, GraphRAG, Memory and agent execution.",
+    "shortDescription": "Connect Codex directly to KB, SQL, Graph, Skills and Memory",
+    "longDescription": "Codex owns planning, ingestion reasoning and retrieval. DataMind supplies shared data tools, evidence, write receipts and immutable workspace revisions.",
     "developerName": "DataMind contributors",
     "category": "Productivity",
     "capabilities": [
