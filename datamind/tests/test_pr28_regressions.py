@@ -79,3 +79,26 @@ async def test_excel_update_clears_empty_and_removed_sheet_rows(tmp_path):
     assert (await db.query_sql('SELECT COUNT(*) FROM book_one')).rows == [[0]]
     assert (await db.query_sql('SELECT COUNT(*) FROM book_two')).rows == [[0]]
     await db.aclose()
+
+
+@pytest.mark.asyncio
+async def test_external_file_edits_replace_one_managed_copy_and_keep_other_origins(tmp_path):
+    pytest.importorskip("lancedb")
+    from datamind.tests.test_kb_ingest import _ingest, _make_store
+    profile = tmp_path / "profile"
+    (profile / "uploads").mkdir(parents=True)
+    ingest = _ingest(tmp_path, profile, _make_store("lancedb", tmp_path), "direct")
+    first = tmp_path / "team_a" / "same.md"
+    second = tmp_path / "team_b" / "same.md"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_text("old team a")
+    second.write_text("team b evidence")
+    result = await ingest.kb_add_file(path=str(first))
+    await ingest.kb_add_file(path=str(second))
+    first.write_text("new team a")
+    updated = await ingest.kb_add_file(path=str(first))
+    assert result["copied_to"] == updated["copied_to"]
+    rows = await ingest._kb.vector_store.get_all_texts()
+    assert len(rows) == 2
+    assert {row[1] for row in rows} == {"new team a", "team b evidence"}

@@ -32,7 +32,7 @@ jobs:
         run: python -m compileall -q datamind
 
       - name: Run test suite
-        run: python -m pytest -q -rs
+        run: python -m pytest -q -rs datamind/tests plugins/datamind-context/tests
 
       - name: Verify real SQLite demo
         run: python -m datamind.scripts.verify_sqlite_demo
@@ -50,9 +50,87 @@ jobs:
         run: python -m pip install -e ".[dev,cocoindex,dolt]"
       - name: Run local versioning, publication and recovery contracts
         run: >-
-          python -m pytest -q
+          python scripts/ci_required_tests.py -q
           datamind/tests/test_kb_versioning.py
           datamind/tests/test_kb_ingest.py
           datamind/tests/test_pr28_regressions.py
           datamind/tests/test_workspace_revisions.py
           datamind/tests/test_ingestion_skills.py
+
+  databases:
+    name: MySQL and Dolt integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: datamind_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -pdatamind_ci"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    env:
+      DATAMIND_TEST_MYSQL_DSN: mysql+pymysql://root:datamind_ci@127.0.0.1:3306/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install database dependencies
+        run: python -m pip install -e ".[dev,mysql,dolt]"
+      - name: Install pinned Dolt binary
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 https://github.com/dolthub/dolt/releases/download/v2.5.0/dolt-linux-amd64.tar.gz -o /tmp/dolt.tar.gz
+          echo "639b8042d1ea46ebf6b645a002fc787134dbe1dc02888cc51a51d1d3eb557c93  /tmp/dolt.tar.gz" | sha256sum --check
+          tar -xzf /tmp/dolt.tar.gz -C /tmp
+          sudo install /tmp/dolt-linux-amd64/bin/dolt /usr/local/bin/dolt
+          dolt version
+      - name: Run database integration tests without skips
+        run: >-
+          python scripts/ci_required_tests.py -q
+          datamind/tests/test_db_ingest.py
+          datamind/tests/test_db_versioning.py
+
+  package:
+    name: Installed wheel smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Build wheel
+        run: python -m pip install build && python -m build --wheel
+      - name: Install wheel in isolated environment
+        run: |
+          python -m venv /tmp/datamind-wheel-env
+          /tmp/datamind-wheel-env/bin/python -m pip install dist/*.whl
+      - name: Check imports, resources and default providers outside checkout
+        working-directory: /tmp
+        run: /tmp/datamind-wheel-env/bin/python "$GITHUB_WORKSPACE/scripts/ci_smoke_installed.py"
+
+  gate:
+    name: CI gate
+    if: always()
+    needs: [test, versioning, databases, package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all test jobs to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json, os
+          results = json.loads(os.environ["RESULTS"])
+          failed = {name: result["result"] for name, result in results.items() if result["result"] != "success"}
+          if failed:
+              raise SystemExit(f"Required CI jobs did not succeed: {failed}")
+          print("All required CI jobs passed")
+          PY
