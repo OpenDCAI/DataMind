@@ -112,6 +112,9 @@ async def graph_lookup():
 `DataPlane.call` validates arguments, applies hooks and records write receipts.
 Main-agent planning, semantic extraction and answer synthesis stay outside DataMind.
 
+For custom endpoints and unattended tool authorization, see
+[Codex gateway deployment](./docs/CODEX_GATEWAY_DEPLOYMENT.md).
+
 ## Dynamic workspaces and consistent reads
 
 1. Start `datamind_operation_begin(mode="write")` and fetch `workspace-ingest`.

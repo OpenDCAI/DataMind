@@ -64,6 +64,9 @@ async def run():
 SDK 能并发运行会话，但当前 NetworkX JSON 的 live 图写入仍应使用单写入者；
 这次改造不包含分布式图存储。版本化构建可在单主机上并发，通过 CAS 决定最终发布。
 
+自定义网关、独立 embedding 和无人值守工具授权见
+[Codex 网关部署说明](./docs/CODEX_GATEWAY_DEPLOYMENT.md)。
+
 ## 数据如何协同更新
 
 1. `datamind_operation_begin(mode="write")` 开启写操作，后续工具传同一个 operation_id。

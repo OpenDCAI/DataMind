@@ -65,3 +65,20 @@ async def test_real_official_sdk_transport_initializes_without_model_turn(tmp_pa
         assert 'datamind_operation_begin' in server.tools
         assert 'datamind_graph_neighbors' in server.tools
         assert 'datamind_ask' not in server.tools
+
+
+def test_preapproval_is_explicit_and_limited_to_known_tools(tmp_path):
+    cfg = sdk_config(workspace=str(tmp_path),data_root=str(tmp_path),
+        preapproved_tools=('datamind_operation_begin',),
+        config_overrides=('model_provider="gateway"',),env={'DEPLOYMENT_TEST':'value'})
+    settings = tomllib.loads('\n'.join(cfg['config_overrides']))
+    assert settings['mcp_servers']['datamind']['tools'] == {
+        'datamind_operation_begin': {'approval_mode':'approve'}}
+    assert cfg['env'] == {'DEPLOYMENT_TEST':'value'}
+    assert settings['model_provider'] == 'gateway'
+    default = tomllib.loads('\n'.join(sdk_config(workspace=str(tmp_path),data_root=str(tmp_path))['config_overrides']))
+    assert 'tools' not in default['mcp_servers']['datamind']
+    with pytest.raises(ValueError,match='Unknown DataMind tools'):
+        sdk_config(workspace=str(tmp_path),data_root=str(tmp_path),preapproved_tools=('unknown',))
+    with pytest.raises(ValueError,match='approval_mode'):
+        CodexSession(workspace=str(tmp_path),data_root=str(tmp_path),approval_mode='allow_everything')
