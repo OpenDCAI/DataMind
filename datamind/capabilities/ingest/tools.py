@@ -112,18 +112,24 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
     ) -> dict:
         return await svc.surface_ingest_path(path=path, surfaces=surfaces, recursive=recursive)
 
-    async def _graph_add_triples_from_text(text: str, max_triples: int = 30) -> dict:
-        return await svc.graph_add_triples_from_text(text=text, max_triples=max_triples)
+    async def _graph_add_triples_from_text(
+        text: str, max_triples: int = 30, relation_types: list[str] | None = None,
+    ) -> dict:
+        return await svc.graph_add_triples_from_text(
+            text=text, max_triples=max_triples, relation_types=relation_types,
+        )
 
     async def _graph_add_path(
         path: str,
         recursive: bool = True,
         max_triples_per_file: int = 30,
+        relation_types: list[str] | None = None,
     ) -> dict:
         return await svc.graph_add_path(
             path=path,
             recursive=recursive,
             max_triples_per_file=max_triples_per_file,
+            relation_types=relation_types,
         )
 
     return [
@@ -417,6 +423,8 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                         "minimum": 1,
                         "maximum": 200,
                     },
+                    "relation_types": {"type": "array", "items": {"type": "string"},
+                        "description": "Optional allowed relation vocabulary; invalid extraction is rejected."},
                 },
                 "required": ["text"],
             },
@@ -439,6 +447,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                     "max_triples_per_file": {
                         "type": "integer", "minimum": 1, "maximum": 200, "default": 30,
                     },
+                    "relation_types": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["path"],
             },
