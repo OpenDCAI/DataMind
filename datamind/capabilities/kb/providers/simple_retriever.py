@@ -42,3 +42,20 @@ class SimpleRetriever:
             extra={"query_len": len(query), "top_k": top_k, "hits": len(chunks)},
         )
         return chunks
+
+    async def aretrieve_at_version(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        filters: dict[str, Any] | None = None,
+        version: int = None
+    ) -> list[RetrievedChunk]:
+        validate_metadata_filter(filters)
+        vec = await self._embed.embed_query(query)
+        chunks = await self._store.query(vec, top_k=top_k, where=filters, version=version)
+        _log.info(
+            "retrieved",
+            extra={"query_len": len(query), "top_k": top_k, "hits": len(chunks)},
+        )
+        return chunks

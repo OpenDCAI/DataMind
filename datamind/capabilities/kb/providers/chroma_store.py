@@ -25,7 +25,7 @@ class ChromaVectorStore:
         dimension: int,
     ) -> None:
         import chromadb  # type: ignore
-
+        self.name = "chroma"
         self.dimension = dimension
         self._persist_dir = Path(persist_dir)
         self._persist_dir.mkdir(parents=True, exist_ok=True)

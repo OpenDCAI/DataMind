@@ -83,6 +83,9 @@ legacy = [
 ]
 
 # Dialect / provider extras — installed on demand, no hard requirement
+versioning = ["lancedb>=0.39", "pyarrow>=19"]
+cocoindex = ["lancedb>=0.39", "pyarrow>=19", "cocoindex>=1.0"]
+dolt = ["pymysql>=1.1", "mysql-connector-python>=9"]
 mysql = ["pymysql>=1.1", "cryptography>=42"]
 postgres = ["psycopg[binary]>=3.1"]
 voyage = ["voyageai>=0.2"]

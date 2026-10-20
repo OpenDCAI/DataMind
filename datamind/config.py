@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root — one up from `datamind/`.
@@ -260,6 +260,20 @@ class HooksConfig(BaseModel):
     # data_dir and cwd. List of absolute paths (or `~`-prefixed).
     path_allowlist_extra: list[str] = Field(default_factory=list)
 
+class KBConfig(BaseModel):
+    ingest_mode: Literal["direct", "cocoindex"] = "direct"
+    vector_store: Literal["chroma", "lancedb"] = "chroma"
+    lancedb_uri: str = "./lancedb_data"
+    cocoindex_inbox: str = "./cocoindex_inbox"
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if self.ingest_mode == "cocoindex" and self.vector_store != "lancedb":
+            raise ValueError(
+                "ingest_mode='cocoindex' requires vector_store='lancedb' "
+                f"(got vector_store='{self.vector_store}')"
+            )
+        return self
 
 # ---------------------------------------------------------------------------
 # Root settings
@@ -272,6 +286,7 @@ class Settings(BaseSettings):
     llm: LLMConfig
     embedding: EmbeddingConfig = EmbeddingConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
+    kb: KBConfig = KBConfig()
     graph: GraphConfig = GraphConfig()
     db: DBConfig = DBConfig()
     memory: MemoryConfig = MemoryConfig()
