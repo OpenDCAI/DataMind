@@ -127,6 +127,14 @@ async def test_unchanged_sources_reuse_embeddings_and_extraction(setup_workspace
     second = await workspace.update(str(source))
     assert second['reused_sources'] == 1
     assert (model.calls, embedding.calls) == calls
+    assert second['metrics']['sources_reused'] == 1
+    assert second['metrics']['sources_computed'] == 0
+    assert second['metrics']['embedding_calls'] == second['metrics']['graph_extraction_calls'] == 0
+    assert second['metrics']['materialization_ms'] > 0
+    report = workspace._settings_for(second['workspace_revision']).data.base_dir / 'build_metrics.json'
+    saved = json.loads(report.read_text())
+    assert saved['total_ms'] > 0 and saved['status'] == 'published'
+    assert saved['reported_embedding_tokens'] is None  # Fixture doesn't report usage.
 
 
 @pytest.mark.asyncio
@@ -164,6 +172,27 @@ async def test_transient_read_retry_stays_on_pinned_revision(setup_workspace):
         assert 'Alice' in str(result)
         assert reader.revision == first['workspace_revision']
         assert workspace.current_revision != reader.revision
+
+
+@pytest.mark.asyncio
+async def test_lexical_fallback_keeps_old_sources_after_new_publication(setup_workspace):
+    workspace, source, _, embedding = setup_workspace
+    workspace.settings.retrieval.strategy = 'hybrid'
+    workspace.settings.retrieval.vector_failure_fallback = 'bm25'
+    for i in range(5):
+        (source / f'filler{i}.md').write_text(f'unrelated document number {i}')
+    first = await workspace.update(str(source), surfaces=['kb'])
+    async with workspace.reader(first['workspace_revision'], read_retries=1) as reader:
+        (source/'a.md').write_text('Bob owns Project')
+        await workspace.update(str(source), surfaces=['kb'])
+        async def unavailable(query):
+            raise TimeoutError('embedding unavailable')
+        embedding.embed_query = unavailable
+        result = await reader.call('kb_search', query='Alice')
+        assert 'Alice owns' in str(result['results']) and 'Bob owns' not in str(result['results'])
+        assert result['retrieval']['degraded'] is True
+        assert result['retrieval']['retries'] == 1
+        assert result['retrieval']['events'][0]['workspace_revision'] == first['workspace_revision']
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,8 @@
 # Benchmark runner
 
+For paired read-fault and actual process-interruption experiments, see
+[Read recovery and robustness experiments](READ_RECOVERY.md).
+
 DataMind provides a dataset-neutral benchmark entry point for repeatable,
 long-running evaluations. Dataset adapters, official scorers, expected answers,
 and task-specific anomaly rules belong to the evaluation project that owns

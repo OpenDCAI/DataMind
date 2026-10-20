@@ -14,8 +14,12 @@ dispatches tool_use blocks to `registry.get(name).handler(**input)`.
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import replace
 
 from datamind.core.tools import ToolSpec, tool_provider_registry
+from datamind.core.context import RequestContext
+from datamind.core.logging import current_context, bind_context
+from datamind.core.recovery import recovery_summary
 
 from .service import KBService
 
@@ -23,8 +27,18 @@ from .service import KBService
 def build_kb_tools(kb: KBService) -> list[ToolSpec]:
     """Return the concrete ToolSpecs bound to this KBService instance."""
 
-    async def _search(query: str, top_k: int = 5, filters: dict | None = None) -> dict:
-        chunks = await kb.search(query, top_k=top_k, filters=filters)
+    async def _search_result(query, top_k, filters, version=None, historical=False):
+        parent = current_context()
+        ctx = replace(parent, extra={**parent.extra, "recovery_events": []}) if parent else RequestContext.new()
+        with bind_context(ctx):
+            try:
+                if not historical:
+                    chunks = await kb.search(query, top_k=top_k, filters=filters)
+                else:
+                    chunks = await kb.search_at_version(query, top_k=top_k, filters=filters, version=version)
+            finally:
+                if parent is not None:
+                    parent.extra.setdefault("recovery_events", []).extend(ctx.extra.get("recovery_events", []))
         return {
             "query": query,
             "top_k": top_k,
@@ -33,19 +47,14 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
             "total_count": None,
             "truncated": len(chunks) >= top_k,
             "next_cursor": None,
+            "retrieval": recovery_summary(ctx.extra.get("recovery_events", [])),
         }
 
+    async def _search(query: str, top_k: int = 5, filters: dict | None = None) -> dict:
+        return await _search_result(query, top_k, filters)
+
     async def _search_at_version(query: str, top_k: int = 5, filters: dict | None = None, version: int = None) -> dict:
-        chunks = await kb.search_at_version(query, top_k=top_k, filters=filters, version=version, )
-        return {
-            "query": query,
-            "top_k": top_k,
-            "results": chunks,
-            "count": len(chunks),
-            "total_count": None,
-            "truncated": len(chunks) >= top_k,
-            "next_cursor": None,
-        }
+        return await _search_result(query, top_k, filters, version, historical=True)
 
     async def _list_documents() -> dict:
         items = await kb.list_documents()
@@ -127,7 +136,7 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
         ),
     ]
 
-    if kb is not None and hasattr(kb, "vector_store") and kb.vector_store.name == "dolt":
+    if kb is not None and hasattr(kb, "vector_store") and kb.vector_store.name == "lancedb":
         # Versioned KB Tools
         tools.extend([
             ToolSpec(
