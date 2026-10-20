@@ -25,7 +25,7 @@ from datamind.capabilities.kb.indexer import _hash, _split_text
 from datamind.core.context import RequestContext
 from datamind.core.errors import CapabilityError, ConfigError, ExternalServiceError
 from datamind.core.logging import bind_context, current_context
-from datamind.core.protocols import GraphTriple
+from datamind.core.protocols import GraphTriple, GraphEvidence
 from datamind.core.recovery import recover_read, recovery_summary
 
 
@@ -131,7 +131,7 @@ class Workspace:
                               'version': 'sha256:' + _digest(path.read_bytes())})
         return inventory
 
-    async def update(self, path: str, *, surfaces=('kb', 'graph', 'db'), relation_types=None, max_triples_per_file=200) -> dict[str, Any]:
+    async def update(self, path: str, *, surfaces=('kb', 'graph', 'db'), relation_types=None, max_triples_per_file=200, graph_sources=None) -> dict[str, Any]:
         """Publish a generation and report logical compute/materialization costs.
 
         Metrics are per attempt, including unsuccessful attempts. Provider usage
@@ -150,7 +150,7 @@ class Workspace:
         try:
             with bind_context(ctx):
                 result = await self._update(path, surfaces=surfaces, relation_types=relation_types,
-                    max_triples_per_file=max_triples_per_file, metrics=metrics)
+                    max_triples_per_file=max_triples_per_file, metrics=metrics, graph_sources=graph_sources)
             metrics["status"] = "published"
             return {**result, "metrics": metrics}
         except BaseException as exc:
@@ -177,7 +177,7 @@ class Workspace:
                     # replace the original build error.
                     metrics["metrics_persisted"] = False
 
-    async def _update(self, path: str, *, surfaces, relation_types, max_triples_per_file, metrics) -> dict[str, Any]:
+    async def _update(self, path: str, *, surfaces, relation_types, max_triples_per_file, metrics, graph_sources=None) -> dict[str, Any]:
         """Prepare and publish one generation, retaining the previous one on failure.
 
         Cached complete-source results are reused. Index materialization is currently
@@ -197,12 +197,36 @@ class Workspace:
         inventory = await asyncio.to_thread(self._inventory, source)
         metrics['inventory_ms'] = (time.monotonic() - stage_started) * 1000
         metrics['sources_total'] = len(inventory)
+        external = None
+        if graph_sources is not None:
+            external = {}
+            expected = {item['uri']: item for item in inventory
+                        if Path(item['uri']).suffix.lower() in DOCUMENT_EXTS - TABLE_EXTS}
+            for entry in graph_sources:
+                uri = entry['uri']
+                if uri not in expected or uri in external or entry['version'] != expected[uri]['version']:
+                    raise ConfigError('Graph source must match the prepared inventory and content hash')
+                triples = [GraphTriple(**value) for value in entry['triples']]
+                if len(triples) > max_triples_per_file:
+                    raise ConfigError('Too many graph triples for source')
+                for triple in triples:
+                    if relation_types is not None and triple.relation not in relation_types:
+                        raise ConfigError('Graph relation is outside the requested vocabulary')
+                    triple.source = uri
+                    triple.evidence = [GraphEvidence(
+                        source_id='file:' + _digest(uri.encode()), source_version=entry['version'],
+                        locator={'uri': uri}, method='extracted', pipeline_version='codex-explicit-v1')]
+                external[uri] = {'triples': [t.model_dump(mode='json') for t in triples],
+                                 'truncated': bool(entry.get('truncated', False))}
+            if set(external) != set(expected):
+                raise ConfigError('Supply triples (including explicit empty lists) for every document source')
         pipeline = {'version': 'workspace-v1', 'surfaces': sorted(selected),
                     'embedding': self.settings.embedding.model_dump(mode='json', exclude={'api_key'}),
                     'model': self.settings.llm.fallback_model or self.settings.llm.model,
                     'chunk_size': self.settings.retrieval.chunk_size,
                     'chunk_overlap': self.settings.retrieval.chunk_overlap,
                     'relation_types': relation_types, 'max_triples_per_file': max_triples_per_file}
+        pipeline['graph_extraction'] = 'codex-explicit-v1' if external is not None else 'legacy-model'
         context = current_context()
         applied_skills = list(context.extra.get('applied_skills', {}).values()) if context else []
         pipeline['applied_skills'] = applied_skills
@@ -237,7 +261,8 @@ class Workspace:
                 snapshot.write_bytes(raw)
                 metrics['source_copy_ms'] += (time.monotonic() - stage_started) * 1000
                 source_id = 'file:' + _digest(item['uri'].encode())
-                cache_key = _digest(json.dumps([source_id, item['version'], pipeline_hash]).encode())
+                cache_key = _digest(json.dumps([source_id, item['version'], pipeline_hash,
+                    external.get(item['uri']) if external is not None else None], sort_keys=True).encode())
                 cache_path = self.root / 'checkpoints' / (cache_key + '.json')
                 stage_started = time.monotonic()
                 if cache_path.is_file():
@@ -262,7 +287,9 @@ class Workspace:
                             metrics['embedding_calls'] += 1
                             metrics['embedding_texts'] += len(parts)
                             prepared['vectors'] = await system.services.kb.embedding.embed_texts(parts)
-                    if 'graph' in selected and text and not is_table:
+                    if 'graph' in selected and external is not None:
+                        prepared.update(external.get(item['uri'], {'triples': [], 'truncated': False}))
+                    if 'graph' in selected and external is None and text and not is_table:
                         parts = _split_text(text, chunk_size=settings.retrieval.chunk_size, chunk_overlap=0)
                         for i, part in enumerate(parts, 1):
                             remaining = max_triples_per_file - len(prepared['triples'])
@@ -387,7 +414,12 @@ class WorkspaceReader:
         self.manifest = manifest
         self.revision = manifest['workspace_revision']
         mapping = {s['uri']: root / s['snapshot'] for s in manifest['sources']}
-        raw = system.retrieve.tools.get('raw_file_read')
+        direct = hasattr(system, 'read_tools')
+        tools = system.read_tools if direct else system.retrieve.tools
+        if direct:
+            system.tools = tools
+        self.tools = tools
+        raw = tools.get('raw_file_read')
         original = raw.handler
 
         async def read_snapshot(path: str, **kwargs):
@@ -398,9 +430,9 @@ class WorkspaceReader:
                     raise CapabilityError('workspace', 'raw evidence must belong to the pinned revision')
                 resolved = candidate
             return await original(path=str(resolved), **kwargs)
-        system.retrieve.tools.replace(replace(raw, handler=read_snapshot))
+        tools.replace(replace(raw, handler=read_snapshot))
 
-        inspect = system.retrieve.tools.get('workspace_inspect')
+        inspect = tools.get('workspace_inspect')
         original_inspect = inspect.handler
         source_root = Path(manifest['source_root'])
         snapshot_root = root / 'data' / 'profiles' / system.profile / 'uploads'
@@ -412,10 +444,10 @@ class WorkspaceReader:
             elif not candidate.is_relative_to(snapshot_root):
                 raise CapabilityError('workspace', 'inspection must belong to the pinned revision')
             return await original_inspect(path=str(candidate), **kwargs)
-        system.retrieve.tools.replace(replace(inspect, handler=inspect_snapshot))
+        tools.replace(replace(inspect, handler=inspect_snapshot))
 
-        if 'kb_search_at_version' in system.retrieve.tools:
-            historical = system.retrieve.tools.get('kb_search_at_version')
+        if 'kb_search_at_version' in tools:
+            historical = tools.get('kb_search_at_version')
             original_historical = historical.handler
             pinned = manifest['snapshots'].get('kb', {}).get('version')
 
@@ -423,23 +455,26 @@ class WorkspaceReader:
                 if version != pinned:
                     raise CapabilityError('workspace', 'select a workspace revision instead of another backend version')
                 return await original_historical(version=version, **kwargs)
-            system.retrieve.tools.replace(replace(historical, handler=search_pinned))
+            tools.replace(replace(historical, handler=search_pinned))
 
-        for name in system.retrieve.tools.names():
-            spec = system.retrieve.tools.get(name)
+        for name in tools.names():
+            spec = tools.get(name)
             original_handler = spec.handler
 
             async def retry_read(_handler=original_handler, _name=name, **kwargs):
                 return await recover_read(lambda: _handler(**kwargs), component=_name,
                                           retries=read_retries, manage_provider_retries=True)
-            system.retrieve.tools.replace(replace(spec, handler=retry_read))
+            tools.replace(replace(spec, handler=retry_read))
 
     async def call(self, name: str, **kwargs):
-        context = RequestContext.new(profile=self._system.profile)
+        parent = current_context()
+        context = replace(parent, extra=dict(parent.extra)) if parent else RequestContext.new(profile=self._system.profile)
         context.extra['workspace_revision'] = self.revision
         context.extra['query_deadline'] = time.monotonic() + self._timeout
         with bind_context(context):
-            return await self._system.retrieve.tools.get(name).handler(**kwargs)
+            if hasattr(self._system, 'read_tools'):
+                return await self._system.call(name, kwargs, context=context, read_only=True)
+            return await self.tools.get(name).handler(**kwargs)
 
     async def query(self, message: str, **kwargs):
         context = RequestContext.new(profile=self._system.profile)

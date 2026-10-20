@@ -168,6 +168,7 @@ def build_memory_service(
     *,
     llm_client: TextModelClient | None = None,
     embedding: EmbeddingProvider | None = None,
+    auto_embedding: bool = True,
 ) -> MemoryService:
     # Short-term
     st = ShortTermMemory(max_turns=settings.memory.short_term_turns)
@@ -183,7 +184,7 @@ def build_memory_service(
 
     # Embedding (optional — recall still works lexically without it)
     has_creds = bool(settings.embedding.api_key or settings.llm.api_key)
-    if embedding is None and settings.memory.long_term_enabled and has_creds:
+    if auto_embedding and embedding is None and settings.memory.long_term_enabled and has_creds:
         try:
             embedding = build_embedding(settings.embedding, fallback_llm=settings.llm)
         except Exception as exc:  # noqa: BLE001

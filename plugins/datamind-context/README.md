@@ -1,47 +1,36 @@
 # DataMind Context for Codex
 
-This directory is the official Codex adapter shipped with the DataMind repository.
-It connects Codex to the current `datamind` v1 runtime over MCP; it does not
-contain a second RAG engine, model client, or storage implementation.
-
-## Install from a DataMind checkout
+Codex is the main agent. This plugin connects it directly to DataMind's shared
+KB, SQL, graph, Skills and Memory tools over MCP. It does not start internal
+StoreAgent / RetrieveAgent loops.
 
 ```bash
-cd /path/to/DataMind
+python -m pip install -e .
 ./scripts/install_codex_plugin.sh
 ```
 
-The installer creates the Codex local marketplace entry and installs the current
-DataMind package into the repository virtual environment. Edit the generated
-`.env.datamind` file, or set the `DATAMIND__LLM__*` and
-`DATAMIND__EMBEDDING__*` variables before first use.
+The bootstrap resolves the checkout from DATAMIND_REPO_ROOT or its installation
+marker. The server is also available in installed wheels as `python -m datamind.mcp`.
+The official Codex SDK host uses that same server and procedure catalogue.
 
-## What the plugin exposes
+Start with `datamind_operation_begin`. Pass operation_id on subsequent calls:
 
-- `datamind_ask` — query through RetrieveAgent and return evidence.
-- `datamind_store` — write through StoreAgent and return receipts.
-- `datamind_use_folder` — ingest a file or directory through the KB ingest tools.
-- `datamind_graph_ingest` — build a graph from one or more text files with source provenance.
-- `datamind_graph_build_lineage` — build a deterministic file-dependency graph from a workspace.
-- `datamind_table_ingest` — import CSV/TSV or Excel sheets into the SQL surface.
-- `datamind_build_start` / `datamind_build_freeze` / `datamind_build_verify` / `datamind_build_export` — manage reproducible workspace builds.
-- `datamind_surface_ingest` — route documents, tables, and lineage into their appropriate surfaces.
-- `datamind_raw_file_read` — read paginated source or extracted document evidence with SHA-256.
-- `datamind_build_status` — inspect build state and verify frozen artifacts.
-- `datamind_workspace_inspect` — inspect workspace files, hashes, and candidate surfaces before building.
-- `datamind_rag_query` — perform direct vector search.
-- `datamind_graph_query` — ask a relationship question using graph tools.
-- `datamind_remember` — save durable memory.
-- `datamind_list_profiles` and `datamind_status` — inspect local state.
+- write mode: fetch `workspace-ingest` / `source-update`, prepare the folder,
+  read sources, extract triples with Codex, then workspace_publish;
+- read mode: pins a published workspace; fetch `workspace-retrieve`, query KB,
+  inspect SQL tables, discover graph_schema, then search entities and traverse;
+- pin_workspace=false: explicitly use independent live stores;
+- direct graph replacement: graph_replace_source validates the source hash;
+  graph_forget_source retracts source support without deleting the file.
 
-For the complete tutorial, configuration reference, and deployment guidance,
-see the [DataMind documentation site](https://opendcai.github.io/DataMind-Doc/).
+Skill fetches persist their version/hash into later write receipts. Inspect every
+results[].status before claiming success. Open a fresh read operation after a
+publication to read the new revision. Skills and Memory are live context outside
+the business-data snapshot.
 
+Graph/SQL/Skills/Memory direct tools require no DataMind conversation key. KB needs
+an embedding provider. Local snapshots support SQLite/NetworkX/Chroma/LanceDB.
+The new default tool catalogue replaces ask/store/graph_query/workspace_ask with
+main-agent direct calls. Python agent APIs remain available for compatibility.
 
-PDF 解析支持可选的 MinerU API 优先适配；未安装或解析失败时自动回退到 `pypdf`。通过 `DATAMIND_MINERU=off` 可强制只使用 `pypdf`，`DATAMIND_MINERU_API_URL` 和 `DATAMIND_MINERU_API_TIMEOUT_S` 可指定 API 地址和超时。
-
-For opt-in immutable workspace updates, use `datamind_workspace_update`, followed
-by `datamind_workspace_ask`. The latter pins a published revision throughout the
-question, including source evidence. Existing live-profile tools retain their
-behavior. Snapshot storage currently supports local SQLite/NetworkX and
-Chroma/LanceDB; see `docs/KNOWLEDGE_LIFECYCLE.md` in the repository for boundaries.
+See [architecture and SDK setup](../../README.md).

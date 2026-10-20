@@ -6,7 +6,10 @@ from pathlib import Path
 
 
 def persist_input(data_dir: Path, content: str, suffix: str) -> tuple[Path, str]:
-    raw = content.encode('utf-8')
+    return persist_bytes(data_dir, content.encode('utf-8'), suffix)
+
+
+def persist_bytes(data_dir: Path, raw: bytes, suffix: str) -> tuple[Path, str]:
     digest = hashlib.sha256(raw).hexdigest()
     root = data_dir / 'triplets' / 'evidence'
     root.mkdir(parents=True, exist_ok=True)

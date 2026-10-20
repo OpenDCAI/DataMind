@@ -59,6 +59,15 @@ class NetworkXGraphStore:
             },
         )
 
+    def schema(self) -> dict[str, Any]:
+        """Observed vocabulary, not a restrictive ontology."""
+        from collections import Counter
+        with self._state_lock:
+            types = Counter(attrs.get('type', 'entity') for _, attrs in self._g.nodes(data=True))
+            relations = Counter(attrs.get('relation', 'related') for _, _, attrs in self._g.edges(data=True))
+        return {'node_types': dict(sorted(types.items())), 'relations': dict(sorted(relations.items())),
+                'extensible': True, 'nodes': sum(types.values()), 'edges': sum(relations.values())}
+
     # ------------------------------------------------------------- persist
 
     def _load(self) -> None:

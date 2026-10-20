@@ -2002,6 +2002,7 @@ def build_ingest_service(
         chunk_size=settings.retrieval.chunk_size,
         chunk_overlap=settings.retrieval.chunk_overlap,
         ingest_mode=settings.kb.ingest_mode,
+        allowed_roots=[Path(p).expanduser() for p in settings.hooks.path_allowlist_extra],
     )
 
 

@@ -329,3 +329,15 @@ __all__ = [
     "AgentConfig",
     "HooksConfig",
 ]
+
+
+class DataLLMConfig(LLMConfig):
+    """Data-only execution never creates a conversational model client."""
+
+    api_key: SecretStr = SecretStr("")
+
+
+class DataSettings(Settings):
+    """Settings for direct tools; embedding credentials are still required for KB."""
+
+    llm: DataLLMConfig = Field(default_factory=DataLLMConfig)

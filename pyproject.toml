@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datamind"
-description = "Two-agent inference-time data system over RAG, Graph, DB, Skills, and Memory"
+description = "Shared workspace data layer for Codex over RAG, Graph, DB, Skills, and Memory"
 requires-python = ">=3.11"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "Apache-2.0"
@@ -37,6 +37,7 @@ dependencies = [
 
     # Config / validation / logging primitives
     "pydantic>=2.6",
+    "jsonschema>=4.0",
     "pydantic-settings>=2.2",
 
     # KB
@@ -83,6 +84,7 @@ legacy = [
 ]
 
 # Dialect / provider extras — installed on demand, no hard requirement
+codex = ["openai-codex>=0.163,<0.164"]
 versioning = ["lancedb>=0.39", "pyarrow>=19"]
 cocoindex = ["lancedb>=0.39", "pyarrow>=19", "cocoindex>=1.0"]
 dolt = ["pymysql>=1.1", "mysql-connector-python>=9"]

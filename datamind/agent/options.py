@@ -58,8 +58,8 @@ _log = get_logger("agent.assemble")
 class AgentServices:
     """Long-lived services shared by both agents."""
 
-    client: ToolCallingModelClient
-    fallback_client: TextModelClient
+    client: ToolCallingModelClient | None
+    fallback_client: TextModelClient | None
     embedding: EmbeddingProvider | None = None
     kb: KBService | None = None
     db: DBService | None = None
@@ -322,12 +322,13 @@ def _build_loop(
     return loop_type(client=client, tools=tools, config=config, hooks=hooks)
 
 
-async def build_datamind(
+async def _assemble(
     settings: Settings,
     *,
     enable: set[str] | None = None,
-) -> DataMind:
-    """Build both agents over one shared set of capability services."""
+    agent_runtime: bool = True,
+):
+    """Assemble shared services and tools, optionally attaching legacy agent loops."""
     defaults = {"kb", "db", "graph", "skills", "memory"}
     active = defaults if enable is None else set(enable)
     unknown = active - defaults
@@ -335,10 +336,10 @@ async def build_datamind(
         raise ValueError(f"Unknown DataMind surfaces: {sorted(unknown)}")
     settings.ensure_dirs()
 
-    client = build_model_client(settings.llm)
+    client = build_model_client(settings.llm) if agent_runtime else None
     fallback_protocol = settings.llm.fallback_protocol or settings.llm.protocol
     fallback_client = (
-        client if fallback_protocol == settings.llm.protocol
+        client if not agent_runtime or fallback_protocol == settings.llm.protocol
         else build_model_client(settings.llm, protocol=fallback_protocol)
     )
 
@@ -346,7 +347,7 @@ async def build_datamind(
     needs_embedding = bool(active & {"kb", "skills"}) or (
         "memory" in active and settings.memory.long_term_enabled
     )
-    if needs_embedding:
+    if needs_embedding and (agent_runtime or "kb" in active):
         embedding = build_embedding(settings.embedding, fallback_llm=settings.llm)
 
     kb = (
@@ -356,12 +357,14 @@ async def build_datamind(
     db = build_db_service(settings, llm_client=client) if "db" in active else None
     graph = build_graph_service(settings) if "graph" in active else None
     skills = (
-        build_skills_service(settings, embedding=embedding)
+        (build_skills_service(settings, embedding=embedding) if agent_runtime else SkillsService(
+            skills_dir=settings.data.skills_dir, profile_skills_dir=settings.data.profile_skills_dir,
+            embedding=None, vector_store=None))
         if "skills" in active else None
     )
     memory = (
         build_memory_service(
-            settings, llm_client=fallback_client, embedding=embedding,
+            settings, llm_client=fallback_client, embedding=embedding, auto_embedding=agent_runtime,
         )
         if "memory" in active else None
     )
@@ -424,6 +427,22 @@ async def build_datamind(
     guidance = {"skill_list", "skill_search", "skill_get", "workspace_inspect", "raw_file_read"}
     store_tools.extend([catalogue.get(name) for name in sorted(guidance & set(catalogue.names()))])
     hooks = _build_hook_chain(settings)
+    if not agent_runtime:
+        from datamind.data_plane import DataPlane, MODEL_TOOLS
+        from datamind.direct_tools import workspace_tools, graph_source_tools
+        extra = ToolRegistry()
+        extra.extend(workspace_tools(settings, active))
+        if graph is not None:
+            extra.extend(graph_source_tools(ingest))
+        extra_reads = extra.select(access={ToolAccess.READ, ToolAccess.UTILITY})
+        extra_writes = with_receipts(extra.select(access={ToolAccess.WRITE}), ledger)
+        direct = ToolRegistry()
+        direct.extend([retrieve_tools.get(n) for n in retrieve_tools.names() if n not in MODEL_TOOLS])
+        direct.extend([store_tools.get(n) for n in raw_store_tools.names() if n not in MODEL_TOOLS])
+        direct.extend([extra_reads.get(n) for n in extra_reads.names()])
+        direct.extend([extra_writes.get(n) for n in extra_writes.names()])
+        return DataPlane(services=services, tools=direct, hooks=hooks, ledger=ledger,
+                         profile=settings.data.profile)
 
     retrieve_prompt = build_retrieve_system_prompt(
         [retrieve_tools.get(name) for name in retrieve_tools.names()]
@@ -475,6 +494,11 @@ async def build_datamind(
         services=services,
         profile=settings.data.profile,
     )
+
+
+async def build_datamind(settings: Settings, *, enable: set[str] | None = None) -> DataMind:
+    """Legacy two-agent runtime. New Codex integrations use build_data_plane."""
+    return await _assemble(settings, enable=enable, agent_runtime=True)
 
 
 async def build_agent(

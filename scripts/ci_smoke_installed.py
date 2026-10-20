@@ -19,3 +19,22 @@ assert settings.kb.ingest_mode == "direct"
 checkout = Path(__file__).resolve().parents[1]
 assert not Path(datamind.__file__).resolve().is_relative_to(checkout), "imported checkout instead of wheel"
 print(f"Installed DataMind {datamind.__version__}: resources and optional-provider imports OK")
+
+from datamind.mcp import definitions
+from datamind.config import DataSettings
+from datamind.data_plane import build_data_plane
+import asyncio
+import tempfile
+
+assert 'datamind_graph_schema' in definitions()
+assert package.joinpath('skills/workspace-retrieve/SKILL.md').is_file()
+async def direct_smoke():
+    with tempfile.TemporaryDirectory() as root:
+        cfg = DataSettings(_env_file=None, data={'base_dir': root})
+        data = await build_data_plane(cfg, enable={'graph'})
+        try:
+            assert (await data.call('graph_schema'))['edges'] == 0
+        finally:
+            await data.aclose()
+asyncio.run(direct_smoke())
+print('Installed data-only MCP catalogue, retrieval Skill and no-model graph runtime OK')

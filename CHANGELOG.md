@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.0 — Direct Codex data layer
+
+- Local Codex plugin and optional official `openai-codex` SDK host share direct
+  KB/SQL/graph/Skills/Memory tools. No nested StoreAgent/RetrieveAgent on these paths.
+- Operation IDs persist Skill references and pin workspace versions across tool calls.
+- Codex extracts graph assertions; prepare/publish validates source hashes and
+  retains atomic publication, checkpoints and immutable readers.
+- Added graph vocabulary discovery and source-scoped replacement/retraction.
+- Updated ingestion/update/retrieval Skills, migration docs and required SDK/MCP CI.
+- Existing CLI, HTTP/UI and Python two-agent APIs remain compatibility entry points.
+
+
 All notable changes to DataMind are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow
 [Semantic Versioning](https://semver.org/).
