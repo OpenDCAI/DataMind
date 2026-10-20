@@ -102,3 +102,20 @@ async def test_external_file_edits_replace_one_managed_copy_and_keep_other_origi
     rows = await ingest._kb.vector_store.get_all_texts()
     assert len(rows) == 2
     assert {row[1] for row in rows} == {"new team a", "team b evidence"}
+
+
+@pytest.mark.parametrize("sql,limit,offset", [
+    ("SELECT * FROM t", 11, None),
+    ("SELECT * FROM t LIMIT 2 OFFSET 3", 2, 3),
+    ("SELECT * FROM t LIMIT 100 OFFSET 3", 11, 3),
+    ("SELECT * FROM t LIMIT 0", 0, None),
+    ("SELECT id FROM a UNION ALL SELECT id FROM b", 11, None),
+])
+def test_dolt_limits_original_select_without_derived_table(sql, limit, offset):
+    from sqlglot import parse_one
+    bounded = DoltDialect()._bound_query(sql, 11)
+    tree = parse_one(bounded, read="mysql")
+    assert int(tree.args["limit"].expression.this) == limit
+    assert "_dm_safe" not in bounded
+    if offset is not None:
+        assert int(tree.args["offset"].expression.this) == offset

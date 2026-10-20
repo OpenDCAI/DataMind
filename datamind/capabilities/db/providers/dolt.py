@@ -376,6 +376,28 @@ class DoltDialect(BaseSQLDialect):
 
         return await asyncio.to_thread(_run)
 
+    def _bound_query(self, sql: str, row_limit: int) -> str:
+        # Dolt 2.5 can return an OK packet instead of rows for a derived-table
+        # wrapper that projects _source_file. Bound the original SELECT AST,
+        # preserving smaller LIMITs and OFFSET, rather than nesting it.
+        from sqlglot import exp, parse
+        try:
+            statements = parse(sql, read="mysql")
+        except Exception as exc:
+            raise CapabilityError("db", "cannot parse Dolt read query") from exc
+        if len(statements) != 1 or not isinstance(statements[0], exp.Query):
+            raise CapabilityError("db", "Dolt reads require one SELECT")
+        tree = statements[0]
+        if tree.find(exp.Into) is not None:
+            raise CapabilityError("db", "Dolt reads cannot write output")
+        limit = tree.args.get("limit")
+        if limit is not None:
+            value = limit.expression
+            if not isinstance(value, exp.Literal) or not value.is_int or int(value.this) < 0:
+                raise CapabilityError("db", "Dolt LIMIT must be a nonnegative integer")
+            row_limit = min(row_limit, int(value.this))
+        return tree.limit(row_limit).sql(dialect="mysql")
+
     def _inject_as_of(self, sql: str, version: str) -> str:
         """Version physical table references, including JOINs, without rewriting literals or CTE names."""
         from sqlglot import exp, parse
@@ -426,10 +448,9 @@ class DoltDialect(BaseSQLDialect):
         validated against a restricted charset first.
         """
         version = self.validate_version(version)
-        sql = self._inject_as_of(sql, version)
-
-        return await super().execute_readonly(
-            engine, sql,
-            row_limit=row_limit,
-            timeout_s=timeout_s,
+        self._validate_readonly_sql(sql, row_limit)
+        bounded = self._bound_query(sql, row_limit + 1)
+        bounded = self._inject_as_of(bounded, version)
+        return await self._execute_bounded_readonly(
+            engine, bounded, row_limit=row_limit, timeout_s=timeout_s,
         )
