@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.0 — Unified Codex host
+
+- CLI, HTTP and browser UI now use one official Codex SDK host for reads and writes.
+- Removed StoreAgent/RetrieveAgent classes, assembly, role prompts and Claude SDK/CCR adapter.
+- Data services assemble independently of all agent loops and conversation credentials.
+- Read requests bind profile/session, access mode and one published revision below the prompt boundary.
+- Request-scoped traces preserve actual MCP evidence and receipts under Codex code mode; cancellation closes active SDK turns.
+- Migrated examples/benchmarks, retained checkpoint and fault tests, and updated gateway/config migration guidance.
+
+
 ## 1.2.0 — Direct Codex data layer
 
 - Local Codex plugin and optional official `openai-codex` SDK host share direct

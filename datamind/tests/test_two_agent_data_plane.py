@@ -1,4 +1,4 @@
-"""Two-agent contracts and StoreAgent receipt behaviour."""
+"""Data contracts and receipt behaviour independent of the main agent."""
 from __future__ import annotations
 
 from pathlib import Path

@@ -55,3 +55,20 @@ receipt statuses, SQL/graph answers, embedding-backed KB search, atomic
 publication, and an old reader surviving a new publication. CI covers deterministic
 contracts and offline SDK tool discovery; it does not spend gateway inference
 credits or prove a particular external gateway's availability.
+
+## CLI / HTTP / UI host configuration (2.0)
+
+These entry points share `CodexHost`. Configure `DATAMIND__CODEX__MODEL`,
+`BASE_URL`, `API_KEY`, `WORKSPACE`, `REASONING_EFFORT`, `APPROVAL_MODE`,
+`PREAPPROVED_TOOLS`, and `TIMEOUT_S` in the nested environment settings.
+`datamind info` and direct data tools do not start a model. With no embedding
+configuration the server can still expose graph, SQL, Skills and Memory; KB
+operations require their separate embedding provider.
+
+HTTP read requests select a published revision at admission. MCP calls enforce
+that version, the request's read/write mode and its session binding. Explicit
+historical reads can pass `revision`. Requests against independent live stores
+remain explicitly unversioned. Code-mode tool wrappers do not remove receipts
+or provenance: request-scoped MCP traces are collected by the host and deleted
+after delivery. Gateway credentials stay in the SDK process environment;
+only data configuration and request context are forwarded to the MCP child.

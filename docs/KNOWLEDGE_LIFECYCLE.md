@@ -67,7 +67,7 @@ async with workspace.reader(published["workspace_revision"]) as reader:
     edges = await reader.call("graph_neighbors", entity="Project A")
 ```
 
-`workspace_update` is also a StoreAgent tool in native and Agent SDK backends.
+Codex prepares graph assertions externally and calls `workspace_publish` through direct data tools. The old internally generative `workspace_update` is not exposed to the main agent.
 The Codex adapter exposes `datamind_workspace_update` and
 `datamind_workspace_ask`. Legacy `datamind_use_folder` and normal live queries
 retain their unversioned semantics; a workspace update publishes a separate
@@ -122,8 +122,8 @@ their services and must not be counted as validated when skipped.
 ## Ingestion Skills
 
 `workspace-ingest` and `source-update` ship in both the checkout and wheel skill
-catalogs. StoreAgent has explicitly allowed Skill lookup and input-inspection
-reads; business KB/DB/Graph query tools remain RetrieveAgent-only. Skills guide
+catalogs. The same main Codex agent can inspect and read data while preparing an
+explicitly authorized write. Read-only operations reject writes in code. Skills guide
 routing, schemas and receipt inspection; persistence invariants stay in tools.
 A successfully fetched Skill contributes its name, declared version and content
 hash to subsequent write receipts in that store turn. Fetching records procedural

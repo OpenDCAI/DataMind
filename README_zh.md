@@ -16,9 +16,9 @@ SQL 生成和最终回答；DataMind 负责数据工具、证据、写入回执�
                  证据 / 回执 / Workspace 版本
 ```
 
-默认插件和新 Codex SDK 入口不再启动内部 StoreAgent／RetrieveAgent。旧 Python API、
-CLI 和 HTTP/UI 仍作为兼容入口保留。旧配置 `agent.backend=sdk` 指 Claude Agent SDK，
-与新的官方 Codex SDK 集成不同。
+插件、官方 Codex SDK、CLI、HTTP 和 UI 现在共用同一个 Codex 宿主和数据层。
+StoreAgent／RetrieveAgent 类、角色 prompt 和 Claude SDK／CCR Agent 入口已删除。
+通用 native loop 仅保留作实验基线，产品入口不再组装它们。
 
 ## 如何使用
 
@@ -96,11 +96,25 @@ Skills、Memory 属于实时上下文，不在业务数据快照中。
 或用 `graph_traverse` 做有边数和跳数上限的遍历。原文放 KB，精确数值和系列放 SQL。
 最终回答由主 Codex 整合证据完成。
 
-## 兼容和测试
+## CLI／HTTP／UI 与测试
 
 旧插件的 ask/store/graph_query/workspace_ask 由主 Codex 直接调用数据工具代替；
 旧 workspace_update 改用 prepare → Codex 抽取 → publish。
-旧双 Agent Python、CLI、HTTP/UI 的使用见[兼容运行时](./docs/LEGACY_RUNTIME.md)。
+旧 Python 双 Agent API 已删除，替代方法见[2.0 迁移说明](./docs/LEGACY_RUNTIME.md)。
+CLI、HTTP 和 UI 已接入同一个 Codex 宿主；读请求在开始时固定版本，写请求走同一套数据工具和回执。
+
+```bash
+pip install -e '.[codex]'
+datamind info
+datamind ask "项目负责人是谁？"
+datamind store "导入这个文件"
+datamind chat  # /store 允许写入，/new 清空上下文
+python -m uvicorn datamind.server:app --host 127.0.0.1 --port 8000
+```
+
+API 支持指定 `revision` 读取保留的历史快照。查询只读限制、会话身份和固定版本
+通过 MCP 上下文在数据层执行。Codex 使用代码模式时，服务仍会收集真实数据调用的
+证据和回执。新版本使用 `DATAMIND__CODEX__*` 配置主 Agent。
 
 ```bash
 pip install -e '.[dev,codex]'

@@ -2,7 +2,7 @@
 
 Two concrete loops live alongside:
 - `loop_native.py` — `NativeAgentLoop` on the `anthropic` SDK
-- `loop_sdk.py`    — `SdkAgentLoop` on `claude-agent-sdk` (via CCR)
+- `loop_openai.py` — protocol-neutral OpenAI baseline for experiments
 
 Both emit the same `AgentEvent` stream and speak `AgentLoopProtocol` so
 the server / CLI / frontend are agnostic to which is active.
@@ -98,7 +98,7 @@ class AgentLoopProtocol(Protocol):
             tool_trace: list   — ordered tool calls made during the turn
             surfaces_used: list — data surfaces touched during the turn
             evidence: list     — normalized retrieval evidence (when available)
-            receipts: list     — StoreAgent write receipts (when available)
+            receipts: list     — data write receipts (when available)
         """
         ...
 

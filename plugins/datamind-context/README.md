@@ -31,6 +31,6 @@ the business-data snapshot.
 Graph/SQL/Skills/Memory direct tools require no DataMind conversation key. KB needs
 an embedding provider. Local snapshots support SQLite/NetworkX/Chroma/LanceDB.
 The new default tool catalogue replaces ask/store/graph_query/workspace_ask with
-main-agent direct calls. Python agent APIs remain available for compatibility.
+main-agent direct calls. CLI, HTTP and UI now use the same main Codex host; old dual-agent Python APIs have been removed in 2.0.
 
 See [architecture and SDK setup](../../README.md).

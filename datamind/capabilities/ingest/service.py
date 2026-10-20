@@ -1829,6 +1829,8 @@ class IngestService:
         )
         if relation_types:
             prompt += "Allowed relations: " + ", ".join(relation_types) + ".\n"
+        if self._client is None:
+            raise CapabilityError('graph', 'Codex must supply extracted triples; no internal extraction model is configured')
         raw = (await self._client.generate_text(
             prompt + "Text:\n---\n" + text, model=self._model,
             max_tokens=2048, temperature=0.0,

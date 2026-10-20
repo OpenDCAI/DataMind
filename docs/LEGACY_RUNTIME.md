@@ -1,35 +1,47 @@
-# Compatibility runtime
+# Migrating to the unified Codex host (2.0)
 
-The default Codex plugin and new `datamind.codex.CodexSession` use direct data
-operations. This page describes the older built-in agent runtime, retained for
-existing applications and benchmark comparisons.
+The older two-agent product runtime has been removed. This is a breaking Python
+API change; it is not a delayed rollout or an automatic fallback mechanism.
+
+| Previous entry | Replacement |
+| --- | --- |
+| `build_datamind(Settings())` plus `query` / `ingest` | `CodexHost(DataSettings())` plus `query` / `ingest` |
+| `system.retrieve.tools.get(...).handler(...)` | `data.call(name, arguments, read_only=True)` |
+| `system.store.tools.get(...).handler(...)` | `data.call(name, arguments)` with hooks and business-write receipts |
+| StoreAgent / RetrieveAgent role prompts | one main Codex agent plus ingestion/update/retrieval Skills |
+| `agent.backend=native/sdk` and Claude SDK/CCR | `DATAMIND__CODEX__*` and the official `openai-codex` SDK |
+| model-extracting Workspace builds | Codex-prepared graph_sources, then `Workspace.update` or MCP prepare/publish |
 
 ```python
-from datamind.agent import build_datamind
-from datamind.config import Settings
+from datamind.config import DataSettings
+from datamind.host import CodexHost
 
-async def answer():
-    system = await build_datamind(Settings())
+async def run():
+    host = CodexHost(DataSettings())
     try:
-        await system.ingest("Remember weekly reports use Chinese.")
-        return await system.query("What language should reports use?")
+        return await host.query('Summarize the workspace with evidence.')
     finally:
-        await system.aclose()
+        await host.aclose()
 ```
 
-Configure `DATAMIND__LLM__API_KEY`, `API_BASE`, `MODEL` and `PROTOCOL` for
-Anthropic Messages or OpenAI Chat Completions. `agent.backend=native` chooses
-the built-in loop; `agent.backend=sdk` means the old Claude Agent SDK/CCR path.
-Neither setting selects the official Codex SDK.
+Root launchers `python main.py` (chat by default) and `python server.py` also
+delegate to the shared host; `uvicorn server:app` exports the same FastAPI app.
+The old v0.1 endpoint/event shapes are not retained: update clients to the
+[current HTTP contract](STABLE_API.md). Existing local data is not deleted or
+automatically republished by this migration.
 
-`datamind chat`, `python -m uvicorn datamind.server:app --port 8000`, and existing
-HTTP ask/store/chat endpoints still use this compatibility runtime. StoreAgent
-receives receipt-wrapped writes and procedural/input reads; RetrieveAgent receives
-read/utility tools. Existing graph extraction and NL2SQL helpers remain available
-here. Direct Codex callers perform those reasoning steps in the main agent.
+The existing package CLI commands and HTTP ask/store/chat endpoints remain, backed by
+that same host. The browser UI retains upload, evidence and receipt flows.
+Graph/SQL/Skills/Memory data operations and `datamind info` do not require a
+conversation model key. Natural-language commands require the Codex SDK/login
+or an explicitly configured Responses-compatible gateway.
 
-Existing `Workspace(settings).update(...)` retains legacy model extraction when
-no externally prepared graph_sources are supplied. New direct callers build a
-Workspace with `builder=build_data_plane` and supply explicit graph_sources, or
-use the default MCP prepare/publish tools. Snapshots and direct live writes are
-separate in both integrations.
+Read requests bind a Workspace revision at admission and reject write operations
+below the prompt boundary. No published snapshot means an explicitly live read
+scope. Data writes and immutable snapshot publication remain separate. Source
+checkpoints, failed-build isolation, pinned raw evidence and rollback are retained.
+
+Generic native-loop classes remain under `datamind.agent` solely as benchmark
+primitives; product services do not use them. Existing capability utilities may
+receive an explicit text client for custom pipelines or tests; the data builder
+never constructs a conversation client on its own.

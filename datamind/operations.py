@@ -21,6 +21,9 @@ class OperationStore:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS operations (
                     id TEXT PRIMARY KEY, session TEXT NOT NULL, revision TEXT, mode TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS request_events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, payload TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS request_events_id ON request_events(request_id);
                 CREATE TABLE IF NOT EXISTS skills (
                     operation TEXT NOT NULL, name TEXT NOT NULL, reference TEXT NOT NULL,
                     PRIMARY KEY(operation, name));
@@ -57,3 +60,19 @@ class OperationStore:
             for name, ref in context.extra.get('applied_skills', {}).items():
                 db.execute('INSERT OR REPLACE INTO skills VALUES (?, ?, ?)',
                            (token, name, json.dumps(ref)))
+
+
+    def record_event(self, request_id, payload):
+        """Optional request-scoped transport trace; the host deletes it after delivery."""
+        if request_id is None:
+            return
+        with self.connect() as db:
+            db.execute('INSERT INTO request_events(request_id,payload) VALUES (?,?)',
+                       (request_id,json.dumps(payload,ensure_ascii=False,default=str)))
+
+    def take_events(self, request_id):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows=db.execute('SELECT payload FROM request_events WHERE request_id=? ORDER BY seq', (request_id,)).fetchall()
+            db.execute('DELETE FROM request_events WHERE request_id=?',(request_id,))
+        return [json.loads(row[0]) for row in rows]

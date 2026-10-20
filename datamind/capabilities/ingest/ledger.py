@@ -1,4 +1,4 @@
-"""Idempotent receipt ledger for StoreAgent tool calls."""
+"""Idempotent receipt ledger for authorized data writes."""
 from __future__ import annotations
 
 import asyncio
@@ -162,6 +162,8 @@ class IngestLedger:
     def _append(self, receipt: IngestReceipt) -> None:
         context = current_context()
         if context is not None:
+            receipt.session_id = context.session_id
+            receipt.request_id = context.extra.get('host_request_id')
             receipt.applied_skills = list(context.extra.get("applied_skills", {}).values())
         payload = receipt.model_dump_json()
         # SQLite is the durable receipt store; the serialized JSONL append remains
@@ -289,7 +291,7 @@ class IngestLedger:
 
 
 def with_receipts(registry: ToolRegistry, ledger: IngestLedger) -> ToolRegistry:
-    """Wrap every StoreAgent tool so its result is an IngestReceipt."""
+    """Wrap every write tool so its result is an IngestReceipt."""
     wrapped = ToolRegistry()
     for original in (registry.get(name) for name in registry.names()):
         async def _handler(

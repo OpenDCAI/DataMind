@@ -1,25 +1,4 @@
-"""FastAPI HTTP server.
-
-Endpoints:
-    POST /api/chat           — stream a RetrieveAgent answer over SSE
-    POST /api/store          — run StoreAgent and return its receipt summary
-    POST /api/ask            — non-streaming convenience (full response JSON)
-    GET  /api/health         — process liveness + config snapshot
-    GET  /api/tools          — list registered tools (name/description/schema)
-    POST /api/kb/reindex     — rebuild the KB index
-    GET  /api/kb/documents   — list docs under the active profile
-    GET  /api/memory/:ns     — peek into a memory namespace
-    GET  /api/graph/stats    — graph stats
-
-Streaming uses true SSE; each AgentEvent becomes one `data: {...}\n\n` frame.
-
-Design:
-- One DataMind system (StoreAgent + RetrieveAgent) per process, built at startup.
-- No request-scoped globals — each agent is concurrency-safe because
-  each call threads through its own `history=[]` parameter.
-- Session identity comes from the `X-Session-Id` header (or cookie), not a
-  server-side map, so horizontal scaling is trivial.
-"""
+"""FastAPI adapter: Codex handles natural-language requests; DataMind owns data tools."""
 from __future__ import annotations
 
 import json
@@ -34,7 +13,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from datamind import __version__
-from datamind.agent import DataMind, build_datamind
+from datamind.data_plane import DataPlane, build_data_plane
+from datamind.host import CodexHost
+from datamind.workspace import Workspace
+from datamind.config import DataSettings
 from datamind.config import Settings
 from datamind.core.context import RequestContext
 from datamind.core.logging import bind_context
@@ -47,7 +29,8 @@ from datamind.core.logging import setup_logging
 class AppState:
     """Container held on `app.state` — no module-level globals."""
 
-    system: DataMind | None = None
+    data: DataPlane | None = None
+    host: CodexHost | None = None
     settings: Settings | None = None
 
 
@@ -55,16 +38,22 @@ class AppState:
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging("INFO")
     st = AppState()
-    st.settings = Settings()
+    st.settings = DataSettings()
     st.settings.ensure_dirs()
-    st.system = await build_datamind(st.settings)
-    await st.system.warmup()
+    active = {'graph', 'db', 'skills', 'memory'}
+    if st.settings.embedding.api_key or st.settings.embedding.provider == 'huggingface':
+        active.add('kb')
+    st.data = await build_data_plane(st.settings, enable=active)
+    await st.data.warmup()
+    st.host = CodexHost(st.settings)
     app.state.datamind = st
     try:
         yield
     finally:
-        if st.system is not None:
-            await st.system.aclose()
+        if st.host is not None:
+            await st.host.aclose()
+        if st.data is not None:
+            await st.data.aclose()
 
 
 app = FastAPI(title="DataMind", version=__version__, lifespan=_lifespan)
@@ -110,7 +99,7 @@ if _STATIC_DIR is not None:
 
 def _state(request: Request) -> AppState:
     st: AppState = request.app.state.datamind
-    if st.system is None or st.settings is None:
+    if st.data is None or st.host is None or st.settings is None:
         raise HTTPException(503, "Agent not ready")
     return st
 
@@ -125,6 +114,7 @@ def _session_id(x_session_id: str | None = Header(default=None)) -> str:
 class AskRequest(BaseModel):
     message: str = Field(..., min_length=1)
     history: list[dict] | None = None
+    revision: str | None = Field(default=None,min_length=1,max_length=128)
 
 
 class AskResponse(BaseModel):
@@ -136,45 +126,30 @@ class AskResponse(BaseModel):
     receipts: list[dict] = Field(default_factory=list)
     surfaces_used: list[str] = Field(default_factory=list)
     tool_trace: list[dict] = Field(default_factory=list)
+    workspace_revision: str | None = None
+    request_id: str | None = None
+    recovery: dict = Field(default_factory=dict)
 
 
 # ------------------------------------------------------------- endpoints
 
 
-@app.get("/api/health")
+@app.get('/api/health')
 async def health(st: AppState = Depends(_state)) -> dict:
-    return {
-        "status": "ok",
-        "profile": st.settings.data.profile,
-        "llm_protocol": st.settings.llm.protocol,
-        "model": st.settings.llm.model,
-        "embedding": st.settings.embedding.model,
-        "db_dialect": st.settings.db.dialect,
-        "retrieve_tools": len(st.system.retrieve.tools),
-        "store_tools": len(st.system.store.tools),
-        "revision": st.system.store.revision,
-    }
+    return {'workspace_revision': Workspace(st.settings).current_revision, 'status': 'ok', 'backend': 'codex', 'model': st.settings.codex.model,
+            'profile': st.settings.data.profile, 'version': __version__,
+            'tools': len(st.data.tools), 'revision': st.data.revision,
+            'kb_available': st.data.services.kb is not None,
+            'embedding': st.settings.embedding.model, 'db_dialect': st.settings.db.dialect}
 
 
-@app.get("/api/tools")
+@app.get('/api/tools')
 async def list_tools(st: AppState = Depends(_state)) -> dict:
-    out = []
-    for role, registry in (
-        ("retrieve", st.system.retrieve.tools),
-        ("store", st.system.store.tools),
-    ):
-        for name in registry.names():
-            spec = registry.get(name)
-            out.append({
-                "name": spec.name,
-                "role": role,
-                "surface": spec.metadata.get("surface"),
-                "access": spec.metadata.get("access"),
-                "description": spec.description,
-                "group": spec.metadata.get("group"),
-                "input_schema": spec.input_schema,
-            })
-    return {"tools": out, "count": len(out)}
+    out = [{'name': spec.name, 'role': spec.access.value, 'surface': spec.metadata.get('surface'),
+            'access': spec.access.value, 'description': spec.description,
+            'group': spec.metadata.get('group'), 'input_schema': spec.input_schema}
+           for spec in (st.data.tools.get(name) for name in st.data.tools.names())]
+    return {'tools': out, 'count': len(out)}
 
 
 @app.post("/api/ask", response_model=AskResponse)
@@ -185,9 +160,10 @@ async def ask(
 ) -> AskResponse:
     context = RequestContext(session_id=session, profile=st.settings.data.profile)
     with bind_context(context):
-        result = await st.system.retrieve.loop.run_turn(
-            user_message=req.message,
+        result = await st.host.query(
+            req.message,
             history=req.history or [],
+            workspace_revision=req.revision,
         )
     return AskResponse(
         answer=result["answer"],
@@ -198,6 +174,8 @@ async def ask(
         receipts=result.get("receipts", []),
         surfaces_used=result.get("surfaces_used", []),
         tool_trace=result.get("tool_trace", []),
+        workspace_revision=result.get("workspace_revision"),
+        request_id=result.get("request_id"), recovery=result.get("recovery", {}),
     )
 
 
@@ -207,11 +185,13 @@ async def store(
     st: AppState = Depends(_state),
     session: str = Depends(_session_id),
 ) -> AskResponse:
-    """Ask StoreAgent to route and persist data across the five surfaces."""
+    """Ask the main Codex agent to persist data through the shared data tools."""
+    if req.revision is not None:
+        raise HTTPException(400, 'Published revisions are read-only; write to live data and publish a new revision')
     context = RequestContext(session_id=session, profile=st.settings.data.profile)
     with bind_context(context):
-        result = await st.system.store.loop.run_turn(
-            user_message=req.message,
+        result = await st.host.ingest(
+            req.message,
             history=req.history or [],
         )
     return AskResponse(
@@ -223,6 +203,8 @@ async def store(
         receipts=result.get("receipts", []),
         surfaces_used=result.get("surfaces_used", []),
         tool_trace=result.get("tool_trace", []),
+        workspace_revision=result.get("workspace_revision"),
+        request_id=result.get("request_id"), recovery=result.get("recovery", {}),
     )
 
 
@@ -236,12 +218,13 @@ async def chat(
         context = RequestContext(session_id=session, profile=st.settings.data.profile)
         with bind_context(context):
             try:
-                async for event in st.system.retrieve.loop.stream_turn(
-                    user_message=req.message,
+                async for event in st.host.stream(
+                    req.message,
                     history=req.history or [],
+                    workspace_revision=req.revision,
                 ):
                     payload = json.dumps(
-                        {"type": event.type, **event.data},
+                        event,
                         ensure_ascii=False,
                     )
                     yield f"data: {payload}\n\n".encode("utf-8")
@@ -265,13 +248,25 @@ async def chat(
 
 @app.post("/api/kb/reindex")
 async def kb_reindex(st: AppState = Depends(_state)) -> dict:
-    """Compatibility endpoint routed through StoreAgent's receipt boundary."""
-    return await st.system.store.tools.get("kb_reindex").handler()
+    """Explicit data-tool endpoint with hooks and a write receipt."""
+    if st.data.services.kb is None:
+        raise HTTPException(503,"Configure an embedding provider before rebuilding KB")
+    context = RequestContext.new(profile=st.settings.data.profile)
+    with bind_context(context):
+        return await st.data.call("kb_reindex")
 
 
 @app.get("/api/kb/documents")
 async def kb_documents(st: AppState = Depends(_state)) -> dict:
-    items = await st.system.services.kb.list_documents()
+    workspace=Workspace(st.settings)
+    revision=workspace.current_revision
+    if revision and 'kb' in workspace.manifest(revision)['surfaces']:
+        async with workspace.reader(revision,enable={'kb'}) as reader:
+            items=await reader._system.services.kb.list_documents()
+    else:
+        if st.data.services.kb is None:
+            raise HTTPException(503, 'Configure an embedding provider before using KB tools')
+        items = await st.data.services.kb.list_documents()
     return {"count": len(items), "items": items}
 
 
@@ -288,15 +283,22 @@ async def memory_peek(
     For session-scoped peeks pass session_id explicitly via a query param if
     that becomes useful — the UI today only browses by tenant.
     """
+    if namespace != st.settings.data.profile:
+        raise HTTPException(403, 'This server is bound to a different profile')
     if not query:
         query = " "  # any string — recall ranks every row lexically if no embedding
-    results = await st.system.services.memory.recall(query, profile=namespace, top_k=top_k)
+    results = await st.data.services.memory.recall(query, profile=namespace, top_k=top_k)
     return {"profile": namespace, "query": query, "results": results}
 
 
 @app.get("/api/graph/stats")
 async def graph_stats(st: AppState = Depends(_state)) -> dict:
-    return st.system.services.graph.stats()
+    workspace=Workspace(st.settings)
+    revision=workspace.current_revision
+    if revision and 'graph' in workspace.manifest(revision)['surfaces']:
+        async with workspace.reader(revision,enable={'graph'}) as reader:
+            return {**reader._system.services.graph.stats(),'workspace_revision':revision}
+    return st.data.services.graph.stats()
 
 
 # ----------------------------------------------------- file upload (ingest)
@@ -309,7 +311,7 @@ async def upload_file(
 ) -> dict:
     """Accept a multipart file upload and stash it in the profile's
     `uploads/` dir. Returns the saved path so the frontend can construct a
-    follow-up StoreAgent request asking it to ingest the file.
+    follow-up Codex request asking it to ingest the file.
 
     We deliberately don't auto-ingest here — the agent decides what to do
     with the file (KB chunk? CSV import? graph triples?) based on the
@@ -328,6 +330,8 @@ async def upload_file(
     raw_name = (upload.filename or "upload.bin").strip()
     # Strip any directory components — only basename is allowed.
     safe_name = Path(raw_name).name or "upload.bin"
+    if safe_name in {".",".."}:
+        safe_name="upload.bin"
 
     body = await upload.read()
     if len(body) > 25 * 1024 * 1024:
@@ -338,6 +342,8 @@ async def upload_file(
     uploads_dir.mkdir(parents=True, exist_ok=True)
 
     target = uploads_dir / safe_name
+    if not target.resolve().is_relative_to(uploads_dir.resolve()):
+        raise HTTPException(403,"upload path escapes the profile directory")
     # A same-name upload represents a new revision of the same user document.
     # Keep its stable path so re-ingestion can replace KB chunks and graph
     # edges that came from the previous revision.

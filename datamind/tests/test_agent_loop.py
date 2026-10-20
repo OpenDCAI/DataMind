@@ -348,25 +348,7 @@ async def test_hooks_fire_around_tool_call():
     assert calls == [("start", "echo"), ("end", "echo")]
 
 
-def test_prompt_groups_tools_by_category():
-    from datamind.agent.prompts import build_system_prompt
-
-    reg = ToolRegistry()
-    reg.add(
-        ToolSpec(
-            name="kb_search", description="", input_schema={},
-            handler=lambda: None, metadata={"group": "kb"},  # type: ignore[arg-type]
-        )
-    )
-    reg.add(
-        ToolSpec(
-            name="db_query_sql", description="", input_schema={},
-            handler=lambda: None, metadata={"group": "db"},  # type: ignore[arg-type]
-        )
-    )
-    prompt = build_system_prompt([reg.get(n) for n in reg.names()])
-    assert "kb_search" in prompt
-    assert "db_query_sql" in prompt
-    # Chinese section labels present.
-    assert "知识库" in prompt
-    assert "数据库" in prompt
+def test_main_codex_instructions_delegate_only_data_execution():
+    from datamind.mcp import INSTRUCTIONS
+    assert 'main agent' in INSTRUCTIONS
+    assert 'DataMind only executes data tools' in INSTRUCTIONS

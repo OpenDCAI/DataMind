@@ -132,6 +132,10 @@ jobs:
           python scripts/ci_required_tests.py -q
           datamind/tests/test_direct_data_plane.py
           datamind/tests/test_codex_host.py
+          datamind/tests/test_unified_host.py
+          datamind/tests/test_cli_codex.py
+          datamind/tests/test_http_api.py
+          datamind/tests/test_experiment_faults.py
           plugins/datamind-context/tests/test_datamind_mcp.py
 
   gate:

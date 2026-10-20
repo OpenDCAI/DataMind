@@ -82,3 +82,14 @@ def test_preapproval_is_explicit_and_limited_to_known_tools(tmp_path):
         sdk_config(workspace=str(tmp_path),data_root=str(tmp_path),preapproved_tools=('unknown',))
     with pytest.raises(ValueError,match='approval_mode'):
         CodexSession(workspace=str(tmp_path),data_root=str(tmp_path),approval_mode='allow_everything')
+
+
+def test_host_context_forwarded_to_mcp_without_forwarding_gateway_credentials(tmp_path):
+    cfg=sdk_config(workspace=str(tmp_path),data_root=str(tmp_path),env={
+        'DATAMIND_ACCESS_MODE':'read','DATAMIND_REQUEST_ID':'request-a',
+        'DATAMIND__EMBEDDING__API_KEY':'embed-secret','DATAMIND_CODEX_GATEWAY_KEY':'model-secret'})
+    options=tomllib.loads('\n'.join(cfg['config_overrides']))
+    assert set(options['mcp_servers']['datamind']['env_vars'])=={
+        'DATAMIND_ACCESS_MODE','DATAMIND_REQUEST_ID','DATAMIND__EMBEDDING__API_KEY'}
+    assert 'embed-secret' not in str(cfg['config_overrides'])
+    assert 'model-secret' not in str(cfg['config_overrides'])

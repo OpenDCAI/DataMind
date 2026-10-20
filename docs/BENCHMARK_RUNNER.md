@@ -65,3 +65,16 @@ Each result should be auditable from the primary JSONL and manifest: run and
 task identity, requested configuration, resolved models, latency, attempts,
 usage, stop reason, surfaces, structured tool errors, and normalized evidence.
 Apply dataset-specific scoring only in the external evaluation project.
+
+### Unified Codex host (2.0)
+
+The natural-language runner uses the official main Codex host. The native-loop
+classes are baseline primitives, not product StoreAgent/RetrieveAgent roles.
+Fixed-sequence retrieval and build-crash fixtures retain deterministic providers.
+Live builds that include Graph accept `--graph-sources FILE`: prepare that JSON
+array with Codex outside the raw source directory, using `{uri, version, triples}`
+for each document. Model preparation cost is separate from materialization and
+must be included when reporting total build cost; fixture results are not model
+quality measurements. Live agent fault experiments inject failures at the real
+MCP provider boundary, using a per-job shared attempt counter rather than an
+in-process reader that the SDK cannot see.

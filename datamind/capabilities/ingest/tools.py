@@ -21,7 +21,7 @@ from .service import IngestService
 
 
 def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
-    """Build StoreAgent ingest tools bound to a concrete IngestService."""
+    """Build data ingest tools bound to a concrete IngestService."""
 
     async def _kb_add_text(
         text: str,

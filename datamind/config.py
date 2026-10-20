@@ -45,7 +45,7 @@ class LLMConfig(BaseModel):
     """
 
     api_base: AnyUrl = Field(default=AnyUrl("https://api.anthropic.com"))
-    api_key: SecretStr
+    api_key: SecretStr = SecretStr("")
     protocol: Literal["anthropic", "openai_chat_completions"] = "anthropic"
     model: str = "claude-sonnet-4-6"
     # Used for cheap background tasks (memory extraction, summarisation).
@@ -59,6 +59,21 @@ class LLMConfig(BaseModel):
     connect_timeout_s: float = 10.0
     max_retries: int = Field(default=3, ge=0)
     backoff_base_s: float = Field(default=0.5, gt=0)
+
+
+class CodexHostConfig(BaseModel):
+    """Host-level Codex integration, separate from data capability configuration."""
+    model: str | None = None
+    reasoning_effort: str | None = None
+    base_url: AnyUrl | None = None
+    api_key: SecretStr | None = None
+    workspace: Path | None = None
+    approval_mode: Literal['auto_review', 'deny_all'] = 'auto_review'
+    preapproved_tools: list[str] = Field(default_factory=list)
+    timeout_s: float = Field(default=600, gt=0)
+    max_concurrency: int = Field(default=4, ge=1)
+    request_max_retries: int = Field(default=2, ge=0)
+    stream_idle_timeout_ms: int = Field(default=300000, ge=1000)
 
 
 class EmbeddingConfig(BaseModel):
@@ -189,7 +204,7 @@ class DataConfig(BaseModel):
 
     @property
     def profile_skills_dir(self) -> Path:
-        """Writable, profile-scoped skills owned by StoreAgent."""
+        """Writable, profile-scoped procedural Skills."""
         return self.data_dir / "skills"
 
 
@@ -198,35 +213,11 @@ class LoggingConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    """Agent loop backend selection.
-
-    Two implementations live side-by-side, picked during agent assembly:
-
-    - `native` (default): protocol-neutral tool-use loop over the explicit
-      `LLMConfig.protocol`. Talks Anthropic Messages or OpenAI Chat
-      Completions directly — no helper process required.
-
-    - `sdk`: uses `claude-agent-sdk` as the loop, which in turn spawns
-      the `claude` CLI and speaks Anthropic stdio to it. Best run behind
-      `claude-code-router` (CCR) when the real upstream only speaks
-      OpenAI `/v1/chat/completions` — CCR translates Anthropic↔OpenAI.
-      You get the SDK's Subagents and Compaction facilities.
-
-    Both backends expose the same role-scoped registries (read/utility for
-    RetrieveAgent, write for StoreAgent) and emit the same `AgentEvent`
-    stream, so the server / CLI / frontend don't need to know which is active.
+    """Budgets retained for deterministic baseline loops and workspace reads.
+    Product requests always use the Codex host configuration.
     """
+    backend: Literal['codex'] = 'codex'
 
-    backend: Literal["native", "sdk"] = "native"
-
-    # Used only when backend == "sdk". Points at a local CCR instance.
-    # Falls back to 127.0.0.1:13456 (our default bootstrap port). Auth is
-    # a nominal value — CCR doesn't check the incoming key, only the one
-    # it forwards to the upstream gateway (configured in CCR's config.json).
-    ccr_base_url: str = "http://127.0.0.1:13456"
-    ccr_api_key: SecretStr = SecretStr("dummy")
-
-    # Cap the tool-use loop. Hits for both backends.
     max_turns: int = 12
     max_tool_calls: int = Field(default=24, ge=0)
     max_input_tokens: int = Field(default=120_000, gt=0)
@@ -287,7 +278,8 @@ class KBConfig(BaseModel):
 class Settings(BaseSettings):
     """Top-level settings. Use `Settings()` to load from env/.env files."""
 
-    llm: LLMConfig
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    codex: CodexHostConfig = Field(default_factory=CodexHostConfig)
     embedding: EmbeddingConfig = EmbeddingConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
     kb: KBConfig = KBConfig()
@@ -318,6 +310,8 @@ class Settings(BaseSettings):
 
 __all__ = [
     "Settings",
+    "DataSettings",
+    "CodexHostConfig",
     "LLMConfig",
     "EmbeddingConfig",
     "RetrievalConfig",
@@ -331,13 +325,5 @@ __all__ = [
 ]
 
 
-class DataLLMConfig(LLMConfig):
-    """Data-only execution never creates a conversational model client."""
-
-    api_key: SecretStr = SecretStr("")
-
-
-class DataSettings(Settings):
-    """Settings for direct tools; embedding credentials are still required for KB."""
-
-    llm: DataLLMConfig = Field(default_factory=DataLLMConfig)
+# Compatibility name for callers introduced with the direct data layer.
+DataSettings = Settings

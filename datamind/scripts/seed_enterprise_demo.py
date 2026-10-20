@@ -965,11 +965,7 @@ async def _main() -> int:
 
     os.environ["DATAMIND__DATA__PROFILE"] = PROFILE
 
-    if not os.environ.get("DATAMIND__LLM__API_KEY"):
-        print("[seed] DATAMIND__LLM__API_KEY not set", file=sys.stderr)
-        return 1
-
-    from datamind.agent import build_datamind
+    from datamind.data_plane import build_data_plane
     from datamind.config import Settings
     from datamind.core.logging import setup_logging
 
@@ -992,26 +988,26 @@ async def _main() -> int:
     t_files, t_edges = _write_triplets(settings.data.data_dir)
     print(f"[seed] Graph triples written: {t_edges} edges across {t_files} files")
 
-    # Build the two-agent system (also initialises DB engine + graph store).
-    system = await build_datamind(settings)
+    # Build capability services (also initialises DB engine + graph store).
+    system = await build_data_plane(settings)
     await system.warmup()
 
     # DB
-    db_counts = await _seed_db(system.retrieve)
+    db_counts = await _seed_db(system.services)
     print(f"[seed] DB rows: {db_counts}")
 
     # KB reindex (embeds every chunk via the gateway).
     print("[seed] Indexing KB (this calls the embedding gateway)...")
-    receipt = await system.store.tools.get("kb_reindex").handler()
+    receipt = await system.call("kb_reindex")
     print(f"[seed] KB receipt: {receipt}")
 
     print(f"[seed] Graph stats: {system.services.graph.stats()}")
     print(
-        f"[seed] Tools registered: retrieve={len(system.retrieve.tools)} "
-        f"store={len(system.store.tools)}"
+        f"[seed] Data tools registered: {len(system.tools)}"
     )
     print(f"\n[seed] OK — profile '{PROFILE}' ready.")
     print(f"       DATAMIND__DATA__PROFILE={PROFILE} python -m datamind chat")
+    await system.aclose()
     return 0
 
 

@@ -112,8 +112,8 @@ class Workspace:
     async def _system(self, settings, surfaces):
         if self._builder is not None:
             return await self._builder(settings, enable=set(surfaces))
-        from datamind.agent import build_datamind
-        return await build_datamind(settings, enable=set(surfaces))
+        from datamind.data_plane import build_data_plane
+        return await build_data_plane(settings, enable=set(surfaces))
 
     def _inventory(self, source: Path) -> list[dict[str, str]]:
         if not source.is_dir():
@@ -384,16 +384,20 @@ class Workspace:
                 await system.aclose()
 
     @asynccontextmanager
-    async def reader(self, revision: str | None = None, *, read_retries: int = 1):
+    async def reader(self, revision: str | None = None, *, read_retries: int = 1, enable=None):
         revision = revision or self.current_revision
         if revision is None:
             raise CapabilityError('workspace', 'no published revision')
         manifest = self.manifest(revision)
         settings = self._settings_for(revision)
-        system = await self._system(settings, manifest['surfaces'])
+        selected = set(manifest['surfaces']) if enable is None else set(enable)
+        if not selected <= set(manifest['surfaces']):
+            raise CapabilityError('workspace','requested surface is absent from the pinned revision')
+        system = await self._system(settings, selected)
         try:
             reader = WorkspaceReader(system, manifest, settings.data.base_dir, read_retries=read_retries,
                                      timeout_s=settings.agent.wall_clock_timeout_s)
+            reader._system_settings = self.settings
             yield reader
         finally:
             await system.aclose()
@@ -414,10 +418,8 @@ class WorkspaceReader:
         self.manifest = manifest
         self.revision = manifest['workspace_revision']
         mapping = {s['uri']: root / s['snapshot'] for s in manifest['sources']}
-        direct = hasattr(system, 'read_tools')
-        tools = system.read_tools if direct else system.retrieve.tools
-        if direct:
-            system.tools = tools
+        tools = system.read_tools
+        system.tools = tools
         self.tools = tools
         raw = tools.get('raw_file_read')
         original = raw.handler
@@ -468,13 +470,13 @@ class WorkspaceReader:
 
     async def call(self, name: str, **kwargs):
         parent = current_context()
+        if parent is not None:
+            parent.extra.setdefault('recovery_events', [])
         context = replace(parent, extra=dict(parent.extra)) if parent else RequestContext.new(profile=self._system.profile)
         context.extra['workspace_revision'] = self.revision
         context.extra['query_deadline'] = time.monotonic() + self._timeout
         with bind_context(context):
-            if hasattr(self._system, 'read_tools'):
-                return await self._system.call(name, kwargs, context=context, read_only=True)
-            return await self.tools.get(name).handler(**kwargs)
+            return await self._system.call(name, kwargs, context=context, read_only=True)
 
     async def query(self, message: str, **kwargs):
         context = RequestContext.new(profile=self._system.profile)
@@ -482,8 +484,15 @@ class WorkspaceReader:
         context.extra['query_deadline'] = time.monotonic() + self._timeout
         with bind_context(context):
             async with asyncio.timeout(self._timeout):
-                result = await self._system.query(message, **kwargs)
+                from datamind.host import CodexHost
+                settings = self._system_settings
+                host = CodexHost(settings, revision=self.revision, runtime_env=kwargs.pop('runtime_env', None))
+                try:
+                    result = await host.query(message, **kwargs)
+                finally:
+                    await host.aclose()
+        recovery = result.get('recovery') or recovery_summary(context.extra.get('recovery_events', []))
         return {**result, 'workspace_revision': self.revision,
                 'truncated_sources': self.manifest.get('truncated_sources', []),
-                'workspace_read_retries': recovery_summary(context.extra.get('recovery_events', []))['retries'],
-                'recovery': recovery_summary(context.extra.get('recovery_events', []))}
+                'workspace_read_retries': recovery['retries'],
+                'recovery': recovery}

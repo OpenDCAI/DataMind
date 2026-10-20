@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from datamind import __version__
-from datamind.agent import DataMind, build_datamind
+from datamind.host import CodexHost
+from datamind.mcp import INSTRUCTIONS
 from datamind.config import Settings
 
 
@@ -62,15 +63,15 @@ def _git_commit(repo: Path) -> str | None:
         return None
 
 
-def _prompt_hash(system: DataMind) -> str:
-    prompt = getattr(getattr(system.retrieve.loop, "_cfg", None), "system_prompt", "")
+def _prompt_hash(system: CodexHost) -> str:
+    prompt = INSTRUCTIONS
     return hashlib.sha256(str(prompt).encode("utf-8")).hexdigest()
 
 
 def build_provenance(
     *,
     settings: Settings,
-    system: DataMind,
+    system: CodexHost,
     questions_path: Path,
     surfaces: set[str] | None,
     run_id: str,
@@ -86,20 +87,12 @@ def build_provenance(
         except (OSError, json.JSONDecodeError):
             index_fingerprint = "invalid"
     config = {
-        "llm": {
-            "protocol": settings.llm.protocol,
-            "requested_model": settings.llm.model,
-            "fallback_protocol": settings.llm.fallback_protocol or settings.llm.protocol,
-            "fallback_model": settings.llm.fallback_model,
-            "temperature": settings.llm.temperature,
-        },
+        "codex": settings.codex.model_dump(mode='json', exclude={'api_key'}),
         "embedding": {
             "provider": settings.embedding.provider,
             "model": settings.embedding.model,
             "dimension": (
-                system.services.embedding.dimension
-                if system.services.embedding is not None
-                else settings.embedding.dimension
+                settings.embedding.dimension
             ),
             "index_fingerprint": index_fingerprint,
         },
@@ -183,7 +176,7 @@ def _error_record(exc: Exception) -> dict[str, Any]:
 async def _run_one(
     *,
     item: dict[str, Any],
-    system: DataMind,
+    system: CodexHost,
     run_id: str,
     semaphore: asyncio.Semaphore,
     task_retries: int,
@@ -240,7 +233,7 @@ async def _run_one(
 async def run_benchmark(
     items: list[dict[str, Any]],
     *,
-    system: DataMind,
+    system: CodexHost,
     output: Path,
     run_id: str,
     concurrency: int = 5,
@@ -280,7 +273,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     items = load_questions(questions_path)
     surfaces = set(filter(None, (args.surfaces or "").split(","))) or None
     settings = Settings()
-    system = await build_datamind(settings, enable=surfaces)
+    system = CodexHost(settings, surfaces=surfaces)
     try:
         run_id = args.run_id or f"run-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         provenance = build_provenance(
@@ -319,7 +312,7 @@ async def _async_main(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="DataMind current-stack benchmark runner")
+    parser = argparse.ArgumentParser(description="CodexHost current-stack benchmark runner")
     parser.add_argument("--questions", required=True, help="input JSONL")
     parser.add_argument("--output", default="benchmark_results.jsonl", help="checkpoint JSONL")
     parser.add_argument("--concurrency", type=int, default=5)

@@ -1,179 +1,109 @@
-# Stable API (v1.x)
+# Public API (v2.x)
 
-This document is the compatibility promise for DataMind v1.0.0 and later
-minor/patch releases. The stable baseline is the native backend with local
-profile storage. SDK/CCR and custom provider implementations are supported
-integration points, but their vendor-specific setup is outside the Python API
-promise; see the [support matrix](./SUPPORT_MATRIX.md).
+DataMind 2.0 removes `build_datamind`, StoreAgent/RetrieveAgent and the
+Claude SDK/CCR product runtime. See [migration notes](LEGACY_RUNTIME.md).
+The supported architecture is Codex over a shared data layer.
 
-## Python facade
-
-The preferred entry point is `build_datamind`:
+## Direct Python data plane
 
 ```python
-from datamind.agent import build_datamind
-from datamind.config import Settings
+from datamind.config import DataSettings
+from datamind.data_plane import build_data_plane
 
-
-async def run() -> None:
-    settings = Settings()  # reads DATAMIND__* environment variables
-    system = await build_datamind(settings)
+async def run():
+    data = await build_data_plane(DataSettings(), enable={"graph", "memory", "skills"})
     try:
-        receipt = await system.ingest("Remember that weekly reports use Chinese.")
-        result = await system.query("What language should weekly reports use?")
-        print(receipt["receipts"])
-        print(result["answer"])
+        await data.warmup()
+        receipt = await data.call("memory_save", {"content": "Weekly reports use Chinese."})
+        result = await data.call("memory_recall", {"query": "report language"}, read_only=True)
+        print(receipt, result)
     finally:
-        await system.aclose()
+        await data.aclose()
 ```
 
-`DataMind` also supports the async context-manager form:
+`DataSettings` and `Settings` name the same typed settings model.
+`DataPlane.call(name, arguments, context=None, read_only=False)` validates the
+schema, profile and hooks. Business write tools attach receipts. Selecting
+surfaces controls which services initialize. No conversation client is created;
+KB still requires a configured embedding provider. An explicit `text_client`
+parameter is reserved for custom capability pipelines and benchmark fixtures.
+
+## Codex hosting
 
 ```python
-system = await build_datamind(settings)
-async with system:
-    result = await system.query("...")
+from datamind.config import DataSettings
+from datamind.host import CodexHost
+
+async def run():
+    host = CodexHost(DataSettings())
+    try:
+        written = await host.ingest("Remember: weekly reports use Chinese.")
+        result = await host.query("What language should weekly reports use?")
+        print(written["receipts"], result["answer"])
+    finally:
+        await host.aclose()
 ```
 
-### Stable facade methods
+`CodexHost` is a transport adapter around the official SDK, not another agent
+implementation. `query` binds read-only access; `ingest` permits explicit
+writes. `stream` yields `text`, `tool_use`, `tool_result`, and `done` dictionaries.
+Completion includes `answer`, `receipts`, `evidence`, `tool_trace`,
+`surfaces_used`, `iterations`, `stop_reason`, `usage`, `request_id`,
+`workspace_revision` and `recovery`. The iteration count represents observed
+data/tool calls, not internal model reasoning iterations.
 
-| Symbol | Stability | Contract |
-|---|---|---|
-| `datamind.agent.build_datamind(settings, enable=None)` | Stable | Builds one `DataMind` facade with shared services and separate Store/Retrieve registries. `enable` may contain `kb`, `db`, `graph`, `skills`, and `memory`. |
-| `DataMind.ingest(message, history=None)` | Stable | Runs StoreAgent and returns the StoreAgent result, including `answer`, `receipts`, `tool_trace`, `surfaces_used`, `iterations`, `stop_reason`, and `usage`. |
-| `DataMind.query(message, history=None, final_contract=None)` | Stable | Runs RetrieveAgent and returns `answer`, `evidence`, `surfaces_used`, `tool_trace`, `iterations`, `stop_reason`, and `usage`. |
-| `DataMind.warmup()` | Stable | Loads profile skills/graph and returns warmup counts plus hook names. |
-| `DataMind.aclose()` | Stable | Idempotently closes shared clients, engines, stores, and providers. |
-| `datamind.config.Settings` | Stable | Pydantic settings model populated from `DATAMIND__*` variables or `.env.datamind`. |
+Actual MCP operations supply request-scoped traces and receipts, including
+when SDK Code Mode wraps calls inside a generic execution event. Evidence is
+best-effort normalized provenance. Receipts contain `stored`, `unchanged` or
+`failed` per-surface outcomes; an ID alone does not mean success.
 
-The `StoreAgent` and `RetrieveAgent` objects are available as
-`system.store_agent` / `system.retrieve_agent` (or the shorter
-`system.store` / `system.retrieve` properties). Their public `store`, `query`,
-and `warmup` methods are stable convenience methods; loop constructors and
-private attributes are not.
+`CodexSession` is the lower-level official-SDK bridge. Local plugin use does
+not require `CodexHost` or a second model key. Gateway and approval settings are
+documented in [deployment](CODEX_GATEWAY_DEPLOYMENT.md).
 
-## Result shapes
+## Workspace snapshots
 
-The facade returns JSON-serialisable dictionaries so it can be used from a
-CLI, HTTP server, or worker without importing a provider model. The important
-fields are:
+`Workspace.prepare` inventories sources; `Workspace.publish` builds and atomically
+publishes selected KB/DB/Graph snapshots from prepared, source-hashed inputs.
+`Workspace.reader(revision=...)` selects immutable historical snapshots;
+`enable` may select a subset of that manifest's surfaces. `reader.call` enforces
+read-only access. Query hosting selects the current head at request admission;
+without a published head, it reads independent live stores. Direct writes do
+not silently modify snapshots. Memory/Skills are not one atomic business snapshot.
 
-### RetrieveAgent result
-
-```json
-{
-  "answer": "...",
-  "evidence": [
-    {
-      "surface": "kb",
-      "source_id": "file:...",
-      "locator": {"source": "handbook.md", "chunk_id": "..."},
-      "content": "...",
-      "score": 0.82
-    }
-  ],
-  "surfaces_used": ["kb", "db"],
-  "tool_trace": [],
-  "iterations": 1,
-  "stop_reason": "end_turn",
-  "usage": {}
-}
-```
-
-`evidence` is best-effort normalized provenance. Consumers must still enforce
-their own authorization and source retention policy; an evidence object is not
-a new trust boundary.
-
-### StoreAgent result
-
-```json
-{
-  "answer": "Stored 1 item.",
-  "receipts": [
-    {
-      "receipt_id": "...",
-      "profile": "default",
-      "revision": 3,
-      "source": {"source_id": "memory:...", "kind": "memory"},
-      "results": [
-        {"surface": "memory", "operation": "save", "status": "stored", "items_written": 1}
-      ]
-    }
-  ],
-  "surfaces_used": ["memory"],
-  "tool_trace": [],
-  "iterations": 1,
-  "stop_reason": "end_turn",
-  "usage": {}
-}
-```
-
-Receipt status is one of `stored`, `unchanged`, or `failed`. A receipt records
-what DataMind observed and attempted; it is not a two-phase commit with an
-external database or sink.
-
-## NetworkX graph traversal
-
-`NetworkXGraphStore.traverse` returns paths distinguished by their exact stored
-edge sequences, not just their node sequences. Parallel relations and the same
-relation from distinct origins remain separate evidence paths; relation,
-weight, and source properties are preserved. Upserting an existing edge identity
-still replaces that edge rather than creating another path.
-
-Traversal uses breadth-first expansion in deterministic target/relation/edge-key
-order. `relation_filter` applies at every hop, no path repeats a node, and
-`max_hops` and `max_results` bound expansion. Non-positive limits return no paths.
-Each emitted prefix counts toward `max_results`, so reaching the cap stops
-expansion rather than enumerating all combinations of parallel edges. Selected
-paths are sorted by descending score; this is not a global top-k guarantee.
-
-## HTTP API contract
-
-The bundled FastAPI app is a thin transport over the same facade. Request body
-for `/api/ask` and `/api/store`:
+## HTTP API
 
 ```json
 {"message": "...", "history": []}
 ```
 
-| Route | Stable response |
+| Route | Contract |
 |---|---|
-| `GET /api/health` | `status`, active profile, LLM protocol/model, enabled tool counts, and StoreAgent revision |
-| `GET /api/tools` | `{ "tools": [...], "count": N }`; each item includes role, surface, access, description, group, and input schema |
-| `POST /api/ask` | `AskResponse` containing the RetrieveAgent result fields |
-| `POST /api/store` | `AskResponse` containing the StoreAgent result fields, including receipts |
-| `POST /api/chat` | `text/event-stream`; each frame is `{ "type": ..., ... }` with `text`, `tool_use`, `tool_result`, `error`, or `done` events |
-| `POST /api/upload` | Saved filename/path metadata and suggested StoreAgent prompts; upload alone does not ingest data |
+| `GET /api/health` | Codex backend/model, profile, package version, tool count, receipt revision and published workspace revision |
+| `GET /api/tools` | Tools with access, surface, description and schema; role fields retain read/write labels for UI compatibility |
+| `POST /api/ask` | Same Codex host with read-only access; optional request field `revision` |
+| `POST /api/store` | Same Codex host with write permission and checked receipt results |
+| `POST /api/chat` | SSE frames: `text`, `tool_use`, `tool_result`, `error`, `done`; chat uses read-only access |
+| `POST /api/upload` | Saved file metadata and suggested import request; upload does not ingest |
 
-`/api/kb/reindex`, `/api/kb/documents`, `/api/memory/{namespace}`, and
-`/api/graph/stats` are inspection/compatibility routes. They are useful for a
-private deployment but should receive the same authentication and authorization
-as the primary routes. See [public deployment security boundaries](./SECURITY_BOUNDARIES.md).
+Ask/store responses include answer, evidence, surfaces, trace, receipts,
+request ID, workspace revision, recovery and usage. Inspection/reindex routes
+remain available; KB routes require a configured provider. Memory inspection
+is limited to the active profile. `X-Session-Id` scopes conversation and is not
+an authentication credential. See [security boundaries](SECURITY_BOUNDARIES.md).
 
-## Contracts and enums
+## Graph traversal
 
-The provider-neutral models in `datamind.core.contracts` are stable names for
-typed integrations:
-
-- `DataSurface`: `kb`, `db`, `graph`, `skills`, `memory`
-- `ToolAccess`: `read`, `write`, `utility`
-- `SourceRef`: content-stable source identity and checksum
-- `SurfaceWriteResult`: one write operation and its status
-- `IngestReceipt`: auditable StoreAgent receipt
-- `Evidence`: normalized read provenance
-- `InferenceResult`: provider-neutral retrieval result model
-
-The concrete provider classes, loop implementation modules, prompt wording,
-tool descriptions, and private service fields may evolve within the v1.x line.
-Depend on the facade and contracts above instead of importing underscored
-helpers or reaching into a provider's engine.
+NetworkX traversal distinguishes exact stored edge sequences, including
+parallel relations and different origins. Breadth-first expansion is bounded
+by `max_hops` and `max_results`; relation filters apply at every hop, and paths
+do not repeat nodes. Deterministic expansion and score sorting do not promise
+a global top-k result. Sources and edge properties remain attached to paths.
 
 ## Compatibility policy
 
-- Patch releases fix bugs and improve diagnostics without changing the stable
-  result fields or role boundary.
-- Minor releases may add optional fields, tools, providers, or routes. Consumers
-  should ignore unknown JSON fields and unknown SSE event types.
-- Major releases may change stable contracts and require migration notes.
-- The StoreAgent write/read separation and RetrieveAgent read-only guarantee are
-  security-relevant API behavior, not prompt conventions.
+Minor releases may add fields and tools; consumers should ignore unknown JSON
+fields and SSE events. Major releases may remove public symbols with migration
+notes. Provider internals, prompt wording and SDK-specific events are extension
+points. Core contracts include `DataSurface`, `ToolAccess`, `SourceRef`,
+`SurfaceWriteResult`, `IngestReceipt`, `Evidence` and `InferenceResult`.

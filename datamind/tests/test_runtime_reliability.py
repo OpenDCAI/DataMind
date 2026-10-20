@@ -8,7 +8,8 @@ from typing import Any
 import httpx
 import pytest
 
-from datamind.agent import OpenAICompatibleAgentLoop, build_datamind
+from datamind.agent import OpenAICompatibleAgentLoop
+from datamind.data_plane import build_data_plane
 from datamind.agent.base import AgentLoopConfig
 from datamind.capabilities.db.service import DBService
 from datamind.capabilities.embedding.providers.openai_compatible import (
@@ -324,13 +325,14 @@ async def test_graph_profile_reload_reconciles_deleted_edges(tmp_path: Path):
 async def test_empty_and_graph_only_builds_are_lazy_and_close_idempotently(tmp_path: Path):
     settings = Settings(llm={"api_key": "test"})
     settings.data.base_dir = tmp_path
-    empty = await build_datamind(settings, enable=set())
-    assert len(empty.retrieve.tools) == len(empty.store.tools) == 0
+    empty = await build_data_plane(settings, enable=set())
+    assert all(empty.tools.get(n).surface is None for n in empty.tools.names())
+    assert 'raw_file_read' in empty.tools
     assert empty.services.embedding is empty.services.kb is None
     await empty.aclose()
     await empty.aclose()
 
-    graph = await build_datamind(settings, enable={"graph"})
+    graph = await build_data_plane(settings, enable={"graph"})
     assert graph.services.graph is not None
     assert graph.services.embedding is graph.services.kb is None
     await graph.aclose()

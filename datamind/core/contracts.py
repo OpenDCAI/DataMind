@@ -1,9 +1,8 @@
-"""Shared contracts for DataMind's two-agent data plane.
+"""Shared data, evidence and receipt contracts for Codex-facing tools.
 
 The contracts in this module are deliberately small.  They describe what was
 stored and what evidence was retrieved; they are not an execution plan, DAG,
-or operator language.  StoreAgent and RetrieveAgent remain ordinary tool-use
-agents and exchange state only through the five data surfaces plus receipts.
+or operator language. Codex interacts through five data surfaces and receipts.
 """
 from __future__ import annotations
 
@@ -88,7 +87,7 @@ class SurfaceWriteResult(BaseModel):
 
 
 class IngestReceipt(BaseModel):
-    """Auditable receipt emitted after a StoreAgent tool call."""
+    """Auditable receipt emitted after an authorized data write."""
 
     receipt_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     profile: str
@@ -96,6 +95,8 @@ class IngestReceipt(BaseModel):
     source: SourceRef
     results: list[SurfaceWriteResult]
     applied_skills: list[dict[str, str]] = Field(default_factory=list)
+    session_id: str | None = None
+    request_id: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -103,7 +104,7 @@ class IngestReceipt(BaseModel):
 
 
 class Evidence(BaseModel):
-    """A normalized fact returned by a RetrieveAgent tool."""
+    """A normalized fact returned by a data retrieval tool."""
 
     surface: DataSurface
     source_id: str | None = None
