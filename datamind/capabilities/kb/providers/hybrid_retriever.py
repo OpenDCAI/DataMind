@@ -85,7 +85,7 @@ class HybridRetriever:
             tokenised = [_tokenize(t) for t in self._texts]
             self._bm25 = BM25Okapi(tokenised)
             _log.info("bm25_built", extra={"docs": len(self._ids)})
-            
+
     async def _ensure_lexical_at_version(
         self, version: int | None = None,
     ) -> tuple[BM25Okapi, list[str], list[str], list[dict[str, Any]]]:
@@ -184,7 +184,7 @@ class HybridRetriever:
             },
         )
         return out
-    
+
     async def aretrieve_at_version(
         self,
         query: str,

@@ -5,11 +5,11 @@ ordinary tool-use loops over the same capability services.  Their authority is
 separated by ToolRegistry before the tool catalogue reaches the model:
 
 * RetrieveAgent receives read + utility tools only.
-* StoreAgent receives write tools only, wrapped in idempotent receipts.
+* StoreAgent receives receipt-wrapped writes plus explicitly allowed input/Skill reads.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ from datamind.capabilities.ingest import (
     build_ingest_tools,
     with_receipts,
 )
+from datamind.capabilities.ingest.workspace_tools import build_workspace_tools
 from datamind.capabilities.kb import KBService, build_kb_service, build_kb_tools
 from datamind.capabilities.memory import MemoryService, build_memory_service, build_memory_tools
 from datamind.capabilities.skills import (
@@ -143,7 +144,7 @@ class RetrieveAgent:
 
 @dataclass
 class StoreAgent:
-    """Write-only agent that returns one receipt for every tool call."""
+    """Writer with procedural/input reads; write calls return receipts."""
 
     services: AgentServices
     tools: ToolRegistry
@@ -165,7 +166,11 @@ class StoreAgent:
         *,
         history: list[dict] | None = None,
     ) -> dict[str, Any]:
-        return await self.loop.run_turn(user_message=message, history=history)
+        parent = current_context()
+        context = (replace(parent, extra={**parent.extra, "applied_skills": {}})
+                   if parent is not None else RequestContext.new(profile=self.ledger._profile))
+        with bind_context(context):
+            return await self.loop.run_turn(user_message=message, history=history)
 
 
 @dataclass
@@ -389,6 +394,8 @@ async def build_datamind(
         assert memory is not None
         catalogue.extend(build_memory_tools(memory))
 
+    catalogue.extend(build_workspace_tools(settings, active))
+
     retrieve_tools = catalogue.select(access={ToolAccess.READ, ToolAccess.UTILITY})
     raw_store_tools = catalogue.select(access={ToolAccess.WRITE})
     retrieve_tools.assert_access({ToolAccess.READ, ToolAccess.UTILITY})
@@ -396,6 +403,10 @@ async def build_datamind(
 
     ledger = IngestLedger(storage_dir=settings.data.storage_dir, profile=settings.data.profile)
     store_tools = with_receipts(raw_store_tools, ledger)
+    # Input inspection and procedural guidance are explicit exceptions to the
+    # write-only role. Business query tools remain inaccessible to StoreAgent.
+    guidance = {"skill_list", "skill_search", "skill_get", "workspace_inspect", "raw_file_read"}
+    store_tools.extend([catalogue.get(name) for name in sorted(guidance & set(catalogue.names()))])
     hooks = _build_hook_chain(settings)
 
     retrieve_prompt = build_retrieve_system_prompt(

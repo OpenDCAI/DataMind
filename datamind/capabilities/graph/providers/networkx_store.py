@@ -15,6 +15,7 @@ import asyncio
 import difflib
 import json
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -171,7 +172,8 @@ class NetworkXGraphStore:
                 # Profile snapshots and runtime writes have separate identities;
                 # exact duplicates within either origin overwrite deterministically.
                 profile_managed = bool((t.properties or {}).get("_profile_managed"))
-                origin = "profile" if profile_managed else (t.source or "runtime")
+                origin = ("profile:" + (t.source or (t.properties or {}).get("profile_source", ""))
+                          if profile_managed else (t.source or "runtime"))
                 self._g.add_edge(
                     t.subject,
                     t.object,
@@ -208,7 +210,7 @@ class NetworkXGraphStore:
                 (u, v, key)
                 for u, v, key, data in self._g.edges(keys=True, data=True)
                 if data.get("p__source_path") == source
-                or str(data.get("p__source_path") or "").startswith(source + "#part=")
+                or re.fullmatch(re.escape(source) + r"#part=\d+", str(data.get("p__source_path") or "")) is not None
             ]
             self._g.remove_edges_from(stale)
         await self.upsert_triples(triples)
@@ -219,7 +221,7 @@ class NetworkXGraphStore:
         """List document-managed origins, excluding lineage and explicit writes."""
         with self._state_lock:
             return {
-                str(data["p__source_path"]).split("#part=", 1)[0]
+                re.sub(r"#part=\d+$", "", str(data["p__source_path"]))
                 for _, _, data in self._g.edges(data=True)
                 if data.get("p__source_managed") and data.get("p__source_path")
             }

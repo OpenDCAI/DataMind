@@ -85,7 +85,7 @@
 </tr>
 </table>
 
-这个边界在代码层、工具到达模型前就已执行：RetrieveAgent 只能看到 19 个 read/utility 工具，StoreAgent 只能看到 11 个 write 工具。所有调用还会经过 `PathAllowlistHook`、`DestructiveSqlHook` 和 `AuditLogHook`。
+这个边界在代码层、工具到达模型前就已执行：RetrieveAgent 使用 read/utility 工具；StoreAgent 使用写工具，以及明确允许的 Skill 读取和输入检查工具。所有调用还会经过 `PathAllowlistHook`、`DestructiveSqlHook` 和 `AuditLogHook`。
 
 ## 五个数据面，一个答案
 

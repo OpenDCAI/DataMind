@@ -140,3 +140,101 @@ async def test_published_db_and_kb_share_same_input_revision(setup_workspace):
         table = (await reader._system.services.db.list_tables())[0]
         result = await reader.call('db_query_sql', sql=f'SELECT amount FROM "{table}"')
         assert '12' in str(result)
+
+
+@pytest.mark.asyncio
+async def test_transient_read_retry_stays_on_pinned_revision(setup_workspace):
+    workspace, source, _, _ = setup_workspace
+    first = await workspace.update(str(source), surfaces=['graph'])
+    async with workspace.reader(read_retries=1) as reader:
+        store = reader._system.services.graph.store
+        original = store.neighbors
+        calls = 0
+        async def fail_once(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                (source / 'a.md').write_text('Bob owns Project')
+                await workspace.update(str(source), surfaces=['graph'])
+                raise TimeoutError('transient graph outage')
+            return await original(*args, **kwargs)
+        store.neighbors = fail_once
+        result = await reader.call('graph_neighbors', entity='Alice')
+        assert calls == 2
+        assert 'Alice' in str(result)
+        assert reader.revision == first['workspace_revision']
+        assert workspace.current_revision != reader.revision
+
+
+@pytest.mark.asyncio
+async def test_inspection_reads_pinned_sources_after_deletion(setup_workspace):
+    workspace, source, _, _ = setup_workspace
+    first = await workspace.update(str(source), surfaces=['graph'])
+    async with workspace.reader() as reader:
+        (source / 'a.md').unlink()
+        result = await reader.call('workspace_inspect', path=str(source))
+        assert result['files_scanned'] == 1
+        assert result['files'][0]['sha256'] == first['sources'][0]['version']
+
+
+@pytest.mark.asyncio
+async def test_hard_process_exit_leaves_no_partial_publication_and_reuses_checkpoint(setup_workspace, tmp_path):
+    import os
+    import subprocess
+    import sys
+    workspace, source, _, _ = setup_workspace
+    (source / 'b.md').write_text('Bob owns Project')
+    script = tmp_path / 'crash_builder.py'
+    script.write_text('''
+import asyncio, os, sys
+from datamind.agent import options
+from datamind.config import Settings
+from datamind.workspace import Workspace
+class Model:
+    calls = 0
+    async def generate_text(self, *a, **k):
+        self.calls += 1
+        if self.calls == 2:
+            os._exit(23)
+        return '[{"subject":"Alice","relation":"owns","object":"Project"}]'
+    async def aclose(self): pass
+model = Model()
+options.build_model_client = lambda *a, **k: model
+settings = Settings(llm={'api_key':'test','model':'test'}, data={'base_dir':sys.argv[1]}, embedding={'dimension':4})
+asyncio.run(Workspace(settings).update(sys.argv[2], surfaces=['graph']))
+''')
+    process = await asyncio.create_subprocess_exec(sys.executable, str(script),
+        str(workspace.settings.data.base_dir), str(source),
+        env={**os.environ, 'PYTHONPATH': str(__import__('pathlib').Path(__file__).resolve().parents[2])},
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    _, errors = await asyncio.wait_for(process.communicate(), timeout=30)
+    assert process.returncode == 23, errors.decode()
+    assert workspace.current_revision is None
+    result = await workspace.update(str(source), surfaces=['graph'])
+    assert result['reused_sources'] == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_after_intervening_publish_and_rollback_is_rejected(setup_workspace):
+    workspace, source, model, _ = setup_workspace
+    first = await workspace.update(str(source), surfaces=['graph'])
+    (source/'b.md').write_text('Bob owns Project')
+    original = model.generate_text
+    ready, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+    async def block_first(*a, **k):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            ready.set()
+            await release.wait()
+        return await original(*a, **k)
+    model.generate_text = block_first
+    old_build = asyncio.create_task(workspace.update(str(source), surfaces=['graph']))
+    await asyncio.wait_for(ready.wait(), 5)
+    second = await workspace.update(str(source), surfaces=['graph'])
+    workspace.rollback(first['workspace_revision'], expected_revision=second['workspace_revision'])
+    release.set()
+    with pytest.raises(CapabilityError, match='publication conflict'):
+        await old_build
+    assert workspace.current_revision == first['workspace_revision']

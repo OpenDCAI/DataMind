@@ -95,6 +95,7 @@ class IngestReceipt(BaseModel):
     revision: int
     source: SourceRef
     results: list[SurfaceWriteResult]
+    applied_skills: list[dict[str, str]] = Field(default_factory=list)
 
     @property
     def ok(self) -> bool:

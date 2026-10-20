@@ -86,7 +86,7 @@ class KBService:
         k = top_k or self.retrieval_cfg.top_k
         chunks = await self.retriever.aretrieve(query, top_k=k, filters=filters)
         return [c.model_dump() for c in chunks]
-    
+
     async def count(self) -> int:
         return await self.vector_store.count()
 
@@ -193,7 +193,7 @@ class KBService:
 
     async def list_documents(self) -> list[dict[str, Any]]:
         return await list_documents(self.data_dir)
-    
+
     async def search_at_version(
         self,
         query: str,
@@ -214,10 +214,10 @@ class KBService:
         if version < 1:
             raise CapabilityError("kb", f"version must be a positive integer, got {version}")
         versions = await self.list_versions()
-        
+
         if not any(v["version"] == version for v in versions):
             raise CapabilityError("kb", f"version {version} does not exist in this LanceDB table")
-        
+
         k = top_k or self.retrieval_cfg.top_k
         chunks = await self.retriever.aretrieve_at_version(query, top_k=k, filters=filters, version=version)
         return [c.model_dump() for c in chunks]
@@ -227,7 +227,7 @@ class KBService:
             raise CapabilityError("kb", "list_versions is only supported by the LanceDB vector store")
 
         return await self.vector_store.list_versions()
-    
+
     async def rollback(self, version: int) -> dict[str, Any]:
         """Restore the KB to the data of `version`, as a NEW commit.
 
@@ -276,7 +276,7 @@ def build_kb_service(
     embedding = embedding or build_embedding(settings.embedding, fallback_llm=settings.llm)
     storage_dir = settings.data.storage_dir
     storage_dir.mkdir(parents=True, exist_ok=True)
-    
+
     vector_store = vector_store_registry.create(
         settings.kb.vector_store,
         persist_dir=str(storage_dir / settings.kb.vector_store),

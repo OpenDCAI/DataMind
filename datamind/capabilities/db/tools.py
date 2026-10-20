@@ -11,14 +11,14 @@ from .service import DBService
 def build_db_tools(db: DBService) -> list[ToolSpec]:
     async def _list_tables() -> dict:
         return {"tables": await db.list_tables()}
-    
+
     async def _list_tables_at_version(version: str) -> dict:
         return {"tables": await db.list_tables_at_version(version=version)}
 
     async def _describe(table: str) -> dict:
         schema = await db.describe(table)
         return schema.model_dump()
-    
+
     async def _describe_at_version(table: str, version: str) -> dict:
         schema = await db.describe_at_version(table, version=version)
         return schema.model_dump()
@@ -30,7 +30,7 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
         payload["total_count"] = None
         payload["next_cursor"] = None
         return payload
-    
+
     async def _query_sql_at_version(sql: str, version: str) -> dict:
         result = await db.query_sql_at_version(sql, version=version)
         payload = result.model_dump()
@@ -47,10 +47,10 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
 
     async def _list_versions() -> dict:
         return await db.list_versions()
-    
+
     async def _rollback(version: str) -> dict:
         return await db.rollback(version=version)
-    
+
     tools = [
         ToolSpec(
             name="db_list_tables",
@@ -249,7 +249,7 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
                     "the target version."
                 ),
                 input_schema={
-                    "type": "object", 
+                    "type": "object",
                     "properties": {
                         "version": {
                             "type": "string",
@@ -262,7 +262,7 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
                 metadata={"group": "db", "surface": "db", "access": "write", "destructive": True,},
             ),
         ])
-    
+
     return tools
 
 @tool_provider_registry.register("db")

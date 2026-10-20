@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import math
 import json
 import sqlite3
 import threading
@@ -44,7 +45,7 @@ class LanceDBVectorStore:
         # LanceDB's `exist_ok=True` compares schemas literally and rejects
         # harmless differences (e.g. arrow extension types round-tripped
         # through disk). `open_table` skips the check entirely.
-        if self._collection_name in self._client.table_names():
+        if self._collection_name in self._client.list_tables().tables:
             self._collection = self._client.open_table(self._collection_name)
         else:
             self._collection = self._client.create_table(
@@ -101,11 +102,19 @@ class LanceDBVectorStore:
             elif isinstance(value, int):
                 conditions.append(f"{lhs('int')} = {value}")
             elif isinstance(value, float):
+                if not math.isfinite(value):
+                    raise ValueError("filter numbers must be finite")
                 conditions.append(f"{lhs('float')} = {value}")
             elif isinstance(value, str):
                 escaped = self._escape(value)
                 conditions.append(f"{lhs('string')} = '{escaped}'")
             elif isinstance(value, (list, tuple)):
+                if not value:
+                    conditions.append("FALSE")
+                    continue
+                if any(not isinstance(v, (str, bool, int, float)) or
+                       (isinstance(v, float) and not math.isfinite(v)) for v in value):
+                    raise TypeError("filter lists must contain scalar values")
                 items: list[str] = []
                 for v in value:
                     if isinstance(v, str):
@@ -177,42 +186,39 @@ class LanceDBVectorStore:
         where: dict[str, Any] | None = None,
         version: int | None = None
     ) -> list[RetrievedChunk]:
-        try:
-            def _search():
-                table = self._client.open_table(self._collection_name)
-                if version is not None:
-                    table.checkout(version)
-                q = table.search(embedding, query_type="vector")
+        def _search():
+            table = self._client.open_table(self._collection_name)
+            if version is not None:
+                table.checkout(version)
+            q = table.search(embedding, query_type="vector")
 
-                if where:
-                    where_sql = self._dict_to_where(where)
-                    if where_sql:
-                        q = q.where(where_sql)
+            if where:
+                where_sql = self._dict_to_where(where)
+                if where_sql:
+                    q = q.where(where_sql)
 
-                return q.distance_type("cosine").limit(top_k).to_list()
+            return q.distance_type("cosine").limit(top_k).to_list()
 
-            results = await asyncio.to_thread(_search)
+        results = await asyncio.to_thread(_search)
 
-            out: list[RetrievedChunk] = []
-            for row in results:
-                dist = row.get("_distance")
-                meta = self._parse_metadata(row.get("metadata"))
-                # Cosine distance -> cosine similarity (higher is better)
-                score = float(1.0 - dist) if dist is not None else 0.0
-                source = meta.pop("_source", None) or meta.pop("source", None)
-                out.append(
-                    RetrievedChunk(
-                        id=str(row.get("id")),
-                        text=row.get("document") or "",
-                        score=score,
-                        source=source,
-                        metadata={k: v for k, v in meta.items() if k != "_"},
-                    )
+        out: list[RetrievedChunk] = []
+        for row in results:
+            dist = row.get("_distance")
+            meta = self._parse_metadata(row.get("metadata"))
+            # Cosine distance -> cosine similarity (higher is better)
+            score = float(1.0 - dist) if dist is not None else 0.0
+            source = meta.pop("_source", None) or meta.pop("source", None)
+            out.append(
+                RetrievedChunk(
+                    id=str(row.get("id")),
+                    text=row.get("document") or "",
+                    score=score,
+                    source=source,
+                    metadata={k: v for k, v in meta.items() if k != "_"},
                 )
+            )
 
-            return out
-        finally:
-            pass  # Historical reads use a private table handle.
+        return out
 
     async def count(self) -> int:
         return await asyncio.to_thread(self._collection.count_rows)
@@ -245,22 +251,19 @@ class LanceDBVectorStore:
 
     async def get_all_texts(self, version: int | None = None) -> list[tuple[str, str, dict[str, Any]]]:
         """Enumerate (id, text, metadata) — used by lexical retrievers."""
-        try:
-            def _get_all_projected():
-                table = self._client.open_table(self._collection_name)
-                if version is not None:
-                    table.checkout(version)
-                rows = (
-                    table.search(None)
-                    .select(["id", "document", "metadata"])
-                    .to_list()
-                )
-                return rows
+        def _get_all_projected():
+            table = self._client.open_table(self._collection_name)
+            if version is not None:
+                table.checkout(version)
+            rows = (
+                table.search(None)
+                .select(["id", "document", "metadata"])
+                .to_list()
+            )
+            return rows
 
-            rows = await asyncio.to_thread(_get_all_projected)
+        rows = await asyncio.to_thread(_get_all_projected)
 
-        finally:
-            pass  # Historical reads use a private table handle.
 
         out: list[tuple[str, str, dict[str, Any]]] = []
         for r in rows:
@@ -363,7 +366,7 @@ class LanceDBVectorStore:
 
     @property
     def latest_version(self) -> int:
-        return self._collection.version
+        return self._client.open_table(self._collection_name).version
 
     async def _checkout_latest(self):
         await asyncio.to_thread(self._collection.checkout_latest)
@@ -382,7 +385,7 @@ class LanceDBVectorStore:
                 self._collection.checkout_latest()
                 self._collection.restore(version)
                 self.existing_count = self._collection.count_rows()
-                return self._collection.version
+                return self._client.open_table(self._collection_name).version
         current = await asyncio.to_thread(_restore)
         info = await self.add_version(current, previous_version=previous)
         return {"version": current, "count": self.existing_count, "details": info}

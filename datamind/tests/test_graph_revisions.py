@@ -101,3 +101,25 @@ async def test_relation_schema_is_enforced(tmp_path):
     result = await svc.graph_add_path(path=str(doc), relation_types=['depends_on'])
     assert result['skipped_count'] == 1
     assert store.stats()['edges'] == 0
+
+
+@pytest.mark.asyncio
+async def test_inline_graph_input_remains_available_as_immutable_evidence(tmp_path):
+    svc, store, _ = setup(tmp_path)
+    await svc.graph_add_triples_from_text(text='Alice owns Project')
+    edge = (await store.neighbors('Alice'))[0]
+    from pathlib import Path
+    assert Path(edge.evidence[0].locator['uri']).read_text() == 'Alice owns Project'
+    assert edge.evidence[0].source_id.startswith('text:')
+
+
+@pytest.mark.asyncio
+async def test_explicit_assertions_receive_persistent_input_provenance(tmp_path):
+    from pathlib import Path
+    from datamind.capabilities.graph.service import GraphService
+    _, store, _ = setup(tmp_path)
+    service = GraphService(store=store, data_dir=tmp_path/'profile', storage_dir=tmp_path)
+    await service.upsert([{'subject':'Alice','relation':'owns','object':'Project'}])
+    evidence = (await store.neighbors('Alice'))[0].evidence[0]
+    assert evidence.method == 'explicit'
+    assert 'Alice' in Path(evidence.locator['uri']).read_text()

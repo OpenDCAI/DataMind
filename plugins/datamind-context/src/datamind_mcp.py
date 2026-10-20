@@ -31,6 +31,17 @@ SERVER_VERSION = "1.1.0"
 PROTOCOL_VERSION = "2025-06-18"
 
 TOOLS: dict[str, dict[str, Any]] = {
+    "datamind_workspace_update": {
+        "description": "Build and publish an immutable workspace revision with source checkpoints. Local snapshot providers only.",
+        "inputSchema": {"type": "object", "required": ["path"], "properties": {
+            "path": {"type": "string"}, "profile": {"type": "string", "default": "default"},
+            "surfaces": {"type": "array", "items": {"type": "string", "enum": ["kb", "graph", "db"]}},
+            "relation_types": {"type": "array", "items": {"type": "string"}}}}},
+    "datamind_workspace_ask": {
+        "description": "Ask against one published workspace revision, pinned across all tool calls and raw evidence reads.",
+        "inputSchema": {"type": "object", "required": ["question"], "properties": {
+            "question": {"type": "string"}, "profile": {"type": "string", "default": "default"},
+            "revision": {"type": "string"}}}},
     "datamind_raw_file_read": {
         "description": "Read paginated source text or extracted document text without ingestion.",
         "inputSchema": {"type": "object", "required": ["path"], "properties": {
@@ -178,6 +189,14 @@ async def execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
     profile = profile_name(args)
     settings = Settings()
     settings.data.profile = profile
+    if name in {"datamind_workspace_update", "datamind_workspace_ask"}:
+        from datamind.workspace import Workspace
+        workspace = Workspace(settings)
+        if name == "datamind_workspace_update":
+            return await workspace.update(str(args["path"]),
+                surfaces=args.get("surfaces", ["kb", "graph", "db"]),
+                relation_types=args.get("relation_types"))
+        return await workspace.query(str(args["question"]), revision=args.get("revision"))
     system = await build_datamind(settings, enable=enabled_surfaces(name))
     context = RequestContext(
         session_id=str(args.get("session_id") or "codex"),

@@ -83,8 +83,8 @@ Returns an answer with normalized evidence.
 </tr>
 </table>
 
-The split is enforced in code, before tools reach the model. RetrieveAgent sees
-19 read/utility tools; StoreAgent sees 11 write tools. Every call also passes
+The split is enforced in code, before tools reach the model. RetrieveAgent receives read/utility tools; StoreAgent receives write tools plus
+explicit Skill lookup and input-inspection tools. Every call also passes
 through `PathAllowlistHook`, `DestructiveSqlHook`, and `AuditLogHook`.
 
 ## Five surfaces, one answer

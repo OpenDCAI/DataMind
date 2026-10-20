@@ -35,3 +35,9 @@ path safety policy.
 
 
 PDF 解析支持可选的 MinerU API 优先适配；未安装或解析失败时自动回退到 `pypdf`。通过 `DATAMIND_MINERU=off` 可强制只使用 `pypdf`，`DATAMIND_MINERU_API_URL` 和 `DATAMIND_MINERU_API_TIMEOUT_S` 可指定 API 地址和超时。
+
+For a dynamic workspace requiring coherent cross-surface reads, use
+`datamind_workspace_update` and then `datamind_workspace_ask`. Pass a returned
+revision for repeatable historical questions. Legacy folder ingest does not
+publish an atomic KB/Graph generation. The published snapshot path is currently
+local-provider only; report unsupported-backend errors without switching storage.

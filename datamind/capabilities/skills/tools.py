@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from datamind.core.tools import ToolSpec, tool_provider_registry
+from datamind.core.logging import current_context
 
 from .service import SkillsService
 
@@ -14,7 +15,13 @@ def build_skills_tools(skills: SkillsService) -> list[ToolSpec]:
         return {"query": query, "count": len(hits), "results": hits}
 
     async def _get(name: str) -> dict:
-        return skills.get(name)
+        result = skills.get(name)
+        context = current_context()
+        if result.get("found") and context is not None:
+            applied = context.extra.setdefault("applied_skills", {})
+            applied[name] = {"name": name, "version": result["version"],
+                             "content_hash": result["content_hash"]}
+        return result
 
     async def _list() -> dict:
         items = skills.list_skills()
@@ -75,6 +82,7 @@ def build_skills_store_tools(skills: SkillsService) -> list[ToolSpec]:
         body: str,
         keywords: list[str] | None = None,
         overwrite: bool = True,
+        version: str = "1.0.0",
     ) -> dict:
         return await skills.upsert(
             name=name,
@@ -82,6 +90,7 @@ def build_skills_store_tools(skills: SkillsService) -> list[ToolSpec]:
             body=body,
             keywords=keywords,
             overwrite=overwrite,
+            version=version,
         )
 
     return [
@@ -100,6 +109,7 @@ def build_skills_store_tools(skills: SkillsService) -> list[ToolSpec]:
                     "body": {"type": "string"},
                     "keywords": {"type": "array", "items": {"type": "string"}},
                     "overwrite": {"type": "boolean", "default": True},
+                    "version": {"type": "string", "default": "1.0.0"},
                 },
                 "required": ["name", "description", "body"],
             },

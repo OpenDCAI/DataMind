@@ -18,6 +18,7 @@ We don't require external YAML libs — the frontmatter subset we care about
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,6 +36,8 @@ class SkillManifest:
     body: str
     path: Path
     keywords: tuple[str, ...] = field(default_factory=tuple)
+    version: str = "1.0.0"
+    content_hash: str = ""
 
     @property
     def full_text(self) -> str:
@@ -106,6 +109,8 @@ def load_skill(path: Path) -> SkillManifest | None:
         body=body.strip(),
         path=path,
         keywords=keywords,
+        version=str(meta.get("version") or "1.0.0"),
+        content_hash="sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
     )
 
 

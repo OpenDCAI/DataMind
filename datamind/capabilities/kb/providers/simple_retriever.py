@@ -42,7 +42,7 @@ class SimpleRetriever:
             extra={"query_len": len(query), "top_k": top_k, "hits": len(chunks)},
         )
         return chunks
-    
+
     async def aretrieve_at_version(
         self,
         query: str,

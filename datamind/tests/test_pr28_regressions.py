@@ -48,3 +48,34 @@ async def test_lancedb_history_persists_and_concurrent_reads_do_not_checkout_wri
     assert old[0][1] == 'old'
     assert current[0][1] == 'new'
     assert store.latest_version == v2
+
+
+@pytest.mark.asyncio
+async def test_excel_update_clears_empty_and_removed_sheet_rows(tmp_path):
+    import openpyxl
+    from datamind.capabilities.db.providers.sqlite import SQLiteDialect
+    from datamind.capabilities.db.service import DBService
+    from datamind.capabilities.ingest.service import IngestService
+    from datamind.config import DBConfig
+    dialect = SQLiteDialect()
+    engine = dialect.build_engine(None, default_path=str(tmp_path / 'db.sqlite'))
+    db = DBService(dialect=dialect, engine=engine, db_cfg=DBConfig())
+    ingest = IngestService(kb=None, db=db, graph=None, llm_client=None, llm_model='test',
+                          profile_data_dir=tmp_path/'profile', chunk_size=512, chunk_overlap=0)
+    source = tmp_path/'book.xlsx'
+    book = openpyxl.Workbook()
+    book.active.title='one'
+    book.active.append(['value'])
+    book.active.append([1])
+    sheet = book.create_sheet('two')
+    sheet.append(['value'])
+    sheet.append([2])
+    book.save(source)
+    await ingest.db_import_path(path=str(source))
+    book.remove(sheet)
+    book.active.delete_rows(2)
+    book.save(source)
+    await ingest.db_update_path(path=str(source))
+    assert (await db.query_sql('SELECT COUNT(*) FROM book_one')).rows == [[0]]
+    assert (await db.query_sql('SELECT COUNT(*) FROM book_two')).rows == [[0]]
+    await db.aclose()

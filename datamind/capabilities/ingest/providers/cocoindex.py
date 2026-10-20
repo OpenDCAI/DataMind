@@ -92,7 +92,7 @@ async def process_file(
 ) -> None:
     allow_roots = coco.use_context(ALLOW_ROOTS)
     resolve = _resolve_safe_path(str(file.file_path), allow_roots)
-    
+
     extracted = extract_document(resolve)
     text = extracted.text
     source = str(resolve)
@@ -138,11 +138,11 @@ async def app_main(
         live=False,  # source supports live watch; pass -L to `cocoindex update` to actually run live
     )
     await coco.mount_each(
-        process_file, 
-        files.items(), 
-        target_table, 
-        chunk_size, 
-        chunk_overlap, 
+        process_file,
+        files.items(),
+        target_table,
+        chunk_size,
+        chunk_overlap,
     )
 
 
@@ -167,7 +167,7 @@ class CocoIndexBackend:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._allow_roots = allow_roots
-        
+
         self._app = None
         self._environment = None
         self._lock = asyncio.Lock()
@@ -175,12 +175,12 @@ class CocoIndexBackend:
     async def _read_chunks(self) -> tuple[dict[str, dict], int | None]:
         conn = self._environment.get_context(LANCE_DB)
 
-        if self._table_name not in await conn.table_names():
+        if self._table_name not in (await conn.list_tables()).tables:
             return {}, None
 
         table = await conn.open_table(self._table_name)
         version = await table.version()
-        
+
         rows = await table.query().select(["id", "document", "metadata"]).to_list()
         chunk_map = {}
         for row in rows:
@@ -226,7 +226,7 @@ class CocoIndexBackend:
                 )
                 environment.context_provider.provide(TARGET_SCHEMA, real_table_schema)
                 environment.context_provider.provide(ALLOW_ROOTS, self._allow_roots)
-                
+
                 self._app = coco.App(
                     coco.AppConfig(
                         name="datamind_kb",
@@ -252,7 +252,7 @@ def get_backend(
     lancedb_uri: str,
     embedding_provider: Any,
     chunk_size: int,
-    chunk_overlap: int, 
+    chunk_overlap: int,
     allow_roots: list[Path]
 ) -> CocoIndexBackend:
     return CocoIndexBackend(

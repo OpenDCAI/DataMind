@@ -73,7 +73,7 @@ class MultiQueryRetriever:
             },
         )
         return merged[:top_k]
-    
+
     async def aretrieve_at_version(
         self,
         query: str,

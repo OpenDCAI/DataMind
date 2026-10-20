@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
 from datamind.config import Settings
 from datamind.core.logging import get_logger
-from datamind.core.protocols import GraphStore, GraphTriple
+from datamind.core.protocols import GraphEvidence, GraphStore, GraphTriple
+from .evidence import persist_input
 from datamind.core.registry import graph_registry
 
 # Importing providers populates graph_registry.
@@ -110,6 +112,17 @@ class GraphService:
 
     async def upsert(self, triples: list[dict[str, Any]]) -> dict[str, int]:
         parsed = [GraphTriple(**t) for t in triples]
+        for triple in parsed:
+            if triple.evidence:
+                continue
+            content = json.dumps(triple.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+            path, version = persist_input(self.data_dir, content, ".json")
+            identity = json.dumps([triple.subject, triple.relation, triple.object, triple.source])
+            triple.evidence = [GraphEvidence(
+                source_id="assertion:" + hashlib.sha256(identity.encode()).hexdigest(),
+                source_version=version, locator={"uri": str(path), "provided_source": triple.source},
+                method="explicit", pipeline_version="explicit-v1",
+            )]
         await self.store.upsert_triples(parsed)
         persist = getattr(self.store, "persist", None)
         if callable(persist):
