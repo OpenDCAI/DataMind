@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -15,6 +16,7 @@ from datamind.core.contracts import (
     SurfaceWriteResult,
 )
 from datamind.core.tools import ToolRegistry, ToolSpec
+from datamind.core.logging import current_context
 
 
 def _canonical(value: Any) -> str:
@@ -45,6 +47,10 @@ def _directory_source(path: Path, *, tool_name: str) -> SourceRef:
 def _source_from_call(spec: ToolSpec, args: dict[str, Any]) -> SourceRef:
     tool_name = spec.name
     path_value = args.get("path")
+    if tool_name == "workspace_update" and isinstance(path_value, str):
+        uri = str(Path(path_value).expanduser().resolve())
+        return SourceRef(source_id="workspace:" + _hash_text(uri), kind="file", uri=uri,
+                         metadata={"tool": tool_name})
     if isinstance(path_value, str) and path_value:
         path = Path(path_value).expanduser().resolve(strict=False)
         if path.is_file():
@@ -118,30 +124,58 @@ class IngestLedger:
         self._receipts_path = self._storage_dir / "ingest_receipts.jsonl"
         self._lock = asyncio.Lock()
         self._storage_dir.mkdir(parents=True, exist_ok=True)
+        self._initialize()
 
-    def _load_state(self) -> dict[str, Any]:
-        if not self._state_path.is_file():
-            return {"revision": 0, "successful": {}}
-        try:
-            state = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {"revision": 0, "successful": {}}
-        state.setdefault("revision", 0)
-        state.setdefault("successful", {})
-        return state
+    def _connect(self):
+        return sqlite3.connect(self._storage_dir / "ingest_ledger.sqlite3", timeout=30)
+
+    def _initialize(self) -> None:
+        with self._connect() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS ledger_state (singleton INTEGER PRIMARY KEY, revision INTEGER);
+                CREATE TABLE IF NOT EXISTS successful (fingerprint TEXT PRIMARY KEY, receipt_id TEXT);
+                CREATE TABLE IF NOT EXISTS receipts (receipt_id TEXT PRIMARY KEY, payload TEXT);
+            """)
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT revision FROM ledger_state WHERE singleton=1").fetchone() is None:
+                try:
+                    legacy = json.loads(self._state_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    legacy = {"revision": 0, "successful": {}}
+                conn.execute("INSERT INTO ledger_state VALUES (1, ?)", (legacy.get("revision", 0),))
+                conn.executemany("INSERT OR IGNORE INTO successful VALUES (?, ?)",
+                                 list(legacy.get("successful", {}).items()))
+
+    def _previous(self, fingerprint: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT receipt_id FROM successful WHERE fingerprint=?", (fingerprint,)).fetchone()
+        return row[0] if row else None
 
     def _save_state(self, state: dict[str, Any]) -> None:
-        temp = self._state_path.with_suffix(".tmp")
-        temp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp.replace(self._state_path)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            revision = conn.execute("SELECT revision FROM ledger_state WHERE singleton=1").fetchone()[0] + 1
+            conn.execute("UPDATE ledger_state SET revision=? WHERE singleton=1", (revision,))
+            conn.executemany("INSERT OR REPLACE INTO successful VALUES (?, ?)", state["successful"].items())
+            state["revision"] = revision
 
     def _append(self, receipt: IngestReceipt) -> None:
-        with self._receipts_path.open("a", encoding="utf-8") as fh:
-            fh.write(receipt.model_dump_json() + "\n")
+        context = current_context()
+        if context is not None:
+            receipt.applied_skills = list(context.extra.get("applied_skills", {}).values())
+        payload = receipt.model_dump_json()
+        # SQLite is the durable receipt store; the serialized JSONL append remains
+        # for existing tooling. Cross-process writers cannot interleave log lines.
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT OR IGNORE INTO receipts VALUES (?, ?)", (receipt.receipt_id, payload))
+            with self._receipts_path.open("a", encoding="utf-8") as fh:
+                fh.write(payload + "\n")
 
     @property
     def revision(self) -> int:
-        return int(self._load_state()["revision"])
+        with self._connect() as conn:
+            return conn.execute("SELECT revision FROM ledger_state WHERE singleton=1").fetchone()[0]
 
     async def execute(
         self,
@@ -166,8 +200,8 @@ class IngestLedger:
             raise ValueError(f"Store tool '{spec.name}' does not declare a surface")
 
         async with self._lock:
-            state = self._load_state()
-            previous = state["successful"].get(fingerprint)
+            state = {"revision": self.revision, "successful": {}}
+            previous = self._previous(fingerprint)
             # A receipt proves that these arguments succeeded in the past, not
             # that the target table still contains those rows. Replacements
             # must execute even for A -> B -> A (or an out-of-band DB change).
@@ -177,7 +211,12 @@ class IngestLedger:
                 spec.name in {"db_import_records", "db_import_csv", "db_import_path"}
                 and args.get("if_exists") == "replace"
             )
-            if previous and not replaces_table:
+            replaces_source = spec.name in {
+                "kb_add_file", "kb_add_path", "kb_update_workspace", "kb_delete_file", "workspace_update",
+                "graph_add_path", "graph_add_triples_from_text", "graph_upsert_triples",
+                "db_update_csv", "db_update_path", "db_update_records", "db_delete_path",
+            }
+            if previous and not replaces_table and not replaces_source:
                 receipt = IngestReceipt(
                     profile=self._profile,
                     revision=int(state["revision"]),
@@ -214,6 +253,15 @@ class IngestLedger:
                 self._append(receipt)
                 return receipt.model_dump(mode="json")
 
+            if isinstance(result, dict) and result.get("skipped_count", 0):
+                receipt = IngestReceipt(
+                    profile=self._profile, revision=int(state["revision"]), source=source,
+                    results=[SurfaceWriteResult(surface=surface, operation=spec.name,
+                        status="failed", items_written=_items_written(result), details=result,
+                        error="Some sources failed; successful writes may exist. Retry failed sources.")],
+                )
+                self._append(receipt)
+                return receipt.model_dump(mode="json")
             state["revision"] = int(state["revision"]) + 1
             receipt = IngestReceipt(
                 profile=self._profile,
@@ -228,8 +276,14 @@ class IngestLedger:
                     )
                 ],
             )
+            if spec.metadata.get("multi_surface") and isinstance(result, dict):
+                receipt.results = [SurfaceWriteResult(
+                    surface=name, operation=spec.name, items_written=len(result.get("sources", [])),
+                    details=result,
+                ) for name in result.get("surfaces", [])]
             state["successful"][fingerprint] = receipt.receipt_id
             self._save_state(state)
+            receipt.revision = state["revision"]
             self._append(receipt)
             return receipt.model_dump(mode="json")
 

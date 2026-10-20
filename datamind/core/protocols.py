@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal, Protocol, Sequence, runtime_checkable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -113,15 +113,38 @@ class RetrievedChunk(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class GraphEvidence(BaseModel):
+    """One independently retractable support for a relationship.
+
+    source_id identifies the logical input; source_version identifies its
+    immutable content. Locators refer to extracted text, not PDF byte offsets.
+    """
+
+    source_id: str
+    source_version: str
+    locator: dict[str, Any] = Field(default_factory=dict)
+    method: Literal["extracted", "explicit", "inferred"] = "extracted"
+    pipeline_version: str = "graph-extract-v1"
+
+
 class GraphTriple(BaseModel):
     subject: str
     relation: str
     object: str
     subject_type: str = "entity"
     object_type: str = "entity"
-    confidence: float = 1.0
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     source: str | None = None
     properties: dict[str, Any] = Field(default_factory=dict)
+    evidence: list[GraphEvidence] = Field(default_factory=list)
+
+    @field_validator("subject", "relation", "object")
+    @classmethod
+    def nonempty_identity(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("graph identities must not be blank")
+        return value
 
 
 class Entity(BaseModel):
@@ -138,6 +161,7 @@ class Edge(BaseModel):
     relation: str
     weight: float = 1.0
     properties: dict[str, Any] = Field(default_factory=dict)
+    evidence: list[GraphEvidence] = Field(default_factory=list)
 
 
 class GraphPath(BaseModel):

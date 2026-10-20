@@ -39,3 +39,9 @@ see the [DataMind documentation site](https://opendcai.github.io/DataMind-Doc/).
 
 
 PDF 解析支持可选的 MinerU API 优先适配；未安装或解析失败时自动回退到 `pypdf`。通过 `DATAMIND_MINERU=off` 可强制只使用 `pypdf`，`DATAMIND_MINERU_API_URL` 和 `DATAMIND_MINERU_API_TIMEOUT_S` 可指定 API 地址和超时。
+
+For opt-in immutable workspace updates, use `datamind_workspace_update`, followed
+by `datamind_workspace_ask`. The latter pins a published revision throughout the
+question, including source evidence. Existing live-profile tools retain their
+behavior. Snapshot storage currently supports local SQLite/NetworkX and
+Chroma/LanceDB; see `docs/KNOWLEDGE_LIFECYCLE.md` in the repository for boundaries.

@@ -1,8 +1,8 @@
 """NetworkX-backed graph store.
 
-Local, in-memory DiGraph persisted to disk as a JSON document. Good for
-profiles up to ~100k edges; past that you swap in a Neo4j provider by
-registering under `graph_registry`.
+Local, in-memory MultiDiGraph persisted to disk as a JSON document.
+Capacity depends on the workload; alternative providers register under
+`graph_registry`. Remote graph providers are not bundled here.
 
 Storage layout (one file per profile):
     storage/<profile>/graph.json
@@ -15,6 +15,7 @@ import asyncio
 import difflib
 import json
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -171,7 +172,8 @@ class NetworkXGraphStore:
                 # Profile snapshots and runtime writes have separate identities;
                 # exact duplicates within either origin overwrite deterministically.
                 profile_managed = bool((t.properties or {}).get("_profile_managed"))
-                origin = "profile" if profile_managed else (t.source or "runtime")
+                origin = ("profile:" + (t.source or (t.properties or {}).get("profile_source", ""))
+                          if profile_managed else (t.source or "runtime"))
                 self._g.add_edge(
                     t.subject,
                     t.object,
@@ -179,6 +181,7 @@ class NetworkXGraphStore:
                     relation=t.relation,
                     weight=float(t.confidence),
                     source=t.source,
+                    evidence=[item.model_dump(mode="json") for item in t.evidence],
                     **{f"p_{k}": v for k, v in (t.properties or {}).items()},
                 )
             self._mutation_revision += 1
@@ -207,11 +210,21 @@ class NetworkXGraphStore:
                 (u, v, key)
                 for u, v, key, data in self._g.edges(keys=True, data=True)
                 if data.get("p__source_path") == source
+                or re.fullmatch(re.escape(source) + r"#part=\d+", str(data.get("p__source_path") or "")) is not None
             ]
             self._g.remove_edges_from(stale)
         await self.upsert_triples(triples)
         with self._state_lock:
             self._g.remove_nodes_from(list(nx.isolates(self._g)))
+
+    def source_paths(self) -> set[str]:
+        """List document-managed origins, excluding lineage and explicit writes."""
+        with self._state_lock:
+            return {
+                re.sub(r"#part=\d+$", "", str(data["p__source_path"]))
+                for _, _, data in self._g.edges(data=True)
+                if data.get("p__source_managed") and data.get("p__source_path")
+            }
 
     async def reconcile_lineage_triples(
         self, root: str, triples: Sequence[GraphTriple]
@@ -358,10 +371,11 @@ class NetworkXGraphStore:
             target=v,
             relation=str(data.get("relation", "related")),
             weight=float(data.get("weight", 1.0)),
+            evidence=data.get("evidence", []),
             properties={
                 k[2:] if k.startswith("p_") else k: val
                 for k, val in data.items()
-                if k not in {"relation", "weight"}
+                if k not in {"relation", "weight", "evidence"}
             },
         )
 

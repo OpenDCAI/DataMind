@@ -78,14 +78,14 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         return await svc.kb_add_path(
             path=path, recursive=recursive, copy_to_profile=copy_to_profile
         )
-        
+
     async def _kb_delete_file(
         path: str
     ) -> dict:
         return await svc.kb_delete_file(
             path=path
         )
-        
+
     async def _kb_update_worksapce() -> dict:
         return await svc.kb_update_worksapce()
 
@@ -118,7 +118,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         return await svc.db_import_path(
             path=path, table_prefix=table_prefix, if_exists=if_exists, delimiter=delimiter
         )
-        
+
     async def _db_update_csv(
         path: str,
         delimiter: str = ",",
@@ -127,7 +127,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         return await svc.db_update_csv(
             path=path, delimiter=delimiter, table=table,
         )
-        
+
     async def _db_update_records(
         records: list[dict],
         path: str,
@@ -136,7 +136,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         return await svc.db_update_records(
             records=records, path=path, table=table,
         )
-        
+
     async def _db_update_path(
         path: str,
         delimiter: str = ",",
@@ -144,7 +144,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         return await svc.db_update_path(
             path=path, delimiter=delimiter,
         )
-        
+
     async def _db_delete_path(
         path: str,
     ) -> dict:
@@ -157,18 +157,24 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
     ) -> dict:
         return await svc.surface_ingest_path(path=path, surfaces=surfaces, recursive=recursive)
 
-    async def _graph_add_triples_from_text(text: str, max_triples: int = 30) -> dict:
-        return await svc.graph_add_triples_from_text(text=text, max_triples=max_triples)
+    async def _graph_add_triples_from_text(
+        text: str, max_triples: int = 30, relation_types: list[str] | None = None,
+    ) -> dict:
+        return await svc.graph_add_triples_from_text(
+            text=text, max_triples=max_triples, relation_types=relation_types,
+        )
 
     async def _graph_add_path(
         path: str,
         recursive: bool = True,
         max_triples_per_file: int = 30,
+        relation_types: list[str] | None = None,
     ) -> dict:
         return await svc.graph_add_path(
             path=path,
             recursive=recursive,
             max_triples_per_file=max_triples_per_file,
+            relation_types=relation_types,
         )
 
     tools = [
@@ -444,7 +450,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                             "Source file path recorded per row as _source_file; used by later "
                             "incremental updates to replace only this source's rows."
                         ),
-                    },  
+                    },
                 },
                 "required": ["table", "records"],
             },
@@ -484,7 +490,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "path": {
-                        "type": "string", 
+                        "type": "string",
                         "description": "Path to the CSV file."
                     },
                     "delimiter": {
@@ -564,7 +570,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "path": {
-                        "type": "string", 
+                        "type": "string",
                         "description": "Path to CSV/TSV/XLSX file.",
                     },
                     "delimiter": {"type": "string", "default": ","},
@@ -589,7 +595,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                 "type": "object",
                 "properties": {
                     "path": {
-                        "type": "string", 
+                        "type": "string",
                         "description": (
                             "Path to the source file to retract. Its resolved path "
                             "is used to match _source_file across all tables; the "
@@ -627,6 +633,8 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                         "minimum": 1,
                         "maximum": 200,
                     },
+                    "relation_types": {"type": "array", "items": {"type": "string"},
+                        "description": "Optional allowed relation vocabulary; invalid extraction is rejected."},
                 },
                 "required": ["text"],
             },
@@ -649,6 +657,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
                     "max_triples_per_file": {
                         "type": "integer", "minimum": 1, "maximum": 200, "default": 30,
                     },
+                    "relation_types": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["path"],
             },

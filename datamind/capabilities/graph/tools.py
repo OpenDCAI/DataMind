@@ -147,6 +147,15 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
                                 "object_type": {"type": "string", "default": "entity"},
                                 "confidence": {"type": "number", "default": 1.0},
                                 "source": {"type": ["string", "null"]},
+                                "evidence": {"type": "array", "items": {
+                                    "type": "object", "properties": {
+                                        "source_id": {"type": "string"},
+                                        "source_version": {"type": "string"},
+                                        "locator": {"type": "object"},
+                                        "method": {"type": "string", "enum": ["explicit", "extracted", "inferred"]},
+                                        "pipeline_version": {"type": "string"},
+                                    }, "required": ["source_id", "source_version"],
+                                }},
                             },
                             "required": ["subject", "relation", "object"],
                         },

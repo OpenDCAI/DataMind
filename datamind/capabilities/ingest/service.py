@@ -46,9 +46,10 @@ from datamind.capabilities.kb.indexer import (
 from datamind.capabilities.kb.service import KBService
 from datamind.capabilities.db.service import DBService
 from datamind.capabilities.graph.service import GraphService
+from datamind.capabilities.graph.evidence import persist_input
 from datamind.core.errors import CapabilityError
 from datamind.core.logging import get_logger
-from datamind.core.protocols import GraphTriple, TextModelClient
+from datamind.core.protocols import GraphEvidence, GraphTriple, TextModelClient
 
 from .formats import DOCUMENT_EXTS, TABLE_EXTS, extract_document, extract_tabular
 
@@ -1813,113 +1814,86 @@ class IngestService:
 
     # ------------------------------------------------------------- Graph
 
-    async def graph_add_triples_from_text(
-        self,
-        *,
-        text: str,
-        max_triples: int = 30,
-        source: str | None = None,
-    ) -> dict[str, Any]:
-        """Use the LLM to extract (subject, relation, object) triples from
-        free-form text, then upsert them into the graph store.
-
-        The prompt asks for strict JSON; we tolerate minor formatting
-        deviations (markdown fence wrappers etc.) but reject anything that
-        doesn't parse.
-        """
-        if self._graph is None:
-            raise CapabilityError("ingest", "Graph surface is disabled")
-        if not text or not text.strip():
-            raise CapabilityError("ingest", f"text is required")
-        if not 1 <= max_triples <= 200:
-            raise CapabilityError("ingest", "max_triples must be between 1 and 200")
-
+    async def _extract_graph_triples(
+        self, *, text: str, max_triples: int, source: str | None,
+        source_version: str | None = None, locator: dict[str, Any] | None = None,
+        relation_types: list[str] | None = None,
+    ) -> list[GraphTriple]:
+        """Extract without mutating state: a failed later part cannot lose old edges."""
         prompt = (
-            "Extract knowledge graph triples from the user's text. "
-            "Each triple is (subject, relation, object). Use concise "
-            "noun phrases for entities and a short verb phrase for the "
-            "relation. Prefer English relation names with snake_case "
-            "(e.g. 'reports_to', 'works_on', 'located_in'). Keep entity "
-            f"names in their original language. Cap at {max_triples} triples. "
-            "Return STRICT JSON only — an array of objects with keys "
-            '"subject", "relation", "object". Do not include any prose, '
-            "no markdown fences. Example:\n"
-            '[{"subject": "Alice", "relation": "leads", "object": "Search Team"}]\n\n'
-            "Text:\n---\n" + text.strip() + "\n---"
+            "Extract only explicitly stated knowledge graph triples. Do not infer facts. "
+            "Use concise entity names in their original language and snake_case relations. "
+            f"Return at most {max_triples} triples as a strict JSON array with keys "
+            "subject, relation, object. Optional keys: subject_type, object_type, confidence. "
+            "Return [] if there are no explicit relationships. No markdown.\n"
         )
-
+        if relation_types:
+            prompt += "Allowed relations: " + ", ".join(relation_types) + ".\n"
         raw = (await self._client.generate_text(
-            prompt, model=self._model, max_tokens=2048, temperature=0.0,
+            prompt + "Text:\n---\n" + text, model=self._model,
+            max_tokens=2048, temperature=0.0,
         )).strip()
-
-        triples = self._parse_triples_json(raw)
-        if not triples:
-            if source:
-                reconcile = getattr(self._graph.store, "reconcile_source_triples", None)
-                if source and callable(reconcile):
-                    await reconcile(source, [])
-                    persist = getattr(self._graph.store, "persist", None)
-                    if callable(persist):
-                        result = persist()
-                        if hasattr(result, "__await__"):
-                            await result
-            return {
-                "triples_added": 0,
-                "source": source,
-                "note": "model returned no parseable triples",
-                "raw_response": raw[:500],
-            }
-
-        # Upsert into the graph store via the same path graph_upsert_triples uses.
-        gt: list[GraphTriple] = [
-            GraphTriple(
-                subject=str(t["subject"]),
-                relation=str(t["relation"]),
-                object=str(t["object"]),
-                source=source,
+        parsed = self._parse_triples_json(raw)
+        version = source_version or "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+        identity = source or "text:" + version.removeprefix("sha256:")
+        evidence = GraphEvidence(
+            source_id=("file:" + hashlib.sha256(identity.encode()).hexdigest()
+                       if source else "text:" + version.removeprefix("sha256:")),
+            source_version=version, locator={"uri": source, **(locator or {})},
+        )
+        triples = []
+        for item in parsed[:max_triples]:
+            triple = GraphTriple(
+                **{key: item[key] for key in (
+                    "subject", "relation", "object", "subject_type", "object_type", "confidence"
+                ) if key in item}, source=source, evidence=[evidence],
+                properties={"_source_managed": True, "_source_path": source} if source else {},
             )
-            for t in triples[:max_triples]
-        ]
-        properties = {"_source_managed": True, "_source_path": source} if source else {}
-        if properties:
-            gt = [t.model_copy(update={"properties": properties}) for t in gt]
+            if relation_types and triple.relation not in relation_types:
+                raise CapabilityError("ingest", f"relation outside schema: {triple.relation}")
+            triples.append(triple)
+        return triples
+
+    async def _commit_graph_source(self, source: str | None, triples: list[GraphTriple]) -> None:
         reconcile = getattr(self._graph.store, "reconcile_source_triples", None)
         if source and callable(reconcile):
-            await reconcile(source, gt)
+            await reconcile(source, triples)
         else:
-            await self._graph.store.upsert_triples(gt)
-
-        # Persist to disk so the new edges survive restart. NetworkX
-        # store's persist is sync; other stores may make it a coroutine.
+            await self._graph.store.upsert_triples(triples)
         persist = getattr(self._graph.store, "persist", None)
         if callable(persist):
             result = persist()
-            # Tolerate either sync or async implementations.
             if hasattr(result, "__await__"):
                 await result
 
-        _log.info("graph_add_triples_from_text", extra={"count": len(gt)})
-        return {
-            "triples_added": len(gt),
-            "source": source,
-            "samples": [
-                {"subject": t.subject, "relation": t.relation, "object": t.object}
-                for t in gt[:8]
-            ],
-        }
+    async def graph_add_triples_from_text(
+        self, *, text: str, max_triples: int = 30, source: str | None = None,
+        relation_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if self._graph is None:
+            raise CapabilityError("ingest", "Graph surface is disabled")
+        if not text or not text.strip():
+            raise CapabilityError("ingest", "text is required")
+        if not 1 <= max_triples <= 200:
+            raise CapabilityError("ingest", "max_triples must be between 1 and 200")
+        evidence_path, source_version = persist_input(self._profile_dir, text, ".txt")
+        triples = await self._extract_graph_triples(
+            text=text, max_triples=max_triples, source=source, relation_types=relation_types,
+            source_version=source_version,
+            locator={"uri": str(evidence_path), "char_start": 0, "char_end": len(text)},
+        )
+        await self._commit_graph_source(source, triples)
+        return {"triples_added": len(triples), "source": source,
+                "samples": [t.model_dump(mode="json") for t in triples[:8]]}
 
     async def graph_add_path(
-        self,
-        *,
-        path: str,
-        recursive: bool = True,
-        max_triples_per_file: int = 30,
+        self, *, path: str, recursive: bool = True, max_triples_per_file: int = 30,
+        relation_types: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Extract and persist graph triples from one text file or directory.
+        """Replace each complete document revision, preserving other source supports.
 
-        This is deliberately a bounded batch wrapper around
-        ``graph_add_triples_from_text``. It keeps source paths on every edge so
-        later retrieval can explain where a relationship came from.
+        Directory ingestion also retracts managed documents removed from that directory.
+        Extraction errors retain the last successful revision and are reported explicitly.
         """
         if self._graph is None:
             raise CapabilityError("ingest", "Graph surface is disabled")
@@ -1927,117 +1901,84 @@ class IngestService:
             raise CapabilityError("ingest", "path is required")
         if not 1 <= max_triples_per_file <= 200:
             raise CapabilityError("ingest", "max_triples_per_file must be between 1 and 200")
-
         resolved = _resolve_safe_path(path, self._allowed_roots)
+        directory = resolved.is_dir()
         if resolved.is_file():
             if resolved.suffix.lower() not in _GRAPH_DOCUMENT_EXTS:
-                raise CapabilityError(
-                    "ingest",
-                    f"unsupported extension '{resolved.suffix}'. Supported: {sorted(_GRAPH_DOCUMENT_EXTS)}",
-                )
+                raise CapabilityError("ingest", f"unsupported extension '{resolved.suffix}'")
             candidates = [resolved]
-        elif resolved.is_dir():
+        elif directory:
             iterator = resolved.rglob("*") if recursive else resolved.glob("*")
-            candidates = sorted(
-                item for item in iterator
-                if item.is_file() and item.suffix.lower() in _GRAPH_DOCUMENT_EXTS
-            )
+            candidates = sorted(p for p in iterator if p.is_file() and p.suffix.lower() in _GRAPH_DOCUMENT_EXTS)
         else:
             raise CapabilityError("ingest", f"path does not exist: {resolved}")
 
-        processed: list[dict[str, Any]] = []
-        skipped: list[str] = []
-        total = 0
+        processed, skipped, removed = [], [], []
         for candidate in candidates:
             try:
-                if candidate.suffix.lower() in _TEXT_EXTS:
-                    content = candidate.read_text(encoding="utf-8", errors="replace")
-                else:
-                    content = extract_document(candidate).text
-                if not content.strip():
-                    skipped.append(f"{candidate}: empty")
-                    continue
-                # A document can be much larger than the model context.  Use
-                # the same deterministic splitter as KB ingestion, but with
-                # no overlap: overlap is useful for retrieval and would make
-                # graph extraction duplicate relationships.  Each part gets
-                # a distinct reconciliation key so a later part cannot
-                # replace triples extracted from an earlier part.
-                parts = _split_text(
-                    content,
-                    chunk_size=self._chunk_size,
-                    chunk_overlap=0,
-                )
-                file_total = 0
-                part_results: list[dict[str, Any]] = []
+                candidate = _resolve_safe_path(str(candidate), self._allowed_roots)
+                raw_version = self._file_hash(candidate)
+                content = (candidate.read_text(encoding="utf-8", errors="replace")
+                           if candidate.suffix.lower() in _TEXT_EXTS else extract_document(candidate).text)
+                parts = _split_text(content, chunk_size=self._chunk_size, chunk_overlap=0)
+                triples, results = [], []
+                offset = 0
                 for ordinal, part in enumerate(parts, 1):
-                    remaining = max_triples_per_file - file_total
+                    remaining = max_triples_per_file - len(triples)
                     if remaining <= 0:
                         break
-                    part_source = (
-                        str(candidate)
-                        if len(parts) == 1
-                        else f"{candidate}#part={ordinal}"
+                    start = content.find(part, offset)
+                    locator = {"part": ordinal}
+                    if start >= 0:
+                        locator.update(char_start=start, char_end=start + len(part))
+                        offset = start + len(part)
+                    part_source = str(candidate) if len(parts) == 1 else f"{candidate}#part={ordinal}"
+                    extracted = await self._extract_graph_triples(
+                        text=part, max_triples=remaining, source=str(candidate),
+                        source_version=raw_version, locator=locator, relation_types=relation_types,
                     )
-                    result = await self.graph_add_triples_from_text(
-                        text=part,
-                        max_triples=remaining,
-                        source=part_source,
-                    )
-                    part_results.append(result)
-                    file_total += int(result.get("triples_added", 0))
-                processed.append({
-                    "path": str(candidate),
-                    "source": str(candidate),
-                    "triples_added": file_total,
-                    "parts_processed": len(part_results),
-                    "parts": part_results,
-                })
-                total += file_total
+                    for triple in extracted:
+                        triple.source = part_source
+                    triples.extend(extracted)
+                    results.append({"source": part_source, "triples_added": len(extracted)})
+                if self._file_hash(candidate) != raw_version:
+                    raise CapabilityError("ingest", "source changed during extraction; retry")
+                await self._commit_graph_source(str(candidate), triples)
+                processed.append({"path": str(candidate), "source": str(candidate),
+                    "source_version": raw_version, "triples_added": len(triples),
+                    "parts_processed": len(results), "parts": results,
+                    "truncated": len(results) < len(parts) or len(triples) >= max_triples_per_file})
             except Exception as exc:
-                # A malformed archive, missing parser, or model-side failure
-                # should not prevent other files in the same directory from
-                # being ingested.  CancelledError inherits BaseException and
-                # therefore still propagates to the caller.
-                _log.warning(
-                    "graph_file_skipped",
-                    extra={"path": str(candidate), "error": str(exc)},
-                )
                 skipped.append(f"{candidate}: {type(exc).__name__}: {exc}")
 
-        return {
-            "path": str(resolved),
-            "files_processed": len(processed),
-            "triples_added": total,
-            "files": processed,
-            "skipped": skipped[:20],
-            "skipped_count": len(skipped),
-        }
+        sources = getattr(self._graph.store, "source_paths", None)
+        if directory and callable(sources):
+            for old_source in sorted(sources()):
+                old = Path(old_source)
+                if old.is_relative_to(resolved) and (recursive or old.parent == resolved) and not old.exists():
+                    await self._commit_graph_source(old_source, [])
+                    removed.append(old_source)
+        return {"path": str(resolved), "files_processed": len(processed),
+                "triples_added": sum(p["triples_added"] for p in processed), "files": processed,
+                "removed_sources": removed, "skipped": skipped[:20], "skipped_count": len(skipped)}
 
     @staticmethod
-    def _parse_triples_json(raw: str) -> list[dict[str, str]]:
-        """Be lenient: strip code fences, trailing prose, common LLM tics."""
-        s = raw.strip()
-        # Strip ```json ... ``` fences.
-        if s.startswith("```"):
-            s = re.sub(r"^```(?:json)?\s*", "", s)
-            s = re.sub(r"\s*```\s*$", "", s)
-        # Find the first JSON array — sometimes the model adds preamble.
-        m = re.search(r"\[.*\]", s, flags=re.DOTALL)
-        if not m:
-            return []
+    def _parse_triples_json(raw: str) -> list[dict[str, Any]]:
+        """Valid empty output retracts edges; malformed output must never do so."""
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```\s*$", "", text)
         try:
-            arr = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return []
-        out: list[dict[str, str]] = []
-        for item in arr if isinstance(arr, list) else []:
-            if not isinstance(item, dict):
-                continue
-            if not all(k in item for k in ("subject", "relation", "object")):
-                continue
-            out.append(item)
-        return out
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise CapabilityError("ingest", "invalid graph extraction JSON; old relations retained") from exc
+        if not isinstance(parsed, list):
+            raise CapabilityError("ingest", "graph extraction must be an array")
+        for item in parsed:
+            if not isinstance(item, dict) or not all(k in item for k in ("subject", "relation", "object")):
+                raise CapabilityError("ingest", "invalid graph triple; old relations retained")
+        return parsed
 
 
 # ============================================================ DI

@@ -51,11 +51,11 @@ class DBService:
         if table not in self._schema_cache:
             self._schema_cache[table] = await self.dialect.describe(self.engine, table)
         return self._schema_cache[table]
-    
+
     async def describe_all(self) -> list[TableSchema]:
         names = await self.list_tables()
         return list(await asyncio.gather(*(self.describe(t) for t in names)))
-    
+
     def invalidate_schema_cache(self) -> None:
         self._schema_cache.clear()
 
@@ -65,7 +65,7 @@ class DBService:
             result = close_fn()
             if hasattr(result, "__await__"):
                 await result
-            
+
         dispose = getattr(self.engine, "dispose", None)
         if callable(dispose):
             result = dispose()
@@ -119,13 +119,13 @@ class DBService:
             "truncated": result.truncated,
             "elapsed_ms": result.elapsed_ms,
         }
-    
+
     async def describe_at_version(self, table: str, version: str) -> TableSchema:
         if self.dialect.name != "dolt":
             raise CapabilityError("db", "Only Dolt supports describe at a specific version")
         version = self.dialect.validate_version(version)
         return await self.dialect.describe_at_version(self.engine, table, version)
-    
+
     async def describe_all_at_version(self, version: str) -> list[TableSchema]:
         names = await self.list_tables_at_version(version=version)
         return list(await asyncio.gather(*(self.describe_at_version(t, version=version) for t in names)))
@@ -134,7 +134,7 @@ class DBService:
         if self.dialect.name != "dolt":
             raise CapabilityError("db", "Only Dolt supports query at a specific version",)
         version = self.dialect.validate_version(version)
-        
+
         return await self.dialect.execute_readonly_at_version(
             self.engine,
             sql,
@@ -142,7 +142,7 @@ class DBService:
             timeout_s=self.db_cfg.query_timeout_s,
             version=version,
         )
-        
+
     async def query_nl_at_version(
         self,
         question: str,
@@ -161,7 +161,7 @@ class DBService:
                 "NL2SQL requires llm_client + llm_model; pass them in the service.",
             )
         version = self.dialect.validate_version(version)
-        
+
         if tables:
             available = set(await self.list_tables_at_version(version=version))
             missing = [table for table in tables if table not in available]
@@ -197,13 +197,13 @@ class DBService:
             raise CapabilityError("db", "Only Dolt supports rollback at a specific version")
         version = self.dialect.validate_version(version)
         return await self.dialect.rollback(engine=self.engine, version=version)
-    
+
     async def list_tables_at_version(self, version: str) -> list[str]:
         if self.dialect.name != "dolt":
             raise CapabilityError("db", "Only Dolt supports listing tables at a specific version")
         version = self.dialect.validate_version(version)
         return await self.dialect.list_tables_at_version(self.engine, version)
-    
+
     async def list_versions(self) -> list[dict[str, Any]]:
         if self.dialect.name != "dolt":
             raise CapabilityError(
@@ -211,7 +211,7 @@ class DBService:
                 "Only Dolt supports listing all versions",
             )
         return await self.dialect.list_versions(self.engine)
-    
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------

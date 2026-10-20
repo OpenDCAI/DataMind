@@ -54,6 +54,8 @@ jobs:
           datamind/tests/test_kb_versioning.py
           datamind/tests/test_kb_ingest.py
           datamind/tests/test_pr28_regressions.py
+          datamind/tests/test_workspace_revisions.py
+          datamind/tests/test_ingestion_skills.py
 
   databases:
     name: MySQL and Dolt integration

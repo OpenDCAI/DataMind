@@ -34,7 +34,7 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
             "truncated": len(chunks) >= top_k,
             "next_cursor": None,
         }
-    
+
     async def _search_at_version(query: str, top_k: int = 5, filters: dict | None = None, version: int = None) -> dict:
         chunks = await kb.search_at_version(query, top_k=top_k, filters=filters, version=version, )
         return {
@@ -57,10 +57,10 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
 
     async def _count() -> dict:
         return {"chunks": await kb.count()}
-    
+
     async def _list_versions() -> dict:
         return {"versions": kb.list_versions()}
-    
+
     async def _rollback(version: int) -> dict:
         return await kb.rollback(version=version)
 
@@ -126,7 +126,7 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
             },
         ),
     ]
-    
+
     if kb is not None and hasattr(kb, "vector_store") and kb.vector_store.name == "dolt":
         # Versioned KB Tools
         tools.extend([

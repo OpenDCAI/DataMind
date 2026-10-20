@@ -52,7 +52,7 @@ class SourceRef(BaseModel):
                 hasher.update(chunk)
         digest = hasher.hexdigest()
         return cls(
-            source_id=f"file:{digest[:24]}",
+            source_id="file:" + hashlib.sha256(str(resolved).encode("utf-8")).hexdigest(),
             kind="file",
             uri=str(resolved),
             checksum=f"sha256:{digest}",
@@ -95,6 +95,7 @@ class IngestReceipt(BaseModel):
     revision: int
     source: SourceRef
     results: list[SurfaceWriteResult]
+    applied_skills: list[dict[str, str]] = Field(default_factory=list)
 
     @property
     def ok(self) -> bool:

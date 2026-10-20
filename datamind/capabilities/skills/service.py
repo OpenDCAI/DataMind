@@ -45,10 +45,19 @@ class SkillsService:
         self._embedding = embedding
         self._store = vector_store
         self._by_name: dict[str, SkillManifest] = {}
+        self._catalog_loaded = False
+        self._index_loaded = False
         # code skills aren't indexed; they just get exposed as tools.
         self._code_tools: list[ToolSpec] = build_code_skills()
 
     # ------------------------------------------------------------ lifecycle
+
+    def _load_catalog(self) -> None:
+        manifests = discover_skills(self._skills_dir)
+        if self._profile_skills_dir.resolve() != self._skills_dir.resolve():
+            manifests.extend(discover_skills(self._profile_skills_dir))
+        self._by_name = {m.name: m for m in manifests}
+        self._catalog_loaded = True
 
     async def load(self) -> dict[str, int]:
         # Built-in/user skills load first; profile-scoped skills override a
@@ -84,6 +93,7 @@ class SkillsService:
                 "code_tools": len(self._code_tools),
             },
         )
+        self._catalog_loaded = self._index_loaded = True
         return {
             "manifests": len(manifests),
             "indexed": indexed,
@@ -93,6 +103,8 @@ class SkillsService:
     # --------------------------------------------------------------- public
 
     def list_skills(self) -> list[dict[str, Any]]:
+        if not self._catalog_loaded:
+            self._load_catalog()
         return [
             {
                 "name": m.name,
@@ -100,16 +112,20 @@ class SkillsService:
                 "keywords": list(m.keywords),
                 "path": str(m.path),
                 "body_chars": len(m.body),
+                "version": m.version, "content_hash": m.content_hash,
             }
             for m in self._by_name.values()
         ]
 
     def get(self, name: str) -> dict[str, Any]:
+        if not self._catalog_loaded:
+            self._load_catalog()
         m = self._by_name.get(name)
         if m is None:
             return {"found": False, "name": name, "candidates": list(self._by_name)}
         return {
             "found": True,
+            "version": m.version, "content_hash": m.content_hash,
             "name": m.name,
             "description": m.description,
             "keywords": list(m.keywords),
@@ -119,7 +135,17 @@ class SkillsService:
 
     async def search(self, query: str, *, top_k: int = 3) -> list[dict[str, Any]]:
         if not self._embedding or not self._store:
-            return []
+            # Local catalog search remains available without an embedding service.
+            if not self._catalog_loaded:
+                self._load_catalog()
+            terms = query.casefold().split()
+            ranked = sorted(self._by_name.values(), key=lambda m: sum(
+                term in m.full_text.casefold() for term in terms), reverse=True)
+            return [{"name": m.name, "description": m.description, "snippet": m.body[:400],
+                     "version": m.version, "content_hash": m.content_hash}
+                    for m in ranked[:top_k] if any(term in m.full_text.casefold() for term in terms)]
+        if not self._index_loaded:
+            await self.load()
         vec = await self._embedding.embed_query(query)
         hits = await self._store.query(vec, top_k=top_k)
         return [
@@ -141,6 +167,7 @@ class SkillsService:
         body: str,
         keywords: list[str] | None = None,
         overwrite: bool = True,
+        version: str = "1.0.0",
     ) -> dict[str, Any]:
         """Write a profile-scoped SKILL.md and refresh the live index."""
         normalized = name.strip().lower()
@@ -169,6 +196,7 @@ class SkillsService:
         text = (
             "---\n"
             f"name: {normalized}\n"
+            f"version: {json.dumps(version)}\n"
             f"description: {description_json}\n"
             f"keywords: {keyword_json}\n"
             "---\n\n"

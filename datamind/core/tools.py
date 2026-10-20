@@ -103,6 +103,11 @@ class ToolRegistry:
         for s in specs:
             self.add(s)
 
+    def replace(self, spec: ToolSpec) -> None:
+        """Replace an existing tool, preserving the registry seen by its loop."""
+        self.get(spec.name)
+        self._tools[spec.name] = spec
+
     def get(self, name: str) -> ToolSpec:
         if name not in self._tools:
             raise ConfigError(
