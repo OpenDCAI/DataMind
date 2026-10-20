@@ -104,6 +104,13 @@ class BaseSQLDialect:
         row_limit: int = 1000,
         timeout_s: float = 10.0,
     ) -> QueryResult:
+        self._validate_readonly_sql(sql, row_limit)
+        bounded = self._bound_query(sql, row_limit + 1)
+        return await self._execute_bounded_readonly(
+            engine, bounded, row_limit=row_limit, timeout_s=timeout_s,
+        )
+
+    def _validate_readonly_sql(self, sql: str, row_limit: int) -> None:
         if not sql or not sql.strip():
             raise CapabilityError("db", "Empty SQL")
         if row_limit < 1:
@@ -117,8 +124,12 @@ class BaseSQLDialect:
                 f"destructive SQL rejected (leading verb is write/DDL): {sql[:80]!r}"
             )
 
-        bounded = ensure_row_limit(sql, row_limit + 1)
+    def _bound_query(self, sql: str, row_limit: int) -> str:
+        return ensure_row_limit(sql, row_limit)
 
+    async def _execute_bounded_readonly(
+        self, engine: Engine, bounded: str, *, row_limit: int, timeout_s: float,
+    ) -> QueryResult:
         def _run() -> QueryResult:
             start = time.perf_counter()
             with engine.connect() as conn:
