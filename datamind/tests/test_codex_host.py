@@ -9,7 +9,7 @@ from datamind.codex import CodexSession, sdk_config
 
 
 def test_config_is_valid_toml_and_profile_bound(tmp_path):
-    cfg = sdk_config(workspace=str(tmp_path), data_root=str(tmp_path / '数据 "root'), profile='team-a')
+    cfg = sdk_config(workspace=str(tmp_path), data_root=str(tmp_path / '数据 📊 "root'), profile='team-a')
     doc = tomllib.loads('\n'.join(cfg['config_overrides']))
     server = doc['mcp_servers']['datamind']
     assert server['args'] == ['-m', 'datamind.mcp']

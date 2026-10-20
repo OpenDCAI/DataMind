@@ -16,7 +16,7 @@ def sdk_config(*, workspace: str, data_root: str, profile: str = 'default',
     cwd = str(Path(workspace).expanduser().resolve())
     return {
         'cwd': cwd,
-        'config_overrides': tuple(f'{key}={json.dumps(value)}' for key, value in {
+        'config_overrides': tuple(f'{key}={json.dumps(value, ensure_ascii=False)}' for key, value in {
             'mcp_servers.datamind.command': python,
             'mcp_servers.datamind.args': ['-m', 'datamind.mcp'],
             'mcp_servers.datamind.cwd': cwd,
