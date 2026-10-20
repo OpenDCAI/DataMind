@@ -13,7 +13,7 @@ assert package.joinpath("static/app.html").is_file(), "browser UI missing from w
 assert package.joinpath("skills").is_dir(), "skill catalog missing from wheel"
 assert any(package.joinpath("skills").glob("*/SKILL.md")), "no packaged skills"
 assert "dolt" in db_registry and "lancedb" in vector_store_registry
-settings = Settings()
+settings = Settings(llm={"api_key": "wheel-smoke", "model": "test"})
 assert settings.kb.vector_store == "chroma"
 assert settings.kb.ingest_mode == "direct"
 checkout = Path(__file__).resolve().parents[1]
