@@ -2,7 +2,7 @@
 
 Dolt speaks the MySQL wire protocol and most of its SQL surface, so we
 build on the same machinery as `MySQLDialect` (pymysql driver, backtick
-quoting, `SET SESSION TRANSACTION READ ONLY`). On top of that it exposes
+quoting, `START TRANSACTION READ ONLY`). On top of that it exposes
 commit-level versioning:
 
     - `build_engine(dsn, storage_dir=...)` starts a local `dolt sql-server`,
@@ -153,9 +153,9 @@ class DoltDialect(BaseSQLDialect):
             self._server = None
 
     def _before_query(self, conn: Any) -> None:
-        # Best-effort; privilege-dependent.
+        # Scope the hint to this transaction, not future pooled writes.
         try:
-            conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
+            conn.execute(text("START TRANSACTION READ ONLY"))
         except Exception:  # pragma: no cover
             pass
 
