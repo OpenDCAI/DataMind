@@ -556,3 +556,13 @@ async def test_get_candidate_tables_finds_import(service, tmp_path, db_service):
         db_service.engine, db_service.dialect, str(p),
     )
     assert t == ["t1"]
+
+
+@pytest.mark.asyncio
+async def test_reserved_source_column_cannot_break_replace_provenance(service, db_service, profile):
+    source = _write_csv(profile / "uploads" / "reserved.csv", ["_source_file", "value"], [["user data", "old"]])
+    await service.db_import_csv(path=str(source), table="reserved_source")
+    _write_csv(source, ["_source_file", "value"], [["new user data", "new"]])
+    await service.db_update_csv(path=str(source), table="reserved_source")
+    result = await db_service.query_sql("SELECT col_1, value, _source_file FROM reserved_source")
+    assert result.rows == [["new user data", "new", str(source.resolve())]]

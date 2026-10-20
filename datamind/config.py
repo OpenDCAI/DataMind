@@ -261,8 +261,8 @@ class HooksConfig(BaseModel):
     path_allowlist_extra: list[str] = Field(default_factory=list)
 
 class KBConfig(BaseModel):
-    ingest_mode: Literal["direct", "cocoindex"] = "cocoindex"
-    vector_store: Literal["chroma", "lancedb"] = "lancedb"
+    ingest_mode: Literal["direct", "cocoindex"] = "direct"
+    vector_store: Literal["chroma", "lancedb"] = "chroma"
     lancedb_uri: str = "./lancedb_data"
     cocoindex_inbox: str = "./cocoindex_inbox"
 

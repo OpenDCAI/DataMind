@@ -23,7 +23,6 @@ import os
 import shutil
 import subprocess
 import socket, time
-import mysql.connector
 
 from urllib.parse import urlparse
 from typing import Any
@@ -45,9 +44,9 @@ _TABLE_RE = re.compile(r"\bFROM\s+(`?[A-Za-z_][\w$]*`?)", re.IGNORECASE)
 @db_registry.register("dolt")
 class DoltDialect(BaseSQLDialect):
     name = "dolt"
-    
+
     server: subprocess.Popen | None = None
-    
+
     def _parse_dolt_dsn(self, dsn: str) -> dict:
         parsed = urlparse(dsn)
         return {
@@ -57,8 +56,9 @@ class DoltDialect(BaseSQLDialect):
             "port": parsed.port or 3307,
             "dbname": parsed.path.lstrip("/") or "defaultdb",
         }
-    
+
     def _wait_ready(self, host, port, user, password, tries=60):
+        import mysql.connector
         for i in range(tries):
             time.sleep(0.5)
             try:
@@ -75,8 +75,12 @@ class DoltDialect(BaseSQLDialect):
                         raise RuntimeError(f"Dolt 启动超时: {e}")
                     continue
                 raise
-        
+
     def build_engine(self, dsn: str | None = None, **kwargs: Any):
+        try:
+            import mysql.connector
+        except ImportError as exc:
+            raise ConfigError("Dolt requires pip install datamind[dolt]") from exc
         storage_dir = kwargs.pop("storage_dir", None)
         if not storage_dir:
             raise ValueError("Dolt needs either a data dir.")
@@ -87,11 +91,11 @@ class DoltDialect(BaseSQLDialect):
             )
         if not dsn.startswith(("mysql://", "mysql+")):
             raise ConfigError(f"invalid mysql DSN: {dsn!r}")
-        
+
         # Default to pymysql driver for broadest compatibility.
         if dsn.startswith("mysql://"):
             dsn = "mysql+pymysql://" + dsn[len("mysql://"):]
-        
+
         # Dolt is an external binary (not a pip package). Without this check,
         # the first `subprocess.run(["dolt", ...])` below raises a bare
         # FileNotFoundError with no hint about how to fix it.
@@ -106,7 +110,9 @@ class DoltDialect(BaseSQLDialect):
         cfg = self._parse_dolt_dsn(dsn)
         host, port, dbname = cfg["host"], cfg["port"], cfg["dbname"]
         user, password = cfg["user"], cfg["password"]
-    
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", dbname):
+            raise ConfigError("invalid Dolt database name")
+
         if not os.path.exists(os.path.join(storage_dir, ".dolt")):
             os.makedirs(storage_dir, exist_ok=True)
             subprocess.run(
@@ -127,13 +133,13 @@ class DoltDialect(BaseSQLDialect):
                 cwd=storage_dir, stdout=log_file, stderr=log_file,
             )
             self._wait_ready(host, port, user, password)
-        
+
         c = mysql.connector.connect(host=host, port=port, user=user, password=password)
         cur = c.cursor()
         cur.execute(f"CREATE DATABASE IF NOT EXISTS `{dbname}`")
         c.commit()
         c.close()
-        
+
         return super().build_engine(dsn, **kwargs)
 
     def aclose(self):
@@ -145,7 +151,7 @@ class DoltDialect(BaseSQLDialect):
             except subprocess.TimeoutExpired:
                 server.kill()
             self._server = None
-            
+
     def _before_query(self, conn: Any) -> None:
         # Best-effort; privilege-dependent.
         try:
@@ -163,11 +169,11 @@ class DoltDialect(BaseSQLDialect):
                     result = conn.execute(text(sql), params) if params else conn.execute(text(sql))
                     return result.fetchall()
             else:
-                with engine.begin() as conn:          
+                with engine.begin() as conn:
                     conn.execute(text(sql), params) if params else conn.execute(text(sql))
                 return None
         except Exception as e:
-            raise                                       
+            raise
 
     def _has_uncommitted_changes(self, engine: Engine) -> bool:
         try:
@@ -220,13 +226,13 @@ class DoltDialect(BaseSQLDialect):
             return rows[0][0] if rows else None
 
         return await asyncio.to_thread(_run)
-      
+
     async def list_versions(self, engine: Engine) -> list[dict]:
         def _run() -> list[dict]:
             rows = self._run_sql(
                 engine,
                 """
-                SELECT 
+                SELECT
                     commit_hash,
                     author,
                     date,
@@ -236,7 +242,7 @@ class DoltDialect(BaseSQLDialect):
                 """,
                 fetch=True,
             )
-            
+
             return [
                 {
                     "commit": row[0],
@@ -246,7 +252,7 @@ class DoltDialect(BaseSQLDialect):
                 }
                 for row in rows
             ]
-        
+
         return await asyncio.to_thread(_run)
 
     async def list_tables_at_version(
@@ -338,20 +344,17 @@ class DoltDialect(BaseSQLDialect):
         History is preserved: `version` and everything after it stay in
         `dolt_log`; a revert commit is appended for each subsequent commit.
         """
+        version = self.validate_version(version)
         def _run() -> str | None:
-            # 1. Find every commit AFTER `version` (newest first).
-            rows = self._run_sql(
-                engine,
-                """
-                SELECT commit_hash, date
-                FROM dolt_log
-                WHERE date > (SELECT date FROM dolt_log WHERE commit_hash = :v)
-                ORDER BY date DESC
-                """,
-                {"v": version},
-                fetch=True,
-            )
-            to_revert = [r[0] for r in rows]
+            if self._has_uncommitted_changes(engine):
+                raise CapabilityError("db", "commit or discard pending changes before rollback")
+            # dolt_log walks HEAD history. Timestamps are not unique and cannot
+            # identify the commit boundary (several commits can share a second).
+            rows = self._run_sql(engine, "SELECT commit_hash FROM dolt_log", fetch=True)
+            history = [row[0] for row in rows]
+            if version not in history:
+                raise CapabilityError("db", "rollback target is not in current history")
+            to_revert = history[:history.index(version)]
 
             if not to_revert:
                 # Already at `version` — nothing to do.
@@ -372,35 +375,40 @@ class DoltDialect(BaseSQLDialect):
             return rows[0][0] if rows else None
 
         return await asyncio.to_thread(_run)
-    
+
     def _inject_as_of(self, sql: str, version: str) -> str:
-        """Rewrite `FROM <table>` → `FROM <table> AS OF '<version>'`.
+        """Version physical table references, including JOINs, without rewriting literals or CTE names."""
+        from sqlglot import exp, parse
+        from sqlglot.dialects.mysql import MySQL
+        from sqlglot.optimizer.scope import traverse_scope
+        version = self.validate_version(version)
+        try:
+            statements = parse(sql, read="mysql")
+        except Exception as exc:
+            raise CapabilityError("db", "cannot parse historical query") from exc
+        if len(statements) != 1 or not isinstance(statements[0], exp.Query):
+            raise CapabilityError("db", "historical queries require one SELECT")
+        tree = statements[0]
+        if tree.find(exp.Into) is not None:
+            raise CapabilityError("db", "historical queries cannot write output")
+        for scope in traverse_scope(tree):
+            for source in scope.sources.values():
+                if isinstance(source, exp.Table):
+                    source.set("datamind_snapshot", version)
 
-        Best-effort regex rewrite for the common single- or multi-table
-        SELECT that tool/LLM code emits. It handles:
-          - bare table names: `FROM product`
-          - back-ticked names: `FROM \`product\``
-          - repeated FROM (JOINs): each one is rewritten
+        class SnapshotGenerator(MySQL.Generator):
+            def table_sql(self, expression, **kwargs):
+                snapshot = expression.args.get("datamind_snapshot")
+                if not snapshot:
+                    return super().table_sql(expression, **kwargs)
+                base = expression.copy()
+                alias = base.args.pop("alias", None)
+                value = super().table_sql(base, **kwargs) + f" AS OF '{snapshot}'"
+                if alias:
+                    value += " AS " + self.sql(alias)
+                return value
+        return SnapshotGenerator().generate(tree)
 
-        It does NOT:
-          - rewrite strings/comments (`FROM x` inside a literal)
-          - rewrite subqueries specially — they are rewritten the same way,
-            which is correct for Dolt (AS OF applies to each table)
-          - rewrite schema-qualified names like `FROM db.tbl`
-            (the `db` part matches, and the `.tbl` is left alone)
-
-        `version` must already be validated by `validate_version` — the
-        reference is spliced into SQL text and cannot be a bind parameter.
-        """
-        q = self._quote_ident
-
-        def _sub(match: re.Match[str]) -> str:
-            raw = match.group(1)
-            name = raw.strip("`")               # normalize away input quoting
-            return f"FROM {q(name)} AS OF '{version}'"
-
-        return _TABLE_RE.sub(_sub, sql)
-    
     async def execute_readonly_at_version(
         self,
         engine: Engine,
@@ -417,6 +425,7 @@ class DoltDialect(BaseSQLDialect):
         `LIMIT`. `AS OF` cannot be a bind parameter, so the reference is
         validated against a restricted charset first.
         """
+        version = self.validate_version(version)
         sql = self._inject_as_of(sql, version)
 
         return await super().execute_readonly(

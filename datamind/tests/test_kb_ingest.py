@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("lancedb")
+
 from datamind.capabilities.ingest.service import IngestService
 from datamind.core.errors import CapabilityError
 

@@ -267,3 +267,18 @@ async def test_versioned_methods_require_dolt(method):
     }[method]
     with pytest.raises(CapabilityError):
         await getattr(db, method)(*args)
+
+
+@pytest.mark.asyncio
+async def test_historical_join_and_cte_pin_all_tables_and_preserve_literals(ingest, db_service, profile):
+    await _import(ingest, profile, "left.csv", ["id", "value"], [["1", "old left"]], table="left_table")
+    snapshot = await _import(ingest, profile, "right.csv", ["id", "value"], [["1", "old right"]], table="right_table")
+    left = _write_csv(profile / "uploads" / "left.csv", ["id", "value"], [["1", "new left"]])
+    right = _write_csv(profile / "uploads" / "right.csv", ["id", "value"], [["1", "new right"]])
+    await ingest.db_update_csv(path=str(left), table="left_table")
+    await ingest.db_update_csv(path=str(right), table="right_table")
+    sql = "WITH c AS (SELECT id, value FROM left_table) SELECT c.value, r.value, 'FROM right_table' AS note FROM c JOIN right_table r ON c.id=r.id"
+    old = await db_service.query_sql_at_version(sql, version=snapshot)
+    current = await db_service.query_sql(sql)
+    assert old.rows == [["old left", "old right", "FROM right_table"]]
+    assert current.rows == [["new left", "new right", "FROM right_table"]]

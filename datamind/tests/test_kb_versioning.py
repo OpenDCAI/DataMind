@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("lancedb")
+
 from datamind.capabilities.ingest.service import IngestService
 from datamind.capabilities.kb.providers.lancedb_store import LanceDBVectorStore
 from datamind.capabilities.kb.service import KBService
@@ -296,7 +298,7 @@ async def test_rollback_restores_ingested_data(ingest, kb, profile):
     assert result["status"] == "ok"
     assert result["rollback_version"] == v1
     assert result["count"] >= 1
-    assert result["new_version"]["version"] > v1
+    assert result["new_version"] > v1
 
 
 @pytest.mark.asyncio

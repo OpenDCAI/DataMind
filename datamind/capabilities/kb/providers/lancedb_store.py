@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+import math
 import json
-import pyarrow as pa
+import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -26,9 +28,13 @@ class LanceDBVectorStore:
         collection_name: str,
         dimension: int,
     ) -> None:
-        import lancedb  
+        try:
+            import lancedb
+        except ImportError as exc:
+            from datamind.core.errors import ConfigError
+            raise ConfigError("LanceDB requires pip install datamind[versioning]") from exc
         self.name = "lancedb"
-        self.version_list = []
+        self._write_lock = threading.RLock()
         self.dimension = dimension
         self._persist_dir = Path(persist_dir)
         self._persist_dir.mkdir(parents=True, exist_ok=True)
@@ -39,7 +45,7 @@ class LanceDBVectorStore:
         # LanceDB's `exist_ok=True` compares schemas literally and rejects
         # harmless differences (e.g. arrow extension types round-tripped
         # through disk). `open_table` skips the check entirely.
-        if self._collection_name in self._client.table_names():
+        if self._collection_name in self._client.list_tables().tables:
             self._collection = self._client.open_table(self._collection_name)
         else:
             self._collection = self._client.create_table(
@@ -47,6 +53,9 @@ class LanceDBVectorStore:
                 schema=self._make_schema(),
                 mode="create",
             )
+        self._history_path = self._persist_dir / "version_history.sqlite3"
+        with sqlite3.connect(self._history_path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS history (collection TEXT, version INTEGER, payload TEXT, PRIMARY KEY(collection, version))")
         self.existing_count = int(self._collection.count_rows())
         _log.info(
             "lancedb_collection_ready",
@@ -56,15 +65,16 @@ class LanceDBVectorStore:
                 "count": self._collection.count_rows(),
             },
         )
-    
-    def _make_schema(self) -> pa.Schema:
+
+    def _make_schema(self):
+        import pyarrow as pa
         return pa.schema([
             pa.field("id", pa.string()),
             pa.field("document", pa.string()),
             pa.field("embedding", pa.list_(pa.float32(), self.dimension)),
-            pa.field("metadata", pa.json_()),       
+            pa.field("metadata", pa.json_()),
         ])
-    
+
     def _dict_to_where(self, where: dict[str, Any]) -> str:
         """Build a LanceDB SQL WHERE clause.
 
@@ -92,11 +102,19 @@ class LanceDBVectorStore:
             elif isinstance(value, int):
                 conditions.append(f"{lhs('int')} = {value}")
             elif isinstance(value, float):
+                if not math.isfinite(value):
+                    raise ValueError("filter numbers must be finite")
                 conditions.append(f"{lhs('float')} = {value}")
             elif isinstance(value, str):
                 escaped = self._escape(value)
                 conditions.append(f"{lhs('string')} = '{escaped}'")
             elif isinstance(value, (list, tuple)):
+                if not value:
+                    conditions.append("FALSE")
+                    continue
+                if any(not isinstance(v, (str, bool, int, float)) or
+                       (isinstance(v, float) and not math.isfinite(v)) for v in value):
+                    raise TypeError("filter lists must contain scalar values")
                 items: list[str] = []
                 for v in value:
                     if isinstance(v, str):
@@ -127,12 +145,12 @@ class LanceDBVectorStore:
             return dict(raw)
         except (TypeError, ValueError):
             return {}
-    
+
     @staticmethod
     def _escape(value: str) -> str:
         """Escape a string for a single-quoted SQL literal (double the quote)."""
         return value.replace("'", "''")
-    
+
     async def add(
         self,
         ids: Sequence[str],
@@ -142,7 +160,7 @@ class LanceDBVectorStore:
     ) -> None:
         if not ids:
             return
-     
+
         rows = []
         for i in range(len(ids)):
             meta_dict = metadatas[i] if metadatas else {}
@@ -153,10 +171,11 @@ class LanceDBVectorStore:
                 "metadata": json.dumps(meta_dict),
             })
 
-        await asyncio.to_thread(
-            self._collection.add,
-            rows,
-        )
+        def _upsert():
+            with self._write_lock:
+                self._collection.checkout_latest()
+                self._collection.merge_insert("id").when_matched_update_all().when_not_matched_insert_all().execute(rows)
+        await asyncio.to_thread(_upsert)
         self.existing_count = int(self._collection.count_rows())
 
     async def query(
@@ -167,45 +186,41 @@ class LanceDBVectorStore:
         where: dict[str, Any] | None = None,
         version: int | None = None
     ) -> list[RetrievedChunk]:
-        if version is not None:
-            await asyncio.to_thread(self._collection.checkout, version)
-
-        try:
-            def _search():
-                q = self._collection.search(embedding, query_type="vector")
-
-                if where:
-                    where_sql = self._dict_to_where(where)
-                    if where_sql:
-                        q = q.where(where_sql)
-
-                return q.distance_type("cosine").limit(top_k).to_list()
-
-            results = await asyncio.to_thread(_search)
-
-            out: list[RetrievedChunk] = []
-            for row in results:
-                dist = row.get("_distance")
-                meta = self._parse_metadata(row.get("metadata"))
-                # Cosine distance -> cosine similarity (higher is better)
-                score = float(1.0 - dist) if dist is not None else 0.0
-                source = meta.pop("_source", None) or meta.pop("source", None)
-                out.append(
-                    RetrievedChunk(
-                        id=str(row.get("id")),
-                        text=row.get("document") or "",
-                        score=score,
-                        source=source,
-                        metadata={k: v for k, v in meta.items() if k != "_"},
-                    )
-                )
-
-            return out
-        finally:
+        def _search():
+            table = self._client.open_table(self._collection_name)
             if version is not None:
-                await self._checkout_latest()
+                table.checkout(version)
+            q = table.search(embedding, query_type="vector")
 
-    async def count(self) -> int: 
+            if where:
+                where_sql = self._dict_to_where(where)
+                if where_sql:
+                    q = q.where(where_sql)
+
+            return q.distance_type("cosine").limit(top_k).to_list()
+
+        results = await asyncio.to_thread(_search)
+
+        out: list[RetrievedChunk] = []
+        for row in results:
+            dist = row.get("_distance")
+            meta = self._parse_metadata(row.get("metadata"))
+            # Cosine distance -> cosine similarity (higher is better)
+            score = float(1.0 - dist) if dist is not None else 0.0
+            source = meta.pop("_source", None) or meta.pop("source", None)
+            out.append(
+                RetrievedChunk(
+                    id=str(row.get("id")),
+                    text=row.get("document") or "",
+                    score=score,
+                    source=source,
+                    metadata={k: v for k, v in meta.items() if k != "_"},
+                )
+            )
+
+        return out
+
+    async def count(self) -> int:
         return await asyncio.to_thread(self._collection.count_rows)
 
     async def delete(self, ids: Sequence[str]) -> None:
@@ -221,38 +236,35 @@ class LanceDBVectorStore:
             await asyncio.to_thread(self._collection.count_rows)
         )
 
-    async def reset(self) -> None: 
+    async def reset(self) -> None:
         def _reset() -> None:
             self._collection = self._client.create_table(
                 self._collection_name,
                 schema=self._make_schema(),
-                mode="overwrite",      
+                mode="overwrite",
             )
-            
+
         await asyncio.to_thread(_reset)
         self.existing_count = 0
-        self.version_list = []
+        with sqlite3.connect(self._history_path) as conn:
+            conn.execute("DELETE FROM history WHERE collection = ?", (self._collection_name,))
 
     async def get_all_texts(self, version: int | None = None) -> list[tuple[str, str, dict[str, Any]]]:
         """Enumerate (id, text, metadata) — used by lexical retrievers."""
-        if version is not None:
-            await asyncio.to_thread(self._collection.checkout, version)
-        
-        try:
-            def _get_all_projected():
-                rows = (
-                    self._collection.search(None)                     
-                    .select(["id", "document", "metadata"])        
-                    .to_list()
-                )
-                return rows
-
-            rows = await asyncio.to_thread(_get_all_projected)
-            
-        finally:
+        def _get_all_projected():
+            table = self._client.open_table(self._collection_name)
             if version is not None:
-                await self._checkout_latest()
-            
+                table.checkout(version)
+            rows = (
+                table.search(None)
+                .select(["id", "document", "metadata"])
+                .to_list()
+            )
+            return rows
+
+        rows = await asyncio.to_thread(_get_all_projected)
+
+
         out: list[tuple[str, str, dict[str, Any]]] = []
         for r in rows:
             cid = r.get("id")
@@ -347,32 +359,33 @@ class LanceDBVectorStore:
         info["added_chunks"] = sorted(added_chunks, key=lambda chunk: (chunk["source"], chunk["id"]))
         info["deleted_chunks"] = sorted(deleted_chunks, key=lambda chunk: (chunk["source"], chunk["id"]))
         info["msg"] = changes
-        self.version_list.append(info)
+        with sqlite3.connect(self._history_path) as conn:
+            conn.execute("INSERT OR REPLACE INTO history VALUES (?, ?, ?)",
+                         (self._collection_name, version, json.dumps(info, default=str)))
         return info
-    
+
     @property
     def latest_version(self) -> int:
-        return self._collection.version
-        
+        return self._client.open_table(self._collection_name).version
+
     async def _checkout_latest(self):
         await asyncio.to_thread(self._collection.checkout_latest)
-    
+
     async def list_versions(self) -> list[dict[str, Any]]:
-        """List all versions (commits) of the LanceDB table."""
-        return self.version_list
-    
-    async def rollback(self, version: int) -> dict[str, int]:
-        await asyncio.to_thread(self._collection.restore, version)
-        self.existing_count = int(
-            await asyncio.to_thread(self._collection.count_rows)
-        )
-        
-        # Get the current version after rollback
-        versions = await asyncio.to_thread(self._collection.list_versions)
-        current_version = versions[-1]
-        self.version_list.append(current_version) if current_version not in self.version_list else None
-        return {
-            "version": current_version,
-            "count": self.existing_count,
-        }
-    
+        with sqlite3.connect(self._history_path) as conn:
+            return [json.loads(row[0]) for row in conn.execute(
+                "SELECT payload FROM history WHERE collection = ? ORDER BY version",
+                (self._collection_name,),
+            )]
+
+    async def rollback(self, version: int) -> dict[str, Any]:
+        previous = self.latest_version
+        def _restore():
+            with self._write_lock:
+                self._collection.checkout_latest()
+                self._collection.restore(version)
+                self.existing_count = self._collection.count_rows()
+                return self._client.open_table(self._collection_name).version
+        current = await asyncio.to_thread(_restore)
+        info = await self.add_version(current, previous_version=previous)
+        return {"version": current, "count": self.existing_count, "details": info}
