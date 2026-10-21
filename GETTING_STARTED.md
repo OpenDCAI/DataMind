@@ -41,7 +41,7 @@ For local embeddings:
 pip install -e '.[huggingface]'
 export DATAMIND__EMBEDDING__PROVIDER=huggingface
 export DATAMIND__EMBEDDING__MODEL=BAAI/bge-small-zh-v1.5
-export DATAMIND__EMBEDDING__DIM=512
+export DATAMIND__EMBEDDING__DIMENSION=512
 ```
 
 The first use downloads model weights. Otherwise set the embedding URL, model,
