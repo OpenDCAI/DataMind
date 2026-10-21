@@ -83,7 +83,7 @@ class DoltRepository:
         # A killed parent cannot run Popen cleanup. The absolute, private config
         # path is an ownership marker; never signal unrelated Dolt processes.
         result = subprocess.run(
-            ["ps", "-axo", "pid=,command="],
+            ["ps", "-ww", "-axo", "pid=,command="],
             capture_output=True,
             text=True,
             check=True,
@@ -119,7 +119,7 @@ class DoltRepository:
             else:
                 # Confirm the ownership marker again before escalation.
                 current = subprocess.run(
-                    ["ps", "-p", str(pid), "-o", "command="],
+                    ["ps", "-ww", "-p", str(pid), "-o", "command="],
                     capture_output=True,
                     text=True,
                     timeout=5,

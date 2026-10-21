@@ -61,6 +61,18 @@ class DoltDialect(BaseSQLDialect):
         import mysql.connector
         for i in range(tries):
             time.sleep(0.5)
+            server = getattr(self, '_server', None)
+            if server is not None and server.poll() is not None:
+                details = ''
+                log_path = getattr(self, '_server_log_path', None)
+                if log_path:
+                    try:
+                        with open(log_path, 'rb') as handle:
+                            handle.seek(0, os.SEEK_END)
+                            handle.seek(max(0, handle.tell()-4000))
+                            details = handle.read().decode('utf-8', errors='replace')
+                    except OSError: pass
+                raise RuntimeError(f'Dolt SQL server exited ({server.returncode}): {details}')
             try:
                 c = mysql.connector.connect(
                     host=host, port=port, user=user, password=password,
@@ -129,6 +141,7 @@ class DoltDialect(BaseSQLDialect):
         if not _listening():
             log_path = os.path.join(storage_dir, "dolt_server.log")
             log_file = open(log_path, "w")
+            self._server_log_path = log_path
             self._server = subprocess.Popen(
                 (["dolt", "sql-server", "--config", str(server_config)] if server_config else
                  ["dolt", "sql-server", "--port", str(port), "--host", host]),
