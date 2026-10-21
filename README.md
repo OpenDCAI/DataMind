@@ -121,7 +121,7 @@ For custom endpoints and unattended tool authorization, see
 2. `datamind_workspace_prepare(path)` returns a source inventory with SHA-256 versions.
 3. Codex reads documents and submits `datamind_workspace_publish(path, surfaces,
    graph_sources=[{uri, version, triples}, ...])`. Include an explicit empty list
-   for each document without relations. Set `truncated=true` when appropriate.
+   for each new or changed document without relations (snapshot mode requires all documents). Set `truncated=true` when appropriate.
 4. DataMind validates source versions, materializes the selected surfaces privately,
    reuses completed source checkpoints, then publishes one complete revision.
    Failed or conflicting publications preserve the previous head.
@@ -133,10 +133,11 @@ Every tool after operation_begin requires the operation_id. Fetching a Skill
 persists its version/hash for subsequent receipts in that operation. Skills and
 Memory stay live profile context; they are outside the business-data snapshot.
 
-The local coordinator supports SQLite, NetworkX, and local Chroma/LanceDB.
-Snapshots are full materializations with per-source compute reuse; this does
-not promise constant storage or incremental physical writes. Retained revisions
-can be inspected or rolled back with the Python `Workspace` API.
+Incremental workspaces share immutable sources, source-scoped SQLite graph assertions,
+LanceDB vector versions and Dolt table trees across revisions. New workspaces keep
+only the latest version by default; choose recent N or all for historical rollback.
+Active readers and protected revisions survive cleanup. Existing snapshot workspaces
+keep their history and migrate explicitly. See [storage and migration](docs/WORKSPACE_STORAGE.md).
 
 Independent `kb_add_path`, `db_import_path`, `graph_replace_source` and explicit
 triple writes remain available. They do not modify published snapshots. For graph

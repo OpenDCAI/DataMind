@@ -113,6 +113,6 @@ class DataPlane:
                 await close()
 
 
-async def build_data_plane(settings, *, enable: set[str] | None = None, text_client=None) -> DataPlane:
+async def build_data_plane(settings, *, enable: set[str] | None = None, text_client=None, workspace_enable=None) -> DataPlane:
     from datamind.runtime import assemble_data_plane
-    return await assemble_data_plane(settings, enable=enable, text_client=text_client)
+    return await assemble_data_plane(settings, enable=enable, text_client=text_client, workspace_enable=workspace_enable)

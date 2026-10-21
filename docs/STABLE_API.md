@@ -24,7 +24,9 @@ async def run():
 `DataSettings` and `Settings` name the same typed settings model.
 `DataPlane.call(name, arguments, context=None, read_only=False)` validates the
 schema, profile and hooks. Business write tools attach receipts. Selecting
-surfaces controls which services initialize. No conversation client is created;
+surfaces controls which services initialize. `build_data_plane(..., enable=set(),
+workspace_enable={"kb", "db", "graph"})` registers lazy Workspace publication
+without opening independent live stores. No conversation client is created;
 KB still requires a configured embedding provider. An explicit `text_client`
 parameter is reserved for custom capability pipelines and benchmark fixtures.
 
@@ -63,13 +65,20 @@ documented in [deployment](CODEX_GATEWAY_DEPLOYMENT.md).
 
 ## Workspace snapshots
 
-`Workspace.prepare` inventories sources; `Workspace.publish` builds and atomically
-publishes selected KB/DB/Graph snapshots from prepared, source-hashed inputs.
+`workspace_prepare` and `workspace_publish` are direct/MCP tools. The Python
+API is `Workspace.update(path, surfaces=..., graph_sources=...)`; it validates
+Codex-prepared assertions and atomically publishes the selected KB/DB/Graph revision.
 `Workspace.reader(revision=...)` selects immutable historical snapshots;
 `enable` may select a subset of that manifest's surfaces. `reader.call` enforces
 read-only access. Query hosting selects the current head at request admission;
 without a published head, it reads independent live stores. Direct writes do
 not silently modify snapshots. Memory/Skills are not one atomic business snapshot.
+
+Retention and shared incremental storage are documented in [Workspace storage](WORKSPACE_STORAGE.md).
+`Workspace.history()`, `configure_retention(mode, keep_last)`, `protect(revision)`,
+`collect(dry_run=True, compact=False)`, `migrate()` and `rollback(revision, expected_revision=...)`
+are available to Python callers. `migrate` and `collect` are async. MCP readers must
+close operations with `datamind_operation_close`; calls renew durable snapshot leases.
 
 ## HTTP API
 
@@ -80,6 +89,11 @@ not silently modify snapshots. Memory/Skills are not one atomic business snapsho
 | Route | Contract |
 |---|---|
 | `GET /api/health` | Codex backend/model, profile, package version, tool count, receipt revision and published workspace revision |
+| `GET /api/workspace` | History and retention; `?usage=true` includes allocated file sizes |
+| `POST /api/workspace/retention` | Set `{mode: latest/recent/all, keep_last: N}`; no immediate deletion |
+| `POST /api/workspace/gc` | `{dry_run: true, compact: false}` defaults to a preview |
+| `POST /api/workspace/rollback` | Select retained `{revision, expected_revision}` |
+| `POST /api/workspace/migrate` | Explicit migration from frozen legacy evidence |
 | `GET /api/tools` | Tools with access, surface, description and schema; role fields retain read/write labels for UI compatibility |
 | `POST /api/ask` | Same Codex host with read-only access; optional request field `revision` |
 | `POST /api/store` | Same Codex host with write permission and checked receipt results |

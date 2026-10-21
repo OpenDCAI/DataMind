@@ -18,6 +18,7 @@ def settings(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv('DATAMIND__LLM__API_KEY', raising=False)
     monkeypatch.setenv('DATAMIND_DATA_ROOT', str(tmp_path))
+    monkeypatch.setenv('DATAMIND__WORKSPACE__RETENTION','all')
     monkeypatch.delenv('DATAMIND_PROFILE', raising=False)
     from datamind import runtime as options
     def forbidden(*a, **kw):
@@ -203,7 +204,7 @@ async def test_direct_publication_pins_kb_sql_graph_and_raw_across_calls(setting
         assert all(r['status'] == 'stored' for r in result['result']['results']), result
         manifest = result['result']['results'][0]['details']
         assert manifest['metrics']['graph_extraction_calls'] == 0
-        assert manifest['applied_skills'][0]['version'] == '1.2.0'
+        assert manifest['applied_skills'][0]['version'] == '1.3.0'
         return manifest['workspace_revision']
     first = await publish('OldOwner')
     reader = await begin('read')

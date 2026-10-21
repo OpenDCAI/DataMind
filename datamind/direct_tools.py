@@ -41,8 +41,27 @@ def workspace_tools(settings, active=None):
         from datamind.capabilities.ingest.service import _resolve_safe_path
         source = _resolve_safe_path(path, service._allowed_roots)
         workspace = Workspace(settings, builder=build_data_plane)
-        return {'path': str(source), 'sources': workspace._inventory(source),
-                'instructions': 'Read document sources, extract triples with Codex, then publish every source with its version, including empty triple lists.'}
+        import asyncio
+        from datamind.workspace_incremental import incremental_enabled
+        sources = await asyncio.to_thread(workspace._inventory, source)
+        lease, revision = workspace.acquire_lease()
+        try:
+            previous = workspace.manifest(revision) if revision else None
+            prior = {s['uri']: s['version'] for s in previous['sources']} if previous else {}
+            with workspace._connect() as db:
+                current, epoch = db.execute('SELECT revision,epoch FROM head WHERE singleton=1').fetchone()
+            if current != revision:
+                raise ValueError('Workspace changed during preparation; prepare again')
+            return {'path': str(source), 'sources': sources, 'current_revision': revision,
+                    'current_epoch': epoch, 'retention': workspace.retention,
+                    'storage_mode': 'incremental' if incremental_enabled(workspace, enabled) else 'snapshot',
+                    'changes': {'new': [s['uri'] for s in sources if s['uri'] not in prior],
+                        'modified': [s['uri'] for s in sources if s['uri'] in prior and s['version'] != prior[s['uri']]],
+                        'deleted': sorted(set(prior) - {s['uri'] for s in sources}),
+                        'unchanged': [s['uri'] for s in sources if s['version'] == prior.get(s['uri'])]},
+                    'instructions': 'In incremental mode extract graph assertions for new/changed documents only. Snapshot mode requires all documents. Use inventory SHA-256 versions; include explicit empty triples where none were found.'}
+        finally:
+            workspace.release_lease(lease)
 
     async def publish(path, surfaces=None, graph_sources=None, relation_types=None):
         await prepare(path)
@@ -54,11 +73,51 @@ def workspace_tools(settings, active=None):
         return await Workspace(settings, builder=build_data_plane).update(path, surfaces=selected, graph_sources=graph_sources,
                                       relation_types=relation_types)
 
-    return [
+    async def history():
+        return Workspace(settings).history()
+
+    async def policy(mode, keep_last=10):
+        return Workspace(settings).configure_retention(mode, keep_last)
+
+    async def gc(dry_run=True, compact=False):
+        return await Workspace(settings).collect(dry_run=dry_run, compact=compact)
+
+    async def rollback(revision, expected_revision=None):
+        return Workspace(settings).rollback(revision, expected_revision=expected_revision)
+
+    async def protect(revision, enabled=True):
+        return Workspace(settings).protect(revision, enabled)
+
+    async def migrate():
+        manifest = Workspace(settings).manifest(Workspace(settings).current_revision)
+        if not set(manifest['surfaces']) <= enabled:
+            raise ValueError('Migration surfaces exceed this runtime capability set')
+        return await Workspace(settings, builder=build_data_plane).migrate()
+
+    metadata = {'access': 'write', 'workspace_management': True}
+    management = [
+        ToolSpec('workspace_history', 'List retained and pruned Workspace revisions and retention policy.',
+                 {'type': 'object', 'properties': {}}, history, {'access': 'read'}),
+        ToolSpec('workspace_retention', 'Choose latest, recent N, or all history. Applies to future cleanup; does not immediately delete data.',
+                 {'type': 'object', 'properties': {'mode': {'enum': ['latest','recent','all']},
+                  'keep_last': {'type': 'integer', 'minimum': 1}}, 'required': ['mode']}, policy, metadata),
+        ToolSpec('workspace_gc', 'Preview or apply cleanup. Active readers and protected revisions are retained. compact also reclaims native provider history.',
+                 {'type': 'object', 'properties': {'dry_run': {'type': 'boolean', 'default': True},
+                  'compact': {'type': 'boolean', 'default': False}}}, gc, metadata),
+        ToolSpec('workspace_rollback', 'Atomically select a retained revision; optional expected_revision prevents overwriting a concurrent publication.',
+                 {'type': 'object', 'properties': {'revision': {'type': 'string'},
+                  'expected_revision': {'type': 'string'}}, 'required': ['revision']}, rollback, metadata),
+        ToolSpec('workspace_protect', 'Protect or unprotect a retained revision from history cleanup.',
+                 {'type': 'object', 'properties': {'revision': {'type': 'string'},
+                  'enabled': {'type': 'boolean', 'default': True}}, 'required': ['revision']}, protect, metadata),
+        ToolSpec('workspace_migrate', 'Explicitly migrate the current frozen snapshot into shared incremental storage without model calls. Requires native providers.',
+                 {'type': 'object', 'properties': {}}, migrate, metadata),
+    ]
+    return management + [
         ToolSpec('workspace_prepare', 'Inventory sources and hashes before Codex extracts graph assertions.',
                  {'type': 'object', 'properties': {'path': {'type': 'string'}}, 'required': ['path']},
                  prepare, {'access': 'read'}),
-        ToolSpec('workspace_publish', 'Validate Codex assertions and atomically publish a complete KB/Graph/DB snapshot. Does not mutate direct live stores.',
+        ToolSpec('workspace_publish', 'Validate Codex assertions and atomically publish a consistent KB/Graph/DB revision. Does not mutate direct live stores.',
                  {'type': 'object', 'properties': {
                      'path': {'type': 'string'},
                      'surfaces': {'type': 'array', 'minItems': 1, 'uniqueItems': True,

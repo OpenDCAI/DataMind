@@ -469,7 +469,7 @@ main {
 .action-btn:hover { border-color: var(--accent); background: var(--surface3); }
 .action-btn.small { padding: 3px 8px; font-size: 10.5px; }
 
-.memory-box input {
+.memory-box input, .memory-box select {
   width: 100%;
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -570,7 +570,7 @@ main {
 <body>
 
 <header>
-  <h1>DataMind <small>two-agent</small></h1>
+  <h1>DataMind <small>Codex</small></h1>
   <div class="header-status" id="headerStatus">
     <span class="pill warn" id="healthPill"><span class="dot"></span><span>Connecting…</span></span>
   </div>
@@ -623,6 +623,21 @@ main {
     <div class="section">
       <h2>配置 <span class="section-action" id="refreshHealthBtn">刷新</span></h2>
       <dl class="kv" id="configKV"></dl>
+    </div>
+
+    <div class="section">
+      <h2>Workspace 历史</h2>
+      <div class="memory-box">
+        <label for="retentionMode">历史保留方式</label>
+        <select id="retentionMode">
+          <option value="latest">只保留最新版（无法回滚历史）</option>
+          <option value="recent">保留最近 N 个版本</option>
+          <option value="all">保留全部历史</option>
+        </select>
+        <input id="retentionCount" type="number" min="1" value="10" aria-label="保留版本数量" />
+        <button class="action-btn small" id="saveRetentionBtn">保存保留方式</button>
+        <p id="retentionStatus" style="font-size:12px;margin-top:8px"></p>
+      </div>
     </div>
 
     <div class="section">
@@ -702,6 +717,30 @@ function logLine(text) {
 // ────────────────────────────────────────────────────────
 // Sidebar loaders
 // ────────────────────────────────────────────────────────
+function retentionInputs() {
+  $('retentionCount').hidden = $('retentionMode').value !== 'recent';
+}
+async function loadRetention() {
+  try {
+    const data = await api('/api/workspace');
+    $('retentionMode').value = data.retention.mode;
+    $('retentionCount').value = data.retention.keep_last;
+    retentionInputs();
+    $('retentionStatus').textContent = '下次发布后按此策略清理。正在查询和手动保护的版本会保留。';
+  } catch (err) { $('retentionStatus').textContent = err.message; }
+}
+$('retentionMode').addEventListener('change', retentionInputs);
+$('saveRetentionBtn').addEventListener('click', async () => {
+  const button = $('saveRetentionBtn'); button.disabled = true;
+  try {
+    await api('/api/workspace/retention', {method:'POST', body:JSON.stringify({
+      mode:$('retentionMode').value, keep_last:Number($('retentionCount').value)})});
+    await loadRetention();
+    logLine('已保存 Workspace 历史保留方式');
+  } catch (err) { $('retentionStatus').textContent = err.message; }
+  finally { button.disabled = false; }
+});
+
 async function loadHealth() {
   try {
     state.health = await api('/api/health');
@@ -1338,7 +1377,7 @@ DROP.addEventListener('drop', (e) => {
 // Bootstrap
 // ────────────────────────────────────────────────────────
 (async () => {
-  await Promise.all([loadHealth(), loadTools(), loadGraph(), loadKb()]);
+  await Promise.all([loadHealth(), loadTools(), loadGraph(), loadKb(), loadRetention()]);
   $('chatInput').focus();
 })();
 </script>

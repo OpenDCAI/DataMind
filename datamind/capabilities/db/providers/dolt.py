@@ -82,6 +82,7 @@ class DoltDialect(BaseSQLDialect):
         except ImportError as exc:
             raise ConfigError("Dolt requires pip install datamind[dolt]") from exc
         storage_dir = kwargs.pop("storage_dir", None)
+        server_config = kwargs.pop("server_config", None)
         if not storage_dir:
             raise ValueError("Dolt needs either a data dir.")
         if not dsn:
@@ -129,7 +130,8 @@ class DoltDialect(BaseSQLDialect):
             log_path = os.path.join(storage_dir, "dolt_server.log")
             log_file = open(log_path, "w")
             self._server = subprocess.Popen(
-                ["dolt", "sql-server", "--port", str(port), "--host", host],
+                (["dolt", "sql-server", "--config", str(server_config)] if server_config else
+                 ["dolt", "sql-server", "--port", str(port), "--host", host]),
                 cwd=storage_dir, stdout=log_file, stderr=log_file,
             )
             self._wait_ready(host, port, user, password)
@@ -150,6 +152,7 @@ class DoltDialect(BaseSQLDialect):
                 server.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 server.kill()
+                server.wait(timeout=5)
             self._server = None
 
     def _before_query(self, conn: Any) -> None:

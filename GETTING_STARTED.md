@@ -102,6 +102,13 @@ pins the published revision when it starts, including across later tool calls.
 Before the first publication, reads can inspect independent live stores.
 Independent direct writes do not silently update published snapshots.
 
+For shared incremental storage, install `.[versioning,dolt]`, install the Dolt
+executable, and configure storage_mode=incremental, KB=LanceDB, DB=Dolt. New
+workspaces default to latest retention; existing histories stay all. Use
+`datamind workspace-policy recent --keep-last 10` for rollback history. Existing
+snapshots migrate explicitly with `datamind workspace-migrate`. See
+[storage setup, retention and migration](docs/WORKSPACE_STORAGE.md).
+
 The previous `build_datamind`, StoreAgent/RetrieveAgent, Claude SDK and CCR
 product paths were removed in 2.0. Use [the migration guide](docs/LEGACY_RUNTIME.md)
 and [public API](docs/STABLE_API.md) when updating integrations.

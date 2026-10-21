@@ -39,7 +39,7 @@ def setup_workspace(tmp_path, monkeypatch):
     model, embedding = Model(), Embed()
     monkeypatch.setattr(options, 'build_embedding', lambda *a, **k: embedding)
     settings = Settings(llm={'api_key': 'test', 'model': 'test'},
-                        data={'base_dir': tmp_path / 'runtime'}, embedding={'dimension': 4})
+                        data={'base_dir': tmp_path / 'runtime'}, embedding={'dimension': 4}, workspace={'retention':'all'})
     source = tmp_path / 'source'
     source.mkdir()
     (source / 'a.md').write_text('Alice owns Project')

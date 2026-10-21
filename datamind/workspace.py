@@ -2,9 +2,9 @@
 
 The catalog is safe across processes on one host. Builds prepare private indexes;
 publication uses compare-and-swap against their starting revision. Readers retain
-one immutable revision across all tool calls. This local snapshot implementation
-supports SQLite, NetworkX, and local Chroma/LanceDB; it is not a remote-store
-snapshot coordinator. Source checkpoints avoid repeated model work after restart.
+one immutable revision across all tool calls. Incremental storage shares source
+objects, source-scoped graph assertions, LanceDB versions and Dolt table trees.
+Legacy local snapshots remain readable and can be migrated explicitly.
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from datamind.core.errors import CapabilityError, ConfigError, ExternalServiceEr
 from datamind.core.logging import bind_context, current_context
 from datamind.core.protocols import GraphTriple, GraphEvidence
 from datamind.core.recovery import recover_read, recovery_summary
+from datamind.workspace_catalog import WorkspaceCatalog
 
 
 def _digest(value: bytes) -> str:
@@ -52,7 +53,7 @@ def _atomic_json(path: Path, value: Any, *, overwrite: bool = True) -> None:
         temporary.unlink(missing_ok=True)
 
 
-class Workspace:
+class Workspace(WorkspaceCatalog):
     """A profile-scoped snapshot catalog. Pass separate settings per tenant."""
 
     def __init__(self, settings, *, builder=None):
@@ -70,6 +71,7 @@ class Workspace:
             ''')
             if 'epoch' not in {row[1] for row in conn.execute('PRAGMA table_info(head)')}:
                 conn.execute('ALTER TABLE head ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0')
+        self._init_catalog()
 
     def _connect(self):
         return sqlite3.connect(self._catalog, timeout=30)
@@ -92,13 +94,17 @@ class Workspace:
             raise CapabilityError('workspace', 'revision was never published')
         return json.loads((self.root / 'revisions' / revision / 'manifest.json').read_text())
 
-    def rollback(self, revision: str, *, expected_revision: str) -> dict[str, Any]:
+    def rollback(self, revision: str, *, expected_revision: str | None = None) -> dict[str, Any]:
         """Repoint to a retained complete snapshot without deleting history."""
+        with self._lock():
+            return self._rollback(revision, expected_revision=expected_revision)
+
+    def _rollback(self, revision, *, expected_revision):
         self.manifest(revision)
         with self._connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             head = conn.execute('SELECT revision FROM head WHERE singleton=1').fetchone()[0]
-            if head != expected_revision:
+            if expected_revision is not None and head != expected_revision:
                 raise CapabilityError('workspace', 'publication conflict; current revision changed')
             conn.execute('UPDATE head SET revision=?, epoch=epoch+1 WHERE singleton=1', (revision,))
         return {'workspace_revision': revision, 'previous_revision': head}
@@ -115,6 +121,10 @@ class Workspace:
         from datamind.data_plane import build_data_plane
         return await build_data_plane(settings, enable=set(surfaces))
 
+    async def migrate(self):
+        from datamind.workspace_migration import migrate
+        return await migrate(self)
+
     def _inventory(self, source: Path) -> list[dict[str, str]]:
         if not source.is_dir():
             raise CapabilityError('workspace', 'workspace path must be a directory')
@@ -127,8 +137,11 @@ class Workspace:
                 continue
             if not path.resolve().is_relative_to(source):
                 raise CapabilityError('workspace', f'symlink escapes workspace: {relative}')
+            sha = hashlib.sha256()
+            with path.open('rb') as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b''): sha.update(block)
             inventory.append({'relative_path': relative.as_posix(), 'uri': str(path.resolve()),
-                              'version': 'sha256:' + _digest(path.read_bytes())})
+                              'version': 'sha256:' + sha.hexdigest()})
         return inventory
 
     async def update(self, path: str, *, surfaces=('kb', 'graph', 'db'), relation_types=None, max_triples_per_file=200, graph_sources=None) -> dict[str, Any]:
@@ -148,10 +161,15 @@ class Workspace:
         ctx.extra.update(nested_model_usage=[], embedding_usage=[])
         started = time.monotonic()
         try:
+            from datamind.workspace_incremental import incremental_enabled, update_incremental
+            update = update_incremental if incremental_enabled(self, surfaces) else Workspace._update
             with bind_context(ctx):
-                result = await self._update(path, surfaces=surfaces, relation_types=relation_types,
+                result = await update(self, path, surfaces=surfaces, relation_types=relation_types,
                     max_triples_per_file=max_triples_per_file, metrics=metrics, graph_sources=graph_sources)
             metrics["status"] = "published"
+            if self.settings.workspace.auto_gc:
+                try:metrics["retention_cleanup"] = await self.collect(dry_run=False,compact=self.retention['mode']!='all')
+                except Exception as exc:metrics["cleanup_error"] = type(exc).__name__
             return {**result, "metrics": metrics}
         except BaseException as exc:
             metrics.update(status="failed", error_type=type(exc).__name__)
@@ -168,14 +186,15 @@ class Workspace:
             if parent is not None:
                 parent.extra.setdefault("nested_model_usage", []).extend(usage)
                 parent.extra.setdefault("embedding_usage", []).extend(embed_usage)
-            if metrics.get("workspace_revision"):
-                report = self._settings_for(metrics["workspace_revision"]).data.base_dir / "build_metrics.json"
-                try:
-                    _atomic_json(report, metrics)
-                except OSError:
-                    # An observability failure must not undo a published head or
-                    # replace the original build error.
-                    metrics["metrics_persisted"] = False
+            revision = metrics.get('workspace_revision')
+            if revision:
+                # GC cannot remove a revision between checking it and persisting
+                # metrics; a metrics write must never resurrect a pruned directory.
+                with self._lock():
+                    report = self.root / 'revisions' / revision / 'build_metrics.json'
+                    if report.parent.is_dir():
+                        try: _atomic_json(report, metrics)
+                        except OSError: metrics['metrics_persisted'] = False
 
     async def _update(self, path: str, *, surfaces, relation_types, max_triples_per_file, metrics, graph_sources=None) -> dict[str, Any]:
         """Prepare and publish one generation, retaining the previous one on failure.
@@ -331,7 +350,8 @@ class Workspace:
                     await ingest._ingest_rows(table=table, rows=safe_rows, safe_cols=safe_cols,
                                               if_exists='replace', source_file=item['uri'])
                 manifest_sources.append({**item, 'source_id': source_id,
-                    'snapshot': str(snapshot.relative_to(settings.data.base_dir))})
+                    'snapshot': str(snapshot.relative_to(settings.data.base_dir)),
+                    'checkpoint': str(cache_path.relative_to(self.root))})
                 metrics['sources_completed'] += 1
                 metrics['materialization_ms'] += (time.monotonic() - stage_started) * 1000
             stage_started = time.monotonic()
@@ -385,22 +405,41 @@ class Workspace:
 
     @asynccontextmanager
     async def reader(self, revision: str | None = None, *, read_retries: int = 1, enable=None):
-        revision = revision or self.current_revision
+        token,revision=self.acquire_lease(revision)
         if revision is None:
             raise CapabilityError('workspace', 'no published revision')
-        manifest = self.manifest(revision)
-        settings = self._settings_for(revision)
-        selected = set(manifest['surfaces']) if enable is None else set(enable)
-        if not selected <= set(manifest['surfaces']):
-            raise CapabilityError('workspace','requested surface is absent from the pinned revision')
-        system = await self._system(settings, selected)
+        system=None
+        heartbeat=asyncio.create_task(self.keepalive(token))
         try:
-            reader = WorkspaceReader(system, manifest, settings.data.base_dir, read_retries=read_retries,
-                                     timeout_s=settings.agent.wall_clock_timeout_s)
-            reader._system_settings = self.settings
+            manifest=self.manifest(revision)
+            selected=set(manifest['surfaces']) if enable is None else set(enable)
+            if not selected<=set(manifest['surfaces']):
+                raise CapabilityError('workspace','requested surface is absent from the pinned revision')
+            if manifest.get('format_version')==2:
+                from datamind.workspace_incremental import reader_system
+                system,settings=await reader_system(self,manifest,selected)
+                root=self.root
+            else:
+                settings=self._settings_for(revision)
+                if manifest.get('snapshots',{}).get('kb'):
+                    settings.kb.vector_store=manifest['snapshots']['kb']['provider']
+                if manifest.get('snapshots',{}).get('db'):
+                    settings.db.dialect=manifest['snapshots']['db']['provider'];settings.db.dsn=None
+                settings.graph.backend='networkx'
+                system=await self._system(settings,selected)
+                root=settings.data.base_dir
+            reader=WorkspaceReader(system,manifest,root,read_retries=read_retries,
+                timeout_s=settings.agent.wall_clock_timeout_s)
+            reader._system_settings=self.settings
+            reader._lease=(self,token)
             yield reader
         finally:
-            await system.aclose()
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat,return_exceptions=True)
+            try:
+                if system is not None: await system.aclose()
+            finally: self.release_lease(token)
+
 
     async def query(self, message: str, *, revision: str | None = None, read_retries: int = 1, **kwargs):
         async with self.reader(revision, read_retries=read_retries) as reader:
@@ -441,6 +480,15 @@ class WorkspaceReader:
 
         async def inspect_snapshot(path: str, **kwargs):
             candidate = Path(path).expanduser().resolve()
+            if manifest.get('format_version')==2:
+                if candidate!=source_root and not candidate.is_relative_to(source_root):
+                    raise CapabilityError('workspace','inspection must belong to the pinned revision')
+                items=[{'path':s['uri'],'relative_path':s['relative_path'],'sha256':s['version'].removeprefix('sha256:')}
+                    for s in manifest['sources'] if Path(s['uri']).is_relative_to(candidate) or Path(s['uri'])==candidate]
+                limit=kwargs.get('max_files',2000)
+                return {'path':str(candidate),'files':items[:limit],'count':len(items[:limit]),'truncated':len(items)>limit,
+                        'workspace_revision':self.revision}
+
             if candidate.is_relative_to(source_root):
                 candidate = snapshot_root / candidate.relative_to(source_root)
             elif not candidate.is_relative_to(snapshot_root):
@@ -469,6 +517,8 @@ class WorkspaceReader:
             tools.replace(replace(spec, handler=retry_read))
 
     async def call(self, name: str, **kwargs):
+        if hasattr(self,'_lease'):
+            self._lease[0].renew_lease(self._lease[1])
         parent = current_context()
         if parent is not None:
             parent.extra.setdefault('recovery_events', [])
