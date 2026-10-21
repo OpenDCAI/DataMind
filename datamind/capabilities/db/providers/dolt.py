@@ -68,7 +68,7 @@ class DoltDialect(BaseSQLDialect):
                 )
                 c.close()
                 return
-            except mysql.connector.errors.DatabaseError as e:
+            except mysql.connector.Error as e:
                 msg = str(e)
                 if "2003" in msg or "Can't connect" in msg:
                     if i == tries - 1:

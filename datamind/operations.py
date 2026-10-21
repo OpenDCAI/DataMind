@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from filelock import FileLock
 
 from datamind.core.context import RequestContext
 
@@ -18,7 +19,7 @@ class OperationStore:
         self.settings = settings
         self.profile = settings.data.profile
         self.path = settings.data.storage_dir / 'operations.sqlite3'
-        with self.connect() as db:
+        with FileLock(str(self.path.with_suffix(".schema.lock")), timeout=30), self.connect() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS operations (
                     id TEXT PRIMARY KEY, session TEXT NOT NULL, revision TEXT, mode TEXT NOT NULL);

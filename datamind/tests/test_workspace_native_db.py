@@ -188,7 +188,7 @@ async def test_interrupted_dolt_child_is_reaped_on_next_operation(tmp_path):
     (root / "sales.csv").write_text("amount\n100\n")
     cfg = Settings(
         _env_file=None,
-        data={"base_dir": tmp_path / "runtime"},
+        data={"base_dir": tmp_path / "runtime with spaces"},
         db={"dialect": "dolt"},
         workspace={"storage_mode": "incremental", "retention": "all", "auto_gc": False},
     )

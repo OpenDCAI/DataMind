@@ -11,7 +11,6 @@ import asyncio
 import csv
 import json
 import os
-import shlex
 import signal
 import time
 import socket
@@ -94,15 +93,11 @@ class DoltRepository:
             parts = line.strip().split(None, 1)
             if len(parts) != 2:
                 continue
-            try:
-                command = shlex.split(parts[1])
-            except ValueError:
-                continue
+            command = parts[1].strip()
+            marker = " sql-server --config " + str(config)
             if (
-                len(command) < 4
-                or command[-2:] != ["--config", str(config)]
-                or command[1] != "sql-server"
-                or os.path.basename(command[0]) != "dolt"
+                not command.endswith(marker)
+                or os.path.basename(command[: -len(marker)]) != "dolt"
             ):
                 continue
             pid = int(parts[0])
@@ -129,11 +124,7 @@ class DoltRepository:
                     text=True,
                     timeout=5,
                 ).stdout.strip()
-                try:
-                    same = shlex.split(current) == command
-                except ValueError:
-                    same = False
-                if same:
+                if current == command:
                     try:
                         os.kill(pid, signal.SIGKILL)
                     except ProcessLookupError:
