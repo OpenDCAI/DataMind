@@ -30,12 +30,11 @@ def test_nested_env_hydrates_required_llm(monkeypatch, tmp_path):
     assert s.llm.model == "claude-opus-4-7"
 
 
-def test_missing_api_key_raises(monkeypatch, tmp_path):
+def test_data_settings_do_not_require_conversation_api_key(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     # Explicitly clear the key even if it leaked from the real env
     monkeypatch.delenv("DATAMIND__LLM__API_KEY", raising=False)
-    with pytest.raises(ValidationError):
-        Settings()
+    assert Settings().llm.api_key.get_secret_value() == ""
 
 
 def test_profile_paths_switch_in_lockstep(monkeypatch, tmp_path):

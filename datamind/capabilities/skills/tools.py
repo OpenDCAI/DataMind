@@ -74,7 +74,7 @@ def build_skills_tools(skills: SkillsService) -> list[ToolSpec]:
 
 
 def build_skills_store_tools(skills: SkillsService) -> list[ToolSpec]:
-    """Tools available only to StoreAgent."""
+    """Procedural writes, authorized and wrapped in data-layer receipts."""
 
     async def _upsert(
         name: str,

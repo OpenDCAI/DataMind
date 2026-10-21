@@ -129,9 +129,8 @@ class ToolRegistry:
     ) -> "ToolRegistry":
         """Create a role-scoped registry without copying handlers.
 
-        This is the enforcement point used by the two agent assemblers.  A
-        RetrieveAgent registry accepts read/utility tools while a StoreAgent
-        registry accepts write tools; prompts are not trusted for isolation.
+        Data transports can expose a scoped subset. Read-only requests accept
+        read/utility tools; prompts are not trusted for isolation.
         """
         selected = ToolRegistry()
         for spec in self._tools.values():

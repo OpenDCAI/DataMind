@@ -21,6 +21,19 @@ MODEL_TOOLS = frozenset({
 
 
 @dataclass
+class DataServices:
+    client: Any = None
+    fallback_client: Any = None
+    embedding: Any = None
+    kb: Any = None
+    db: Any = None
+    graph: Any = None
+    skills: Any = None
+    memory: Any = None
+    ingest: Any = None
+
+
+@dataclass
 class DataPlane:
     services: Any
     tools: ToolRegistry
@@ -42,6 +55,11 @@ class DataPlane:
         if ctx.profile != self.profile:
             raise PermissionError('Request profile does not match runtime')
         args = dict(arguments or {})
+        # Python callers commonly pass None for optional omitted arguments.
+        # MCP validates its wire schema before dispatch; unknown keys still fail.
+        required = set(spec.input_schema.get('required', []))
+        optional = set(spec.input_schema.get('properties', {})) - required
+        args = {k:v for k,v in args.items() if v is not None or k not in optional}
         result, error = None, None
         with bind_context(ctx):
             try:
@@ -67,12 +85,34 @@ class DataPlane:
                 if self.hooks:
                     await self.hooks.post(name, args, result, error)
 
+    @property
+    def revision(self):
+        return self.ledger.revision
+
+    async def warmup(self):
+        return {
+            'skills': await self.services.skills.load() if self.services.skills else {'manifests': 0},
+            'graph': await self.services.graph.load_from_profile() if self.services.graph else {},
+            'kb_chunks': await self.services.kb.count() if self.services.kb else 0,
+            'revision': self.revision,
+            'hooks': self.hooks.names() if self.hooks else [],
+        }
+
     async def aclose(self):
-        # One lifecycle implementation shared with the compatibility facade.
-        from datamind.agent.options import DataMind
-        await DataMind.aclose(self)
+        if self._closed:
+            return
+        self._closed = True
+        seen = set()
+        for resource in (self.services.db, self.services.graph, self.services.kb,
+                         self.services.embedding, self.services.fallback_client, self.services.client):
+            if resource is None or id(resource) in seen:
+                continue
+            seen.add(id(resource))
+            close = getattr(resource, 'aclose', None)
+            if callable(close):
+                await close()
 
 
-async def build_data_plane(settings, *, enable: set[str] | None = None) -> DataPlane:
-    from datamind.agent.options import _assemble
-    return await _assemble(settings, enable=enable, agent_runtime=False)
+async def build_data_plane(settings, *, enable: set[str] | None = None, text_client=None) -> DataPlane:
+    from datamind.runtime import assemble_data_plane
+    return await assemble_data_plane(settings, enable=enable, text_client=text_client)

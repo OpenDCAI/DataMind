@@ -35,16 +35,18 @@ class Model:
 
 @pytest.fixture
 def setup_workspace(tmp_path, monkeypatch):
-    from datamind.agent import options
+    from datamind import runtime as options
     model, embedding = Model(), Embed()
-    monkeypatch.setattr(options, 'build_model_client', lambda *a, **k: model)
     monkeypatch.setattr(options, 'build_embedding', lambda *a, **k: embedding)
     settings = Settings(llm={'api_key': 'test', 'model': 'test'},
                         data={'base_dir': tmp_path / 'runtime'}, embedding={'dimension': 4})
     source = tmp_path / 'source'
     source.mkdir()
     (source / 'a.md').write_text('Alice owns Project')
-    return Workspace(settings), source, model, embedding
+    async def builder(cfg, enable):
+        from datamind.data_plane import build_data_plane
+        return await build_data_plane(cfg, enable=enable, text_client=model)
+    return Workspace(settings, builder=builder), source, model, embedding
 
 
 @pytest.mark.asyncio
@@ -77,7 +79,7 @@ async def test_failed_build_keeps_head_and_reuses_completed_sources_on_restart(s
         await workspace.update(str(source))
     assert workspace.current_revision == first['workspace_revision']
     model.fail = False
-    restarted = Workspace(workspace.settings)
+    restarted = Workspace(workspace.settings, builder=workspace._builder)
     second = await restarted.update(str(source))
     assert second['reused_sources'] == 1
     assert len(second['sources']) == 2
@@ -216,7 +218,7 @@ async def test_hard_process_exit_leaves_no_partial_publication_and_reuses_checkp
     script = tmp_path / 'crash_builder.py'
     script.write_text('''
 import asyncio, os, sys
-from datamind.agent import options
+from datamind import runtime as options
 from datamind.config import Settings
 from datamind.workspace import Workspace
 class Model:
@@ -228,9 +230,11 @@ class Model:
         return '[{"subject":"Alice","relation":"owns","object":"Project"}]'
     async def aclose(self): pass
 model = Model()
-options.build_model_client = lambda *a, **k: model
+async def builder(settings, enable):
+    from datamind.data_plane import build_data_plane
+    return await build_data_plane(settings, enable=enable, text_client=model)
 settings = Settings(llm={'api_key':'test','model':'test'}, data={'base_dir':sys.argv[1]}, embedding={'dimension':4})
-asyncio.run(Workspace(settings).update(sys.argv[2], surfaces=['graph']))
+asyncio.run(Workspace(settings,builder=builder).update(sys.argv[2], surfaces=['graph']))
 ''')
     process = await asyncio.create_subprocess_exec(sys.executable, str(script),
         str(workspace.settings.data.base_dir), str(source),

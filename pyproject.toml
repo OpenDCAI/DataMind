@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = [
     "AI", "agent", "RAG", "GraphRAG", "Text2SQL",
-    "knowledge-graph", "memory", "MCP", "data-agent", "claude",
+    "knowledge-graph", "memory", "MCP", "data-agent", "codex",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -77,8 +77,8 @@ Repository    = "https://github.com/OpenDCAI/DataMind"
 Issues        = "https://github.com/OpenDCAI/DataMind/issues"
 
 [project.optional-dependencies]
-# Legacy v0.1 stack — kept so the old main.py / server.py / modules/* keep
-# working side-by-side with the new datamind/ package.
+# Historical v0.1 capability modules only; main.py/server.py now delegate
+# to the shared Codex CLI/HTTP host. This extra does not select an agent backend.
 legacy = [
     "llama-index>=0.11",
 ]

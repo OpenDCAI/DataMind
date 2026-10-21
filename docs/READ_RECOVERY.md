@@ -36,7 +36,7 @@ retry counts. Standalone hybrid reads use `vector_retries`. Third-party clients
 may still have their own retry implementations; configure them explicitly for
 fair experiments.
 
-`vector_timeout_s` bounds each vector attempt. `RetrieveAgent.query` and
+`vector_timeout_s` bounds each vector attempt. `CodexHost.query` and
 `Workspace.query` also enforce the configured `agent.wall_clock_timeout_s` across
 the whole query, including retries, sleeps and fallback. Direct `KBService`
 callers remain responsible for setting an overall deadline. Cancellation and an

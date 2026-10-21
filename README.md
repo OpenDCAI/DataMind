@@ -17,10 +17,11 @@ Local Codex (personal)         Codex SDK (enterprise host)
         evidence · receipts · workspace revisions
 ```
 
-The plugin and official Codex SDK integration use the same data layer and tools.
-Neither launches an internal StoreAgent or RetrieveAgent. Those older APIs remain
-available for compatibility; `agent.backend=sdk` there means **Claude Agent SDK**,
-not the official Codex SDK used by the new integration.
+The plugin, official Codex SDK integration, CLI, HTTP API and browser UI share
+the same data layer. Codex is the main agent for ingestion and retrieval.
+DataMind contains no StoreAgent/RetrieveAgent implementation or Claude SDK agent
+backend. Generic native loop primitives remain only for deterministic baseline
+experiments; product entry points do not assemble them.
 
 ## Five surfaces
 
@@ -34,9 +35,8 @@ not the official Codex SDK used by the new integration.
 - **Memory:** durable user facts and preferences, with profile/session scope.
 
 Direct Graph, SQL, Skills and Memory tools do not need a DataMind conversation-model
-key. Embedding models are separate from the main Codex model. Legacy model-backed
-retrieval strategies such as `multi_query` require the compatibility runtime;
-use `simple` or `hybrid` with direct tools.
+key. Embedding models are separate from the main Codex model. Use `simple` or `hybrid` with direct tools. An explicitly supplied capability
+text client can support custom pipelines without adding an agent loop.
 
 ## Quick start
 
@@ -144,18 +144,38 @@ source replacement, Codex submits triples plus the expected source hash; validat
 happens before retracting old support. `graph_forget_source` removes only that
 source's managed support and preserves the original file and other evidence.
 
-## Compatibility and migration
+## CLI, HTTP and UI
 
-New plugin tools replace `datamind_ask/store/graph_query/workspace_ask`: the main
-Codex agent now calls direct tools and writes the final answer itself. Use
-operation_begin plus workspace_publish for coordinated updates instead of the
-old model-extracting workspace_update MCP tool.
+```bash
+pip install -e '.[codex]'
+datamind info                       # no model startup
+datamind ask "Who owns Project A?"   # Codex with read-only data access
+datamind store "Import this file"    # same Codex host, authorized writes
+datamind chat                       # /store permits writes, /new resets context
+python -m uvicorn datamind.server:app --host 127.0.0.1 --port 8000
+```
 
-`datamind.agent.build_datamind(Settings())`, the existing CLI, FastAPI/UI and
-native / Claude SDK loops remain legacy compatibility entry points. They still
-require the configured DataMind model key and may invoke StoreAgent/RetrieveAgent.
-They are not the new Codex SDK architecture. Existing provider, benchmark and
-recovery APIs remain available. See [legacy runtime](./docs/LEGACY_RUNTIME.md).
+The UI and `/api/ask`, `/api/store`, `/api/chat` call the same Codex host. Read
+requests pin the published revision at admission, and tools enforce that binding
+across calls. With no published workspace, a read request explicitly uses live
+stores. The API's optional `revision` selects a retained historical snapshot.
+Source uploads, direct KB administration, graph status and scoped Memory reads
+remain available. Receipt IDs, request IDs and data-tool evidence are returned
+from actual data calls, including when Codex uses code mode.
+
+## Migration to 2.0
+
+The old `datamind.agent.build_datamind`, StoreAgent/RetrieveAgent classes, role
+prompts, and Claude SDK/CCR agent adapter have been removed. Use `CodexHost` for
+natural-language requests and `build_data_plane` for direct data operations.
+`DATAMIND__CODEX__*` configures the main agent; the old native/sdk backend switch
+no longer selects a product runtime. See [2.0 migration](./docs/LEGACY_RUNTIME.md).
+
+The plugin's direct-tool workflow, source checkpoints, immutable revisions,
+source-scoped graph replacement and rollback remain the same. Prepared graph
+assertions are supplied by Codex; direct Workspace builds do not implicitly
+start a model. Optional explicit text utility clients remain supported for
+custom pipelines and deterministic experiment fixtures.
 
 ## Verify
 

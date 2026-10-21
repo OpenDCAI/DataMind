@@ -581,7 +581,7 @@ main {
     <div class="messages" id="messages">
       <div class="welcome" id="welcome">
         <h3>👋 欢迎使用 DataMind</h3>
-        <p><strong>RetrieveAgent</strong> 只读地跨五个数据面取数；<strong>StoreAgent</strong> 负责写入，并返回可审计回执。</p>
+        <p><strong>Codex</strong> 负责入库与查询；DataMind 提供数据工具、来源证据和写入回执。</p>
         <p>输入问题后点「取数」，输入要保存的内容后点「存数」。</p>
         <div class="sample-prompts" id="samplePrompts"></div>
       </div>
@@ -707,16 +707,16 @@ async function loadHealth() {
     state.health = await api('/api/health');
     const pill = $('healthPill');
     pill.classList.remove('warn', 'err');
-    pill.innerHTML = `<span class="dot"></span><span>就绪 · 取 ${state.health.retrieve_tools} / 存 ${state.health.store_tools}</span>`;
+    pill.innerHTML = `<span class="dot"></span><span>Codex 就绪 · ${state.health.tools} 个数据工具</span>`;
 
     const kv = $('configKV');
     kv.innerHTML = '';
     const rows = [
       ['profile', state.health.profile],
-      ['model', state.health.model],
+      ['model', state.health.model || 'Codex 默认配置'],
       ['embedding', state.health.embedding],
       ['db', state.health.db_dialect],
-      ['revision', state.health.revision],
+      ['revision', state.health.workspace_revision || state.health.revision],
     ];
     for (const [k, v] of rows) {
       kv.innerHTML += `<dt>${k}</dt><dd>${v}</dd>`;
@@ -823,7 +823,7 @@ function fillSamplePrompts() {
   const known = new Set(state.tools.map(t => t.name));
   const bag = [];
   if (known.has('kb_search')) bag.push({ text: 'Search platform 团队负责人是谁？', role: 'retrieve' });
-  if (known.has('db_query_nl')) bag.push({ text: '数据库里有多少个员工？', role: 'retrieve' });
+  if (known.has('db_query_sql')) bag.push({ text: '数据库里有多少个员工？', role: 'retrieve' });
   if (known.has('graph_traverse')) bag.push({ text: 'Ann 三跳能到达哪些实体？', role: 'retrieve' });
   if (known.has('skill_search')) bag.push({ text: '如何做代码审查？', role: 'retrieve' });
   if (known.has('memory_save')) bag.push({ text: '帮我记住：下周三会议调到周四', role: 'store' });
@@ -1084,6 +1084,10 @@ async function sendMessage() {
           if (last) last.classList.add('hook-denied');
           logLine(`hook denied: ${event.tool} — ${event.reason}`);
         } else if (event.type === 'done') {
+          if (typeof event.answer === 'string') {
+            aiBubble.dataset.raw = event.answer;
+            renderMarkdown(aiBubble);
+          }
           logLine(`done: ${event.iterations} iter · stop=${event.stop_reason}`);
         }
       }
@@ -1172,7 +1176,7 @@ $('sessionInput').addEventListener('change', () => {
 // Files dropped here are uploaded to /api/upload (server saves under
 // data/profiles/<profile>/uploads/) and then displayed in a small list
 // below the drop zone. Clicking "导入" sends the instruction to the
-// write-only StoreAgent endpoint; normal chat remains strictly read-only.
+// write-authorized Codex endpoint; normal chat remains strictly read-only.
 
 const DROP = $('dropZone');
 const FILE_INPUT = $('fileInput');
@@ -1209,7 +1213,7 @@ function suggestPromptForFile(filename, savedPath) {
 async function sendStoreInstruction(message) {
   addBubble('user').textContent = message;
   const aiBubble = addBubble('assistant');
-  aiBubble.textContent = 'StoreAgent 正在写入…';
+  aiBubble.textContent = 'Codex 正在处理入库…';
   try {
     const result = await api('/api/store', {
       method: 'POST',

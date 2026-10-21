@@ -19,11 +19,11 @@ def settings(tmp_path, monkeypatch):
     monkeypatch.delenv('DATAMIND__LLM__API_KEY', raising=False)
     monkeypatch.setenv('DATAMIND_DATA_ROOT', str(tmp_path))
     monkeypatch.delenv('DATAMIND_PROFILE', raising=False)
-    from datamind.agent import options
+    from datamind import runtime as options
     def forbidden(*a, **kw):
         pytest.fail('Direct tools must never construct an agent or conversation client')
-    monkeypatch.setattr(options, 'build_model_client', forbidden)
-    monkeypatch.setattr(options, '_build_loop', forbidden)
+    from datamind.core import model_clients
+    monkeypatch.setattr(model_clients, 'build_model_client', forbidden)
     cfg = DataSettings(_env_file=None)
     cfg.data.base_dir = tmp_path
     return cfg
@@ -59,6 +59,21 @@ async def test_direct_graph_sql_skills_memory_no_model(settings):
     assert 'Chinese' in json.dumps(recalled)
     audit = settings.data.storage_dir / 'audit.jsonl'
     assert 'graph_upsert_triples' in audit.read_text()
+
+
+@pytest.mark.asyncio
+async def test_build_metadata_remains_usable_without_business_write_receipts(settings,tmp_path):
+    source=tmp_path/'sources';source.mkdir()
+    (source/'notes.md').write_text('A source document')
+    writer=await begin()
+    started=(await call(writer,'build_start',path=str(source)))['result']
+    assert 'receipt_id' not in started
+    build_id=started['build_id']
+    frozen=(await call(writer,'build_freeze',build_id=build_id))['result']
+    assert frozen['build_id']==build_id
+    reader=await begin('read',pin_workspace=False)
+    with pytest.raises(PermissionError):
+        await call(reader,'build_start',path=str(source))
 
 
 @pytest.mark.asyncio
@@ -163,7 +178,7 @@ async def test_replace_source_preserves_other_support_and_validates_before_retra
 
 @pytest.mark.asyncio
 async def test_direct_publication_pins_kb_sql_graph_and_raw_across_calls(settings,tmp_path,monkeypatch):
-    from datamind.agent import options
+    from datamind import runtime as options
     from datamind.workspace import Workspace
     class Embed:
         name = 'test'
@@ -188,7 +203,7 @@ async def test_direct_publication_pins_kb_sql_graph_and_raw_across_calls(setting
         assert all(r['status'] == 'stored' for r in result['result']['results']), result
         manifest = result['result']['results'][0]['details']
         assert manifest['metrics']['graph_extraction_calls'] == 0
-        assert manifest['applied_skills'][0]['version'] == '1.1.0'
+        assert manifest['applied_skills'][0]['version'] == '1.2.0'
         return manifest['workspace_revision']
     first = await publish('OldOwner')
     reader = await begin('read')
@@ -231,3 +246,28 @@ async def test_workspace_publication_respects_explicit_enabled_surfaces(settings
         assert 'not enabled' in result['results'][0]['error']
     finally:
         await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_host_read_mode_and_bound_session_enforced_below_agent_prompt(settings,monkeypatch):
+    monkeypatch.setenv('DATAMIND_SESSION_ID','session-a')
+    write=await begin()
+    monkeypatch.setenv('DATAMIND_ACCESS_MODE','read')
+    with pytest.raises(PermissionError,match='only permits data reads'):
+        await begin('write')
+    with pytest.raises(PermissionError,match='only permits data reads'):
+        await call(write,'graph_upsert_triples',triples=[])
+    reader=await begin('read',pin_workspace=False)
+    monkeypatch.setenv('DATAMIND_SESSION_ID','session-b')
+    with pytest.raises(PermissionError,match='different Codex session'):
+        await call(reader,'graph_schema')
+
+
+@pytest.mark.asyncio
+async def test_mcp_capability_set_cannot_be_expanded_by_agent(settings,monkeypatch):
+    monkeypatch.setenv('DATAMIND_ENABLED_SURFACES','["graph"]')
+    token=await begin()
+    with pytest.raises(ValueError,match='Unknown direct data tool'):
+        await call(token,'db_list_tables')
+    with pytest.raises(PermissionError,match='capability set'):
+        await call(token,'workspace_publish',path='.',surfaces=['db'])

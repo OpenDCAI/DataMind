@@ -66,7 +66,7 @@ def provenance(args, source):
 
 def setup_fixture():
     """Deterministic CPU-only providers with real local snapshot storage."""
-    from datamind.agent import options
+    from datamind import runtime as options
 
     class Embed:
         name = "robustness-fixture"
@@ -90,7 +90,31 @@ def setup_fixture():
             pass
 
     options.build_embedding = lambda *a, **k: Embed()
-    options.build_model_client = lambda *a, **k: Model()
+    global _fixture_model
+    _fixture_model = Model()
+
+
+
+_fixture_model = None
+
+def workspace_for(settings):
+    if _fixture_model is None:
+        return Workspace(settings)
+    async def builder(cfg, enable):
+        from datamind.data_plane import build_data_plane
+        return await build_data_plane(cfg,enable=enable,text_client=_fixture_model)
+    return Workspace(settings,builder=builder)
+
+
+def prepared_graph(args):
+    if args.fixture or 'graph' not in args.surfaces.split(','):
+        return None
+    if not args.graph_sources:
+        raise ValueError('Live graph builds require --graph-sources prepared by the main Codex agent')
+    value=json.loads(Path(args.graph_sources).read_text())
+    if not isinstance(value,list):
+        raise ValueError('--graph-sources must contain a JSON array of versioned source assertions')
+    return value
 
 
 def settings_for(runtime, fixture, args=None):
@@ -199,12 +223,12 @@ async def query_experiment(args, output, source, tasks):
     if args.fixture and args.execution != "retrieval":
         raise ValueError("Fixture mode cannot evaluate LLM answers; use --execution retrieval")
     settings = settings_for(output / "runtime", args.fixture, args)
-    workspace = Workspace(settings)
-    built = await workspace.update(str(source), surfaces=args.surfaces.split(","))
+    workspace = workspace_for(settings)
+    built = await workspace.update(str(source), surfaces=args.surfaces.split(","), graph_sources=prepared_graph(args))
     manifest = provenance(args, source)
     manifest.update(workspace_revision=built["workspace_revision"], pipeline_hash=built["pipeline_hash"],
                     retrieval=settings.retrieval.model_dump(),
-                    model=settings.llm.model, embedding_model=settings.embedding.model,
+                    model=settings.codex.model, embedding_model=settings.embedding.model,
                     scoring="source-hit / exact string match only; use official scorers for paper results")
     write_json(output / "manifest.json", manifest)
     write_json(output / "build.json", built)
@@ -226,16 +250,30 @@ async def query_experiment(args, output, source, tasks):
                 row["reader_setup_ms"] = (time.monotonic() - reader_started) * 1000
                 faults = Faults(args.seed + repeat, str(task["task_id"]), probability,
                                 args.outage_ms, args.fault_delay_ms)
-                install_fault(reader, faults, args.component)
+                runtime_env=None
+                state=None
+                if args.execution=='retrieval':
+                    install_fault(reader, faults, args.component)
+                else:
+                    state=output/'fault-states'/(digest([repeat,task['task_id'],policy,probability])+'.sqlite3')
+                    plan={'state':str(state),'seed':args.seed+repeat,'task':str(task['task_id']),
+                          'component':args.component,'probability':probability,
+                          'outage_ms':args.outage_ms,'delay_ms':args.fault_delay_ms}
+                    runtime_env={'DATAMIND_TEST_READ_FAULT':json.dumps(plan),
+                                 'DATAMIND_WORKSPACE_READ_RETRIES':str(0 if policy=='none' else args.retries)}
                 started = time.monotonic()
                 try:
                     async with asyncio.timeout(args.deadline_s):
                         result = await (reader.call("kb_search", query=task["question"], filters=task.get("filters"))
-                                        if args.execution == "retrieval" else reader.query(task["question"]))
+                                        if args.execution == "retrieval" else reader.query(task["question"],runtime_env=runtime_env))
                     row.update(outcome="ok", result=result, **score(task, result, args.execution))
                 except Exception as exc:
                     row.update(outcome="error", error_type=type(exc).__name__, recovery=getattr(exc, "datamind_recovery", {}), source_hit=False if task.get("expected_sources") else None,
                                exact_answer_match=False if task.get("reference_answer") is not None and args.execution == "agent" else None)
+                if state is not None:
+                    from datamind.experiment_faults import counts
+                    actual=counts(state)
+                    faults.attempts,faults.injected=actual['attempts'],actual['injected']
                 row.update(latency_ms=(time.monotonic() - started) * 1000,
                            injected_faults=faults.injected, component_attempts=faults.attempts)
         except Exception as exc:
@@ -280,7 +318,7 @@ async def snapshot_content(workspace, revision):
 async def build_worker(args):
     import datamind.workspace as module
     settings = settings_for(args.runtime, args.fixture)
-    workspace = Workspace(settings)
+    workspace = workspace_for(settings)
     original = module._atomic_json
     completed = 0
     def injected(path, value, **kwargs):
@@ -293,7 +331,7 @@ async def build_worker(args):
         if args.crash_stage == "publication" and path.name == "manifest.json":
             os._exit(23)  # Snapshot prepared, head has not moved.
     module._atomic_json = injected
-    result = await workspace.update(args.source, surfaces=args.surfaces.split(","))
+    result = await workspace.update(args.source, surfaces=args.surfaces.split(","), graph_sources=prepared_graph(args))
     fingerprint = await snapshot_content(workspace, result["workspace_revision"])
     probes = []
     if args.questions:
@@ -321,6 +359,8 @@ def run_worker(args, runtime, result, crash_stage="none"):
         command.append("--fixture")
     if args.questions:
         command.extend(["--questions", args.questions])
+    if args.graph_sources:
+        command.extend(["--graph-sources",args.graph_sources])
     with result.with_suffix(".log").open("w") as log:
         return subprocess.run(command, cwd=REPO, env={**os.environ, "PYTHONPATH": str(REPO)},
                               stdout=log, stderr=log, timeout=args.worker_timeout_s).returncode
@@ -329,7 +369,7 @@ def run_worker(args, runtime, result, crash_stage="none"):
 def build_experiment(args, output, source):
     args.source = str(source)
     settings = settings_for(output / "crashed", args.fixture)
-    count = len(Workspace(settings)._inventory(source))
+    count = len(workspace_for(settings)._inventory(source))
     if args.crash_stage == "checkpoint" and not 1 <= args.after <= count:
         raise ValueError(f"--after must be between 1 and {count} supported sources")
     write_json(output / "manifest.json", provenance(args, source))
@@ -337,7 +377,7 @@ def build_experiment(args, output, source):
     code = run_worker(args, crashed, output / "interrupted.json", args.crash_stage)
     if code != 23:
         raise RuntimeError(f"expected injected process exit 23, got {code}; inspect interrupted.log")
-    assert Workspace(settings).current_revision is None, "partial build was published"
+    assert workspace_for(settings).current_revision is None, "partial build was published"
     results = {}
     for policy in ("cold", "resume"):
         runtime = output / policy
@@ -367,6 +407,7 @@ def parser():
         p.add_argument("--fixture", action="store_true", help="CPU-only smoke fixtures, never paper quality results")
         p.add_argument("--source")
         p.add_argument("--questions")
+        p.add_argument("--graph-sources",help="Codex-prepared JSON assertions outside the raw workspace")
         p.add_argument("--surfaces", default="kb,graph,db" if command != "query" else "kb")
         if command == "_build_worker":
             p.add_argument("--runtime", required=True)
@@ -395,6 +436,8 @@ def main():
     args = parser().parse_args()
     if args.questions:
         args.questions = str(Path(args.questions).resolve())
+    if args.graph_sources:
+        args.graph_sources = str(Path(args.graph_sources).resolve())
     if args.command == "_build_worker":
         asyncio.run(build_worker(args))
         return

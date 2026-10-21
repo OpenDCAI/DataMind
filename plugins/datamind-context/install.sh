@@ -149,7 +149,7 @@ chmod +x "${TARGET_DIR}/install.sh" "${TARGET_DIR}/src/run_datamind_mcp.sh"
 
 if [[ ! -f "${REPO_ROOT}/.env.datamind" && -f "${REPO_ROOT}/.env.datamind.example" ]]; then
   cp "${REPO_ROOT}/.env.datamind.example" "${REPO_ROOT}/.env.datamind"
-  echo "Created ${REPO_ROOT}/.env.datamind from .env.datamind.example. Edit it with your LLM and embedding credentials."
+  echo "Created ${REPO_ROOT}/.env.datamind from .env.datamind.example. Configure optional Codex gateway and independent embedding credentials."
 fi
 
 if [[ "${SKIP_DEPS}" != "true" ]]; then

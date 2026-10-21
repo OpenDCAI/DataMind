@@ -21,7 +21,7 @@ def test_catalogue_exposes_direct_tools_without_nested_agents():
 def test_initialize_teaches_codex_main_agent_contract():
     result = handle({'jsonrpc':'2.0','id':1,'method':'initialize'})['result']
     assert 'main agent' in result['instructions']
-    assert result['serverInfo']['version'] == '1.2.0'
+    assert result['serverInfo']['version'] == '2.0.0'
 
 
 def test_plugin_and_wheel_entrypoints_run_real_stdio_without_llm(tmp_path):

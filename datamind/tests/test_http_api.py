@@ -59,6 +59,20 @@ class _FailingStreamLoop(_FakeLoop):
         raise RuntimeError("provider unavailable")
 
 
+class _FakeCodexHost:
+    fail = False
+    async def query(self, message, **kwargs):
+        kwargs.pop('workspace_revision',None)
+        return await _FakeLoop('retrieve').run_turn(user_message=message, **kwargs)
+    async def ingest(self, message, **kwargs):
+        return await _FakeLoop('store').run_turn(user_message=message, **kwargs)
+    async def stream(self, message, **kwargs):
+        yield {'type':'text','delta':'partial' if self.fail else 'streamed answer'}
+        if self.fail:
+            raise RuntimeError('provider unavailable')
+        yield {'type':'done','answer':'streamed answer','iterations':1,'stop_reason':'end_turn','usage':{}}
+
+
 class _FakeKB:
     async def list_documents(self):
         return [{"source": "demo.md", "chunks": 1}]
@@ -106,27 +120,17 @@ def configured_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     settings.data.profile = "http_e2e"
     settings.ensure_dirs()
 
-    retrieve = SimpleNamespace(
-        loop=_FakeLoop("retrieve"),
-        tools=_registry("retrieve"),
-    )
-    store = SimpleNamespace(
-        loop=_FakeLoop("store"),
-        tools=_registry("store"),
-        revision=1,
-    )
-    system = SimpleNamespace(
-        retrieve=retrieve,
-        store=store,
-        services=SimpleNamespace(
-            kb=_FakeKB(),
-            memory=_FakeMemory(),
-            graph=_FakeGraph(),
-        ),
-    )
+    tools = _registry('retrieve')
+    tools.extend([_registry('store').get('kb_reindex')])
+    data = SimpleNamespace(tools=tools, revision=1,
+        services=SimpleNamespace(kb=_FakeKB(),memory=_FakeMemory(),graph=_FakeGraph()))
+    async def call(name):
+        return await tools.get(name).handler()
+    data.call=call
     state = AppState()
     state.settings = settings
-    state.system = system
+    state.data = data
+    state.host = _FakeCodexHost()
     monkeypatch.setattr(app.state, "datamind", state, raising=False)
     return app, settings
 
@@ -139,13 +143,13 @@ async def test_http_api_routes_round_trip(configured_app):
         health = await client.get("/api/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
-        assert health.json()["retrieve_tools"] == 1
-        assert health.json()["store_tools"] == 1
+        assert health.json()["backend"] == "codex"
+        assert health.json()["tools"] == 2
 
         tools = await client.get("/api/tools")
         assert tools.status_code == 200
         assert tools.json()["count"] == 2
-        assert {item["role"] for item in tools.json()["tools"]} == {"retrieve", "store"}
+        assert {item["role"] for item in tools.json()["tools"]} == {"read", "write"}
 
         ask = await client.post(
             "/api/ask",
@@ -197,8 +201,8 @@ async def test_http_api_routes_round_trip(configured_app):
         reindex = await client.post("/api/kb/reindex")
         assert reindex.json()["ok"] is True
 
-        memory = await client.get("/api/memory/customer-a", params={"query": "demo"})
-        assert memory.json()["profile"] == "customer-a"
+        memory = await client.get("/api/memory/http_e2e", params={"query": "demo"})
+        assert memory.json()["profile"] == "http_e2e"
         assert memory.json()["results"][0]["content"] == "remembered"
 
         graph = await client.get("/api/graph/stats")
@@ -208,7 +212,7 @@ async def test_http_api_routes_round_trip(configured_app):
 @pytest.mark.asyncio
 async def test_chat_converts_stream_failure_to_sse_error(configured_app):
     test_app, _settings = configured_app
-    test_app.state.datamind.system.retrieve.loop = _FailingStreamLoop("retrieve")
+    test_app.state.datamind.host.fail = True
     transport = httpx.ASGITransport(app=test_app, raise_app_exceptions=True)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:

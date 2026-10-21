@@ -38,22 +38,19 @@ async def test_skill_lookup_is_lazy_versioned_and_captured_in_persisted_receipt(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('backend',['native','sdk'])
-async def test_writer_only_receives_explicit_guidance_reads(tmp_path,monkeypatch,backend):
-    from datamind.agent import options
-    from types import SimpleNamespace
-    monkeypatch.setattr(options,'build_model_client',lambda *a,**k: SimpleNamespace())
-    monkeypatch.setattr(options,'_build_loop',lambda **k: SimpleNamespace())
-    settings = Settings(llm={'api_key':'test'},data={'base_dir':tmp_path},agent={'backend':backend})
-    system = await options.build_datamind(settings,enable={'graph'})
-    assert 'raw_file_read' in system.store.tools
-    assert 'workspace_inspect' in system.store.tools
-    assert 'workspace_update' in system.store.tools
-    assert 'graph_neighbors' not in system.store.tools
-    assert 'graph_traverse' not in system.store.tools
-    assert 'workspace_update' not in system.retrieve.tools
-    assert 'graph_upsert_triples' not in system.retrieve.tools
-    await system.aclose()
+async def test_data_runtime_exposes_direct_reads_and_receipt_wrapped_writes(tmp_path):
+    from datamind.data_plane import build_data_plane
+    from datamind.core.contracts import ToolAccess
+    settings = Settings(llm={'api_key':'test'},data={'base_dir':tmp_path})
+    data = await build_data_plane(settings,enable={'graph','skills'})
+    assert 'raw_file_read' in data.tools
+    assert 'workspace_publish' in data.tools
+    assert 'graph_neighbors' in data.tools
+    assert data.tools.get('graph_upsert_triples').metadata['receipt']
+    assert 'graph_upsert_triples' not in data.read_tools
+    assert all(data.read_tools.get(n).access != ToolAccess.WRITE for n in data.read_tools.names())
+    assert not hasattr(data, 'loop')
+    await data.aclose()
 
 
 def test_bundled_ingestion_skills_match_checkout_catalog():

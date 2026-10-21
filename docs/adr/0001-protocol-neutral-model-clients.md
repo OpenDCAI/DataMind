@@ -42,3 +42,10 @@ real streaming for both protocols.
   `datamind/core/model_clients.py`.
 - All tool execution continues through the same registry, HookChain, evidence,
   and budget path.
+
+## Superseded product runtime in 2.0
+
+The native/Claude SDK backend choice described above is historical. Product
+CLI/HTTP/UI now host the official Codex SDK; the local plugin uses Codex directly.
+Protocol-neutral loop/client primitives remain only for benchmark baselines.
+See [migration notes](../LEGACY_RUNTIME.md).
