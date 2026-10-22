@@ -40,6 +40,10 @@ def definitions():
     result = {'datamind_operation_begin': {
         'name': 'datamind_operation_begin', 'description': 'Start isolated tool context. Read pins a workspace; use pin_workspace=false for independent live data.',
         'inputSchema': BEGIN_SCHEMA}}
+    result['datamind_operation_close']={'name':'datamind_operation_close',
+        'description':'Close an operation and release its historical snapshot lease.',
+        'inputSchema':{'type':'object','properties':{'operation_id':{'type':'string'},'profile':{'type':'string'}},
+                       'required':['operation_id'],'additionalProperties':False},'annotations':{'readOnlyHint':True}}
     for name, spec in specs.items():
         if enabled is not None and spec.surface and spec.surface.value not in enabled:
             if name != 'workspace_publish' or not enabled & {'kb','db','graph'}:
@@ -102,18 +106,27 @@ async def execute(name, arguments):
         if revision and args.get('pin_workspace') is False:
             raise ValueError('revision cannot be combined with pin_workspace=false')
         if mode == 'read' and (revision or args.get('pin_workspace', True)):
-            revision = revision or workspace.current_revision
+            lease,revision = workspace.acquire_lease(revision)
             if revision is None:
                 raise ValueError('No published workspace. Start a write operation to publish one, or set pin_workspace=false for live stores.')
-            manifest = workspace.manifest(revision)
+            try:
+                manifest = workspace.manifest(revision)
+            except BaseException:
+                workspace.release_lease(lease)
+                raise
         else:
             manifest = None
-        result = operations.begin(session_id=os.environ.get('DATAMIND_SESSION_ID') or args.get('session_id'), revision=revision, mode=mode)
+            lease = None
+        try:
+            result = operations.begin(session_id=os.environ.get('DATAMIND_SESSION_ID') or args.get('session_id'), revision=revision, mode=mode, lease=lease, request_id=os.environ.get('DATAMIND_REQUEST_ID'))
+        except BaseException:
+            workspace.release_lease(lease)
+            raise
         if manifest:
             result['manifest'] = manifest
         return result
     token = args.pop('operation_id')
-    ctx, revision, mode = operations.load(token)
+    ctx, revision, mode = operations.load(token, renew=name != 'datamind_operation_close')
     bound_session = os.environ.get('DATAMIND_SESSION_ID')
     if bound_session and ctx.session_id != bound_session:
         raise PermissionError('Operation belongs to a different Codex session')
@@ -123,13 +136,16 @@ async def execute(name, arguments):
     forced_revision = os.environ.get('DATAMIND_WORKSPACE_REVISION')
     if forced_revision and revision != forced_revision:
         raise PermissionError('Operation does not match the pinned workspace revision')
+    if name=='datamind_operation_close':
+        operations.close(token)
+        return {'closed':True}
     target = name.removeprefix('datamind_')
     spec = {**catalogue(), **{s.name: s for s in workspace_tools(None)}}[target]
     if mode == 'read' and spec.access == ToolAccess.WRITE:
         raise PermissionError('This operation permits reads only')
     # Procedural skills and user memory belong to the live profile, not to
     # versioned business data. Business reads always use the pinned reader.
-    live = target.startswith(('skill_', 'memory_'))
+    live = target.startswith(('skill_', 'memory_')) or target == 'workspace_history'
     if revision and not live and spec.surface is None and target not in {'raw_file_read', 'workspace_inspect'}:
         raise ValueError('This tool is live build metadata; use an unpinned operation')
     result, failed = None, None
@@ -142,11 +158,13 @@ async def execute(name, arguments):
                     result = await reader.call(target, **args)
             else:
                 enable = {spec.surface.value} if spec.surface else set()
-                if target == 'workspace_publish':
-                    enable = set(args.get('surfaces', ['kb', 'graph', 'db']))
+                workspace_enable = None
+                if target in {'workspace_publish', 'workspace_migrate'}:
+                    workspace_enable = (set(json.loads(enabled_raw)) if enabled_raw is not None else {'kb','graph','db'})
+                    enable = set()  # Workspace opens private stores lazily, never direct live stores.
                 if target.startswith('build_'):
                     enable = {'graph'}
-                system = await build_data_plane(settings, enable=enable)
+                system = await build_data_plane(settings, enable=enable, workspace_enable=workspace_enable)
                 try:
                     result = await system.call(target, args, context=ctx, read_only=mode == 'read')
                 finally:
@@ -181,7 +199,7 @@ def handle(message):
     try:
         if method == 'initialize':
             result = {'protocolVersion': params.get('protocolVersion', '2025-06-18'),
-                      'capabilities': {'tools': {}}, 'serverInfo': {'name': 'datamind-context', 'version': '2.0.0'},
+                      'capabilities': {'tools': {}}, 'serverInfo': {'name': 'datamind-context', 'version': '2.1.0'},
                       'instructions': INSTRUCTIONS}
         elif method == 'ping':
             result = {}

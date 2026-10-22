@@ -69,3 +69,20 @@ def test_root_http_launcher_exports_the_same_app():
     root=Path(__file__).resolve().parents[2]
     module=runpy.run_path(str(root/'server.py'),run_name='datamind_root_server_test')
     assert module['app'] is app
+
+
+def test_workspace_cli_policy_persists_and_gc_defaults_to_preview(monkeypatch,tmp_path):
+    import json
+    cfg=DataSettings(_env_file=None,data={'base_dir':tmp_path})
+    monkeypatch.setattr(cli,'_settings',lambda:cfg)
+    runner=CliRunner()
+    result=runner.invoke(cli.app,['workspace-policy','recent','--keep-last','3'])
+    assert result.exit_code==0,result.output
+    status=runner.invoke(cli.app,['workspace-status','--usage'])
+    assert status.exit_code==0,status.output
+    value=json.loads(status.output)
+    assert value['retention']=={'mode':'recent','keep_last':3}
+    preview=runner.invoke(cli.app,['workspace-gc'])
+    assert preview.exit_code==0,preview.output
+    assert json.loads(preview.output)['dry_run'] is True
+    assert runner.invoke(cli.app,['workspace-policy','invalid']).exit_code!=0

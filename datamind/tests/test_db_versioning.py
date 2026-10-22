@@ -282,3 +282,20 @@ async def test_historical_join_and_cte_pin_all_tables_and_preserve_literals(inge
     current = await db_service.query_sql(sql)
     assert old.rows == [["old left", "old right", "FROM right_table"]]
     assert current.rows == [["new left", "new right", "FROM right_table"]]
+
+
+@pytest.mark.parametrize('error_type', ['InterfaceError', 'DatabaseError'])
+def test_dolt_startup_retries_connection_refusal_from_both_connector_engines(monkeypatch,error_type):
+    connector=pytest.importorskip('mysql.connector')
+    from types import SimpleNamespace
+    from datamind.capabilities.db.providers import dolt
+    calls=[]
+    def connect(**kwargs):
+        calls.append('connect')
+        if len(calls)<3:
+            raise getattr(connector.errors,error_type)(errno=2003,msg="Can't connect to MySQL server")
+        return SimpleNamespace(close=lambda:calls.append('closed'))
+    monkeypatch.setattr(connector,'connect',connect)
+    monkeypatch.setattr(dolt.time,'sleep',lambda _:None)
+    DoltDialect()._wait_ready('127.0.0.1',3307,'root','',tries=3)
+    assert calls==['connect','connect','connect','closed']

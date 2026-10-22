@@ -118,4 +118,54 @@ def chat(session: str=typer.Option('default'),show_tools: bool=typer.Option(True
     asyncio.run(run())
 
 
+def _workspace():
+    from datamind.workspace import Workspace
+    return Workspace(_settings())
+
+
+def _print(value):
+    console.print(json.dumps(value, ensure_ascii=False, indent=2, default=str), markup=False, soft_wrap=True)
+
+
+@app.command('workspace-status')
+def workspace_status(usage: bool = False):
+    """Show history, retention and optionally allocated storage."""
+    workspace = _workspace()
+    result = workspace.history()
+    if usage: result['storage'] = workspace.storage_usage()
+    _print(result)
+
+
+@app.command('workspace-policy')
+def workspace_policy(mode: str, keep_last: int = typer.Option(10, min=1)):
+    """Set latest, recent N, or all. Cleanup runs after publication or workspace-gc."""
+    if mode not in {'latest', 'recent', 'all'}:
+        raise typer.BadParameter('Use latest, recent, or all')
+    _print(_workspace().configure_retention(mode, keep_last))
+
+
+@app.command('workspace-gc')
+def workspace_gc(apply: bool = False, compact: bool = False):
+    """Preview cleanup; --apply removes unreferenced history; --compact reclaims provider storage."""
+    _print(asyncio.run(_workspace().collect(dry_run=not apply, compact=compact)))
+
+
+@app.command('workspace-rollback')
+def workspace_rollback(revision: str, expected_revision: str = typer.Option(None)):
+    """Select a retained revision atomically."""
+    _print(_workspace().rollback(revision, expected_revision=expected_revision))
+
+
+@app.command('workspace-protect')
+def workspace_protect(revision: str, remove: bool = False):
+    """Protect a retained version from cleanup; --remove releases protection."""
+    _print(_workspace().protect(revision, not remove))
+
+
+@app.command('workspace-migrate')
+def workspace_migrate():
+    """Migrate the frozen current revision to incremental storage without model calls."""
+    _print(asyncio.run(_workspace().migrate()))
+
+
 if __name__=='__main__':app()

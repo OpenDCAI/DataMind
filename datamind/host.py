@@ -55,7 +55,7 @@ class CodexHost:
         if self.surfaces is not None:
             env['DATAMIND_ENABLED_SURFACES'] = json.dumps(sorted(self.surfaces))
         # Forward only DataMind's typed data configuration to the MCP child.
-        for section in ('embedding', 'retrieval', 'kb', 'graph', 'db', 'memory', 'hooks'):
+        for section in ('embedding', 'retrieval', 'kb', 'graph', 'db', 'memory', 'hooks', 'workspace'):
             value = getattr(self.settings, section).model_dump(mode='python')
             for key, item in value.items():
                 if item is None:
@@ -111,12 +111,16 @@ class CodexHost:
         from datamind.workspace import Workspace
         workspace=Workspace(self.settings)
         selected=workspace_revision or self.revision
-        if mode=='read' and selected is None:
-            selected=workspace.current_revision
+        lease=None
+        if mode=='read':
+            lease,selected=workspace.acquire_lease(selected)
         if selected is not None:
             if mode!='read':
                 raise ValueError('A write request cannot mutate a published revision')
-            workspace.manifest(selected)
+            try: workspace.manifest(selected)
+            except BaseException:
+                workspace.release_lease(lease)
+                raise
         context = current_context() or RequestContext.new(profile=self.settings.data.profile)
         session_id = session_id or context.session_id
         request_id = uuid.uuid4().hex
@@ -136,6 +140,7 @@ class CodexHost:
         if history:
             prompt += '<prior_conversation>\n' + json.dumps(history, ensure_ascii=False) + '\n</prior_conversation>\n'
         prompt += '<current_request>\n' + message + '\n</current_request>'
+        heartbeat=asyncio.create_task(workspace.keepalive(lease))
         try:
             async with asyncio.timeout(self.settings.codex.timeout_s), self._slots:
                 async with self._session(session_id, request_id, mode, workspace_revision=selected,
@@ -213,6 +218,10 @@ class CodexHost:
                            'events':[item for event in observed for item in event.get('recovery',{}).get('events',[])]}}
         finally:
             self._tasks.discard(task)
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat,return_exceptions=True)
+            workspace.release_lease(lease)
+            OperationStore(self.settings).close_request(request_id)
             try:
                 OperationStore(self.settings).take_events(request_id)
             except (OSError,sqlite3.Error):

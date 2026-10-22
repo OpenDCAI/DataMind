@@ -222,3 +222,37 @@ async def test_chat_converts_stream_failure_to_sse_error(configured_app):
     assert '"type": "text"' in response.text
     assert '"type": "error"' in response.text
     assert '"message": "stream failed: RuntimeError"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_workspace_policy_routes_validate_and_persist(configured_app):
+    test_app,settings=configured_app
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=test_app),base_url='http://test') as client:
+        status=await client.get('/api/workspace?usage=true')
+        assert status.json()['retention']['mode']=='latest'
+        assert 'storage' in status.json()
+        result=await client.post('/api/workspace/retention',json={'mode':'recent','keep_last':3})
+        assert result.json()=={'mode':'recent','keep_last':3}
+        assert (await client.get('/api/workspace')).json()['retention']['keep_last']==3
+        assert (await client.post('/api/workspace/retention',json={'mode':'none'})).status_code==422
+        assert (await client.post('/api/workspace/retention',json={'mode':'recent','keep_last':0})).status_code==422
+        preview=await client.post('/api/workspace/gc',json={})
+        assert preview.json()['dry_run'] is True
+        missing=await client.post('/api/workspace/rollback',json={'revision':'unknown'})
+        assert missing.status_code==409
+
+
+@pytest.mark.asyncio
+async def test_http_startup_with_private_workspace_dolt_needs_no_live_dsn(tmp_path,monkeypatch):
+    from datamind import server
+    cfg=Settings(_env_file=None,data={'base_dir':tmp_path},db={'dialect':'dolt'},
+                 workspace={'storage_mode':'incremental'})
+    class Host:
+        def __init__(self,settings):pass
+        async def aclose(self):pass
+    monkeypatch.setattr(server,'DataSettings',lambda:cfg)
+    monkeypatch.setattr(server,'CodexHost',Host)
+    async with server._lifespan(server.app):
+        state=server.app.state.datamind
+        assert state.data.services.db is None
+        assert 'workspace_publish' in state.data.tools

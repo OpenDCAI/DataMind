@@ -46,7 +46,7 @@ def _build_hook_chain(settings: Settings) -> HookChain | None:
     return HookChain(chain_hooks) if chain_hooks else None
 
 
-async def assemble_data_plane(settings: Settings, *, enable: set[str] | None = None, text_client=None):
+async def assemble_data_plane(settings: Settings, *, enable: set[str] | None = None, text_client=None, workspace_enable=None):
     """An optional explicit text utility client supports custom capability pipelines;
     the default never creates conversation clients or any agent loop.
     """
@@ -123,8 +123,9 @@ async def assemble_data_plane(settings: Settings, *, enable: set[str] | None = N
 
     ledger = IngestLedger(storage_dir=settings.data.storage_dir, profile=settings.data.profile)
     extra = []
-    extra.extend([spec for spec in workspace_tools(settings, active)
-                  if spec.access != ToolAccess.WRITE or active & {'kb','db','graph'}])
+    workspace_active = active if workspace_enable is None else set(workspace_enable)
+    extra.extend([spec for spec in workspace_tools(settings, workspace_active)
+                  if spec.access != ToolAccess.WRITE or spec.metadata.get('workspace_management') or workspace_active & {'kb','db','graph'}])
     if graph is not None:
         extra.extend(graph_source_tools(ingest))
     catalogue.extend(extra)
@@ -133,7 +134,7 @@ async def assemble_data_plane(settings: Settings, *, enable: set[str] | None = N
     business_writes = ToolRegistry()
     business_writes.extend([raw_writes.get(n) for n in raw_writes.names() if raw_writes.get(n).surface is not None])
     writes = with_receipts(business_writes, ledger)
-    if active:
+    if active or any(raw_writes.get(n).metadata.get("workspace_management") for n in raw_writes.names()):
         writes.extend([raw_writes.get(n) for n in raw_writes.names() if raw_writes.get(n).surface is None])
     direct = ToolRegistry()
     direct.extend([reads.get(n) for n in reads.names() if n not in MODEL_TOOLS])

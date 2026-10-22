@@ -62,6 +62,7 @@ dependencies = [
 
     # Async primitives
     "anyio>=4.2",
+    "filelock>=3.16",
 
     # Workspace document/table extraction
     "pypdf>=5.0",
@@ -85,8 +86,8 @@ legacy = [
 
 # Dialect / provider extras — installed on demand, no hard requirement
 codex = ["openai-codex>=0.163,<0.164"]
-versioning = ["lancedb>=0.39", "pyarrow>=19"]
-cocoindex = ["lancedb>=0.39", "pyarrow>=19", "cocoindex>=1.0"]
+versioning = ["lancedb>=0.40,<0.41", "pylance>=9,<10", "pyarrow>=19"]
+cocoindex = ["lancedb>=0.40,<0.41", "pylance>=9,<10", "pyarrow>=19", "cocoindex>=1.0"]
 dolt = ["pymysql>=1.1", "mysql-connector-python>=9"]
 mysql = ["pymysql>=1.1", "cryptography>=42"]
 postgres = ["psycopg[binary]>=3.1"]

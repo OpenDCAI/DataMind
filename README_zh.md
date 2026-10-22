@@ -71,16 +71,16 @@ SDK 能并发运行会话，但当前 NetworkX JSON 的 live 图写入仍应使�
 
 1. `datamind_operation_begin(mode="write")` 开启写操作，后续工具传同一个 operation_id。
 2. 读取入库 Skill，调用 `datamind_workspace_prepare` 获得源文件清单和哈希。
-3. Codex 分页读取文档并抽取关系，为每篇文档提交 `{uri, version, triples}`。
+3. Codex 分页读取文档并抽取关系，增量模式只为新增、修改的文档提交 `{uri, version, triples}`。
    没有关系也提交空列表；抽取不完整时标记 `truncated=true`。
-4. `datamind_workspace_publish` 验证源文件哈希，在私有目录构建选定的 KB、KG、DB，
-   复用完成的源文件检查点，全部完成后发布一个 Workspace revision。
+4. `datamind_workspace_publish` 验证源文件哈希，构建选定的 KB、KG、DB，
+   复用未变化的源文件、向量和表，全部完成后发布一个 Workspace revision。
 5. `datamind_operation_begin(mode="read")` 固定当前发布版本。跨工具查询及原文取证
    都使用该 operation_id；后续发布不会改变该读操作。新开读操作才能看到新版本。
 
 发布失败保留旧版本。删除源文件后重新发布，新版本会同步去除该文件的业务数据。
-协调器目前支持本地 SQLite、NetworkX、Chroma/LanceDB；索引仍是完整快照，
-检查点节省重复计算，不代表存储或写入成本恒定。
+增量模式使用本地 LanceDB、Dolt 和按来源存储的 SQLite 图；旧的完整快照仍可读取、显式迁移。
+新 Workspace 默认只保留最新版，可选择最近 N 版或全部历史，活动查询会保护原版本。
 Skills、Memory 属于实时上下文，不在业务数据快照中。
 
 独立 live 入库仍支持 `kb_add_path`、`db_import_path`、`graph_replace_source`。
@@ -127,3 +127,9 @@ CI 覆盖两版 Python、真实 MySQL/Dolt、本地版本与恢复、wheel 安�
 不能保证所有模型回答或部署环境都正确。
 
 [Apache License 2.0](./LICENSE)
+
+## Workspace 增量存储与历史保留
+
+增量模式通过 LanceDB 版本、Dolt 提交、按来源存储的 SQLite 图和内容哈希文件复用历史数据。
+新 Workspace 默认只保留最新版，也可保留最近 N 版或全部历史；正在查询和手动保护的版本不会被清理。
+已有 Workspace 的历史不会自动删除，需要显式迁移。见[存储与迁移说明](docs/WORKSPACE_STORAGE.md)。

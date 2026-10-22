@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,7 +43,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     active = {'graph', 'db', 'skills', 'memory'}
     if st.settings.embedding.api_key or st.settings.embedding.provider == 'huggingface':
         active.add('kb')
-    st.data = await build_data_plane(st.settings, enable=active)
+    # Private Workspace Dolt does not require (or use) a direct live DSN.
+    if st.settings.db.dialect == 'dolt' and not st.settings.db.dsn:
+        active.discard('db')
+    st.data = await build_data_plane(st.settings, enable=active, workspace_enable={'kb','db','graph'})
     await st.data.warmup()
     st.host = CodexHost(st.settings)
     app.state.datamind = st
@@ -141,6 +144,53 @@ async def health(st: AppState = Depends(_state)) -> dict:
             'tools': len(st.data.tools), 'revision': st.data.revision,
             'kb_available': st.data.services.kb is not None,
             'embedding': st.settings.embedding.model, 'db_dialect': st.settings.db.dialect}
+
+
+class RetentionRequest(BaseModel):
+    mode: Literal['latest', 'recent', 'all']
+    keep_last: int = Field(default=10, ge=1)
+
+
+class CleanupRequest(BaseModel):
+    dry_run: bool = True
+    compact: bool = False
+
+
+class RollbackRequest(BaseModel):
+    revision: str = Field(min_length=1)
+    expected_revision: str | None = None
+
+
+@app.get('/api/workspace')
+async def workspace_status(usage: bool = False, st: AppState = Depends(_state)) -> dict:
+    workspace = Workspace(st.settings)
+    result = workspace.history()
+    if usage: result['storage'] = workspace.storage_usage()
+    return result
+
+
+@app.post('/api/workspace/retention')
+async def workspace_retention(req: RetentionRequest, st: AppState = Depends(_state)) -> dict:
+    return Workspace(st.settings).configure_retention(req.mode, req.keep_last)
+
+
+@app.post('/api/workspace/gc')
+async def workspace_gc(req: CleanupRequest, st: AppState = Depends(_state)) -> dict:
+    return await Workspace(st.settings).collect(dry_run=req.dry_run, compact=req.compact)
+
+
+@app.post('/api/workspace/rollback')
+async def workspace_rollback(req: RollbackRequest, st: AppState = Depends(_state)) -> dict:
+    from datamind.core.errors import CapabilityError
+    try: return Workspace(st.settings).rollback(req.revision, expected_revision=req.expected_revision)
+    except CapabilityError as exc: raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/workspace/migrate')
+async def workspace_migrate(st: AppState = Depends(_state)) -> dict:
+    from datamind.core.errors import CapabilityError, ConfigError
+    try: return await Workspace(st.settings).migrate()
+    except (CapabilityError, ConfigError) as exc: raise HTTPException(409, str(exc)) from exc
 
 
 @app.get('/api/tools')

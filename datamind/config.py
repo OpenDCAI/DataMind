@@ -275,11 +275,22 @@ class KBConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class WorkspaceConfig(BaseModel):
+    """Storage layout and history retention are independent policies."""
+    storage_mode: Literal['auto', 'snapshot', 'incremental'] = 'auto'
+    retention: Literal['auto', 'latest', 'recent', 'all'] = 'auto'
+    keep_last: int = Field(default=10, ge=1)
+    auto_gc: bool = True
+    lease_ttl_s: float = Field(default=1800, ge=10)
+    lock_timeout_s: float = Field(default=120, gt=0)
+
+
 class Settings(BaseSettings):
     """Top-level settings. Use `Settings()` to load from env/.env files."""
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
     codex: CodexHostConfig = Field(default_factory=CodexHostConfig)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     embedding: EmbeddingConfig = EmbeddingConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
     kb: KBConfig = KBConfig()
@@ -312,6 +323,7 @@ __all__ = [
     "Settings",
     "DataSettings",
     "CodexHostConfig",
+    "WorkspaceConfig",
     "LLMConfig",
     "EmbeddingConfig",
     "RetrievalConfig",

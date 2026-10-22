@@ -18,6 +18,7 @@ def settings(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv('DATAMIND__LLM__API_KEY', raising=False)
     monkeypatch.setenv('DATAMIND_DATA_ROOT', str(tmp_path))
+    monkeypatch.setenv('DATAMIND__WORKSPACE__RETENTION','all')
     monkeypatch.delenv('DATAMIND_PROFILE', raising=False)
     from datamind import runtime as options
     def forbidden(*a, **kw):
@@ -203,7 +204,7 @@ async def test_direct_publication_pins_kb_sql_graph_and_raw_across_calls(setting
         assert all(r['status'] == 'stored' for r in result['result']['results']), result
         manifest = result['result']['results'][0]['details']
         assert manifest['metrics']['graph_extraction_calls'] == 0
-        assert manifest['applied_skills'][0]['version'] == '1.2.0'
+        assert manifest['applied_skills'][0]['version'] == '1.3.0'
         return manifest['workspace_revision']
     first = await publish('OldOwner')
     reader = await begin('read')
@@ -271,3 +272,20 @@ async def test_mcp_capability_set_cannot_be_expanded_by_agent(settings,monkeypat
         await call(token,'db_list_tables')
     with pytest.raises(PermissionError,match='capability set'):
         await call(token,'workspace_publish',path='.',surfaces=['db'])
+
+
+def test_legacy_operation_schema_upgrades_safely_for_concurrent_clients(tmp_path):
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+    from datamind.operations import OperationStore
+    cfg=DataSettings(_env_file=None,data={'base_dir':tmp_path})
+    cfg.ensure_dirs()
+    path=cfg.data.storage_dir/'operations.sqlite3'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE operations (id TEXT PRIMARY KEY, session TEXT NOT NULL, revision TEXT, mode TEXT NOT NULL)')
+    def begin(_):return OperationStore(cfg).begin(mode='write')['operation_id']
+    with ThreadPoolExecutor(max_workers=8) as pool:tokens=list(pool.map(begin,range(8)))
+    assert len(set(tokens))==8
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT COUNT(*) FROM operations').fetchone()[0]==8
+        assert {'lease','request_id'}<={r[1] for r in db.execute('PRAGMA table_info(operations)')}

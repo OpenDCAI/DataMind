@@ -61,6 +61,18 @@ class DoltDialect(BaseSQLDialect):
         import mysql.connector
         for i in range(tries):
             time.sleep(0.5)
+            server = getattr(self, '_server', None)
+            if server is not None and server.poll() is not None:
+                details = ''
+                log_path = getattr(self, '_server_log_path', None)
+                if log_path:
+                    try:
+                        with open(log_path, 'rb') as handle:
+                            handle.seek(0, os.SEEK_END)
+                            handle.seek(max(0, handle.tell()-4000))
+                            details = handle.read().decode('utf-8', errors='replace')
+                    except OSError: pass
+                raise RuntimeError(f'Dolt SQL server exited ({server.returncode}): {details}')
             try:
                 c = mysql.connector.connect(
                     host=host, port=port, user=user, password=password,
@@ -68,7 +80,7 @@ class DoltDialect(BaseSQLDialect):
                 )
                 c.close()
                 return
-            except mysql.connector.errors.DatabaseError as e:
+            except mysql.connector.Error as e:
                 msg = str(e)
                 if "2003" in msg or "Can't connect" in msg:
                     if i == tries - 1:
@@ -82,6 +94,7 @@ class DoltDialect(BaseSQLDialect):
         except ImportError as exc:
             raise ConfigError("Dolt requires pip install datamind[dolt]") from exc
         storage_dir = kwargs.pop("storage_dir", None)
+        server_config = kwargs.pop("server_config", None)
         if not storage_dir:
             raise ValueError("Dolt needs either a data dir.")
         if not dsn:
@@ -128,8 +141,10 @@ class DoltDialect(BaseSQLDialect):
         if not _listening():
             log_path = os.path.join(storage_dir, "dolt_server.log")
             log_file = open(log_path, "w")
+            self._server_log_path = log_path
             self._server = subprocess.Popen(
-                ["dolt", "sql-server", "--port", str(port), "--host", host],
+                (["dolt", "sql-server", "--config", str(server_config)] if server_config else
+                 ["dolt", "sql-server", "--port", str(port), "--host", host]),
                 cwd=storage_dir, stdout=log_file, stderr=log_file,
             )
             self._wait_ready(host, port, user, password)
@@ -150,6 +165,7 @@ class DoltDialect(BaseSQLDialect):
                 server.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 server.kill()
+                server.wait(timeout=5)
             self._server = None
 
     def _before_query(self, conn: Any) -> None:

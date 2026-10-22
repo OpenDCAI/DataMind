@@ -121,6 +121,7 @@ def settings_for(runtime, fixture, args=None):
     settings = (Settings(_env_file=None, llm={"api_key": "fixture", "model": "fixture"})
                 if fixture else Settings())
     settings.data.base_dir = Path(runtime).resolve()
+    settings.workspace.retention = 'all'  # Experiments compare explicit historical revisions.
     settings.retrieval.strategy = "hybrid"
     settings.retrieval.vector_retries = 0  # Reader owns the one shared retry budget.
     settings.retrieval.vector_failure_fallback = "error"

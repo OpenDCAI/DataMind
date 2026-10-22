@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.1.0
+
+- Add opt-in incremental Workspace storage: shared immutable source objects,
+  source-scoped indexed SQLite graph assertions, LanceDB versions and Dolt commits.
+- Add latest/recent/all retention, protected revisions, durable operation leases,
+  preview/apply GC and native provider compaction. New workspaces default to latest;
+  existing histories default to all. Publication and historical reads stay consistent.
+- Add explicit frozen-evidence migration, CLI/HTTP/UI/MCP policy controls and
+  ingestion/retrieval Skill updates. Unchanged sources, embeddings and tables are reused.
+- Add real provider, failed-build, process-death, rollback ABA and cross-call lease tests.
+
 ## 2.0.0 — Unified Codex host
 
 - CLI, HTTP and browser UI now use one official Codex SDK host for reads and writes.

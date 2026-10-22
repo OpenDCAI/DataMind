@@ -34,3 +34,9 @@ The new default tool catalogue replaces ask/store/graph_query/workspace_ask with
 main-agent direct calls. CLI, HTTP and UI now use the same main Codex host; old dual-agent Python APIs have been removed in 2.0.
 
 See [architecture and SDK setup](../../README.md).
+
+## Incremental Workspace storage
+
+Local Codex and the Codex SDK host use the same Workspace storage and retention
+APIs. See [storage, setup and migration](../../docs/WORKSPACE_STORAGE.md).
+Close read operations when finished so latest-mode cleanup can reclaim history.
