@@ -50,6 +50,11 @@ python -m pip install -e .
 In Codex, ask DataMind to ingest a folder or answer from an existing workspace.
 The plugin Skill guides Codex to select procedures with `skill_get`, inspect
 sources, extract relationships, invoke data tools and check receipts.
+For multi-source analysis, `workspace_export_bundle` supplies local JSONL/text
+files that Python and deliverable-generation code can reuse directly. New builds
+retain source row/column evidence and optional source-hash-bound `table_mappings`
+for complex headers. Agent code must share the export filesystem. See
+[reusable evidence](docs/WORKSPACE_ACCESS.md) for bounds, legacy support and limits.
 
 For KB, configure a dedicated embedding endpoint; example for OpenAI embeddings:
 

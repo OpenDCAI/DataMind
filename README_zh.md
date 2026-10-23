@@ -37,6 +37,10 @@ pip install -e .
 或通过 `kind="tables"` 按文件、sheet、列找表。`workspace_read_asset` 返回已解析的
 文本或有限行数的表格，保留来源版本。无需固定先调用 `skill_list`。
 详见[检索接入与评测](./docs/WORKSPACE_ACCESS.md)。
+多文件分析可用 `workspace_export_bundle` 批量导出解析后的 JSONL／文本，供 Python
+和最终交付文件直接复用。新入库表格保留原始行号、列位置和字段说明；复杂表头可在
+发布时提交带来源哈希的 `table_mappings`，不再每次查询都重新解释。导出文件需要与
+执行代码共享文件系统。功能测试与下游任务收益分别验证，不保证所有任务都会更快。
 图、SQL、Skills 和 Memory 的直接操作不需要 DataMind 对话模型密钥。
 KB 仍需要 embedding 服务，例如：
 

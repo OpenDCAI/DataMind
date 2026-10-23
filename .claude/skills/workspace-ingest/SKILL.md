@@ -1,8 +1,9 @@
 ---
 name: workspace-ingest
-version: 1.3.0
 description: Guide Codex to ingest a workspace into DataMind with source evidence, checked write receipts, and optional atomic publication.
-keywords: [ingest, workspace, 入库, 导入, 文档, 表格]
+metadata:
+  version: 1.4.0
+  keywords: [ingest, workspace, 入库, 导入, 文档, 表格]
 ---
 
 # Workspace ingestion
@@ -23,7 +24,18 @@ Workspace.reader for pinned Python reads.
    Submit `workspace_publish(path, surfaces, graph_sources)` with one entry per
    new or changed document in incremental mode (all documents in snapshot mode): `{uri, version, triples}` matching prepare's SHA-256. Include explicit
    empty lists for documents with no relationships; mark `truncated=true` if the
-   extraction is incomplete. Tables are parsed by DataMind. A small agreed
+   extraction is incomplete. Tables are parsed by DataMind. New tables preserve
+   physical columns and original row numbers; header suggestions are not proof
+   of business meaning. For titles, multiple sections or ambiguous units, inspect
+   the source and optionally supply `table_mappings` with publish: each entry is
+   `{uri, version, sheets: [{sheet, header_row, data_start_row?, data_end_row?,
+   fields?: [{column, name, unit?}]}]}`. Rows are original 1-based source rows;
+   columns are physical names from the catalog. Confirm only evidence-supported
+   labels/units; mixed-metric value columns may have no uniform unit. The hash
+   must match prepare. Mappings persist for unchanged files and expire after
+   content changes; an explicit empty `sheets` list clears a source's mappings.
+   Raw rows and values remain intact; mappings define a separate data view.
+   A small agreed
    relation vocabulary helps; new domain relation strings are supported.
 4. For independent live imports use `kb_add_path`, `db_import_path`, and
    `graph_replace_source(path, expected_version, triples)`. Get the expected hash

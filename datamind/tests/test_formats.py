@@ -83,7 +83,9 @@ def test_xlsx_reads_actual_cells_despite_incorrect_declared_dimensions(tmp_path,
     assert extract_tabular(path)[0][2] == [{"item": "A", "amount": 12}]
     workspace = Workspace(DataSettings(_env_file=None, data={"base_dir": tmp_path / "runtime"}))
     tables = canonical_tables(workspace, {"uri": str(path)}, path)
-    assert tables[0]["columns"] == ["item", "amount", "_source_file"]
+    assert tables[0]["columns"] == ["item", "amount", "_source_file", "_source_row"]
+    from datamind.workspace_tables import table_rows
+    assert next(table_rows(workspace.root, tables[0]))["_source_row"] == "2"
     assert tables[0]["rows"] == 1
     assert hashlib.sha256(path.read_bytes()).hexdigest() == original
 
@@ -105,5 +107,6 @@ def test_xlsx_title_row_does_not_hide_later_columns_and_empty_sheet_is_skipped(t
     assert tables[0][2][1]["col_2"] == 12
     workspace = Workspace(DataSettings(_env_file=None, data={"base_dir": tmp_path / "runtime"}))
     tables = canonical_tables(workspace, {"uri": str(path)}, path)
-    assert len(tables) == 1 and tables[0]["columns"] == ["col_1", "col_2", "_source_file"]
+    assert len(tables) == 1 and tables[0]["columns"] == ["col_1", "col_2", "_source_file", "_source_row"]
+    assert tables[0]["structure"]["header_row"] == 2
     assert tables[0]["rows"] == 2

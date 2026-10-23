@@ -31,10 +31,28 @@ Choose the data surface by the question:
 - Parsed evidence: `workspace_read_asset(path=..., sheet=...)` returns cached
   text or bounded table rows with source versions. Reuse it instead of parsing
   the same file again. Follow text/row offsets and truncation indicators.
+- Analysis and deliverables: `workspace_export_bundle(requests=[{path, sheet?,
+  columns?}, ...])` batches tables/text into local JSONL/text files and a manifest.
+  Omit sheet to export all sheets of a source. Load the returned manifest/files
+  in Python and reuse them for calculations and final artifacts. The manifest
+  maps field keys to original column letters; `_source_row` locates original
+  rows, so a field at C and row 4 cites C4 in the manifest's file/sheet/version.
+  Values retain source strings/NULL; convert numeric types explicitly. Check
+  header status and data bounds: suggested headers may need confirmation, notes
+  may remain, and `view_mode="raw"` retains every stored row after source row 1
+  (the original first row is separately in `raw_headers`). Legacy exports without
+  reliable row lineage say so; republish before claiming exact cells. Paths work
+  only where agent code shares the export filesystem; mount DATAMIND_EXPORT_ROOT
+  for a remote execution host. Exports are derived cache files, not final outputs.
 - KB: `kb_search` for passages; follow source locators with `raw_file_read`.
 - SQL: `db_list_tables`, `db_describe_table`, then write bounded read-only SQL
   yourself and call `db_query_sql` for exact values, joins or aggregations.
   In large workspaces prefer the filtered catalog over listing all tables.
+  Respect the catalog's SQL dialect. New tables expose `_source_row` as TEXT:
+  cast it numerically for row-range filtering. SQL still contains raw rows, so
+  apply the catalog's confirmed header/data bounds before aggregating. Retain
+  the SQL and contributing table/range for aggregate evidence; automatic SQL
+  result-cell lineage is not provided.
 - Graph: `graph_schema` discovers actual node types and relationship vocabulary;
   `graph_search_entities` finds IDs; `graph_neighbors` handles incoming/outgoing
   edges; `graph_traverse` explores bounded outgoing paths with relation filters.

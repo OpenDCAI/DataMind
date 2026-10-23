@@ -29,6 +29,7 @@ import tempfile
 assert 'datamind_graph_schema' in definitions()
 assert 'datamind_workspace_catalog' in definitions()
 assert 'datamind_workspace_read_asset' in definitions()
+assert 'datamind_workspace_export_bundle' in definitions()
 from datamind.workspace_discovery import WorkspaceView
 assert package.joinpath('skills/workspace-retrieve/SKILL.md').is_file()
 async def direct_smoke():

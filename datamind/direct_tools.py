@@ -59,11 +59,11 @@ def workspace_tools(settings, active=None):
                         'modified': [s['uri'] for s in sources if s['uri'] in prior and s['version'] != prior[s['uri']]],
                         'deleted': sorted(set(prior) - {s['uri'] for s in sources}),
                         'unchanged': [s['uri'] for s in sources if s['version'] == prior.get(s['uri'])]},
-                    'instructions': 'In incremental mode extract graph assertions for new/changed documents only. Snapshot mode requires all documents. Use inventory SHA-256 versions; include explicit empty triples where none were found.'}
+                    'instructions': 'In incremental mode extract graph assertions for new/changed documents only. Snapshot mode requires all documents. Use inventory SHA-256 versions; include explicit empty triples where none were found. Optional table_mappings can confirm header/data source rows and field names/units; bind them to these source hashes.'}
         finally:
             workspace.release_lease(lease)
 
-    async def publish(path, surfaces=None, graph_sources=None, relation_types=None):
+    async def publish(path, surfaces=None, graph_sources=None, relation_types=None, table_mappings=None):
         await prepare(path)
         selected = surfaces if surfaces is not None else ['kb', 'graph', 'db']
         if not set(selected) <= enabled:
@@ -71,7 +71,7 @@ def workspace_tools(settings, active=None):
         if 'graph' in selected and graph_sources is None:
             raise ValueError('graph_sources is required: Codex must submit extracted triples, including explicit empty lists')
         return await Workspace(settings, builder=build_data_plane).update(path, surfaces=selected, graph_sources=graph_sources,
-                                      relation_types=relation_types)
+                                      relation_types=relation_types, table_mappings=table_mappings)
 
     async def history():
         return Workspace(settings).history()
@@ -83,6 +83,10 @@ def workspace_tools(settings, active=None):
     async def read_asset(**kwargs):
         async with Workspace(settings, builder=build_data_plane).reader(enable=set()) as reader:
             return await reader.call('workspace_read_asset', **kwargs)
+
+    async def export_bundle(**kwargs):
+        async with Workspace(settings, builder=build_data_plane).reader(enable=set()) as reader:
+            return await reader.call('workspace_export_bundle', **kwargs)
 
     async def policy(mode, keep_last=10):
         return Workspace(settings).configure_retention(mode, keep_last)
@@ -121,6 +125,16 @@ def workspace_tools(settings, active=None):
                      'columns': {'type': 'array', 'maxItems': 100, 'uniqueItems': True,
                                  'items': {'type': 'string'}}}, 'required': ['path']},
                  read_asset, {'access': 'read'}),
+        ToolSpec('workspace_export_bundle', 'Export multiple pinned sources/sheets once as local JSONL/text plus a field/cell evidence manifest. Reuse these files directly in Python and deliverables instead of parsing original files again. Requires a shared filesystem with agent code; derived cache writes only.',
+                 {'type': 'object', 'properties': {
+                     'requests': {'type': 'array', 'minItems': 1, 'maxItems': 20, 'items': {
+                         'type': 'object', 'properties': {'path': {'type': 'string'}, 'sheet': {'type': 'string'},
+                             'columns': {'type': 'array', 'minItems': 1, 'maxItems': 1000, 'uniqueItems': True, 'items': {'type': 'string'}}},
+                         'required': ['path'], 'additionalProperties': False}},
+                     'view_mode': {'enum': ['data', 'raw'], 'default': 'data'},
+                     'max_rows': {'type': 'integer', 'minimum': 1, 'maximum': 1000000, 'default': 100000},
+                     'max_bytes': {'type': 'integer', 'minimum': 1024, 'maximum': 134217728, 'default': 33554432}},
+                  'required': ['requests']}, export_bundle, {'access': 'read'}),
         ToolSpec('workspace_history', 'List retained and pruned Workspace revisions and retention policy.',
                  {'type': 'object', 'properties': {}}, history, {'access': 'read'}),
         ToolSpec('workspace_retention', 'Choose latest, recent N, or all history. Applies to future cleanup; does not immediately delete data.',
@@ -153,6 +167,18 @@ def workspace_tools(settings, active=None):
                                         'triples': {'type': 'array', 'items': {'type': 'object'}},
                                         'truncated': {'type': 'boolean'}},
                          'required': ['uri', 'version', 'triples'], 'additionalProperties': False}},
+                     'table_mappings': {'type': 'array', 'maxItems': 1000, 'items': {
+                         'type': 'object', 'properties': {
+                             'uri': {'type': 'string'}, 'version': {'type': 'string', 'pattern': '^sha256:[a-f0-9]{64}$'},
+                             'sheets': {'type': 'array', 'maxItems': 100, 'items': {'type': 'object', 'properties': {
+                                 'sheet': {'type': 'string'}, 'header_row': {'type': 'integer', 'minimum': 1},
+                                 'data_start_row': {'type': 'integer', 'minimum': 2}, 'data_end_row': {'type': 'integer', 'minimum': 1},
+                                 'fields': {'type': 'array', 'maxItems': 1000, 'items': {'type': 'object', 'properties': {
+                                     'column': {'type': 'string'}, 'name': {'type': 'string', 'minLength': 1, 'maxLength': 200},
+                                     'unit': {'type': ['string', 'null'], 'maxLength': 200}},
+                                     'required': ['column', 'name'], 'additionalProperties': False}}},
+                                 'required': ['sheet', 'header_row'], 'additionalProperties': False}}},
+                         'required': ['uri', 'version', 'sheets'], 'additionalProperties': False}},
                  }, 'required': ['path']}, publish, {'access': 'write', 'surface': 'graph', 'multi_surface': True}),
     ]
 

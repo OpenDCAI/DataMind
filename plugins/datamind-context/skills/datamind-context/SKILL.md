@@ -35,6 +35,14 @@ manifest. `datamind_workspace_catalog` pages through published sources; use
 `kind="tables"` with file/sheet/column filters for table names and source headers.
 `datamind_workspace_read_asset` reuses parsed text or bounded sheet rows with
 source versions. An empty catalog does not establish that a raw file is absent.
+For analysis or file creation, batch related sources with
+`datamind_workspace_export_bundle(requests=[{path, sheet?}, ...])`. Load its local
+JSONL/text files in Python and reuse them for final artifacts. Read the manifest
+for field labels/units, original column letters and `_source_row` cell evidence.
+Check header suggestions and data bounds; values are not automatically converted.
+Files require a shared export filesystem with the executing code. Legacy exports
+explicitly flag unavailable row lineage. The ingestion Skill explains optional
+source-hash-bound table mappings for complex headers and ranges.
 Keep subsequent business evidence on the pinned revision, including raw fallback.
 
 All tool names are prefixed `datamind_`. Check every write receipt's

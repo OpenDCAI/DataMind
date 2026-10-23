@@ -42,6 +42,12 @@ class WorkspaceView:
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def source(self, path):
+        matches = [s for s in self.manifest["sources"] if path in {s["uri"], s["relative_path"]}]
+        if len(matches) != 1:
+            raise CapabilityError("workspace", "source does not belong to the pinned revision")
+        return matches[0]
+
     def _tables(self, source, prepared):
         for table in prepared.get("tables", []):
             if isinstance(table, dict):
@@ -75,11 +81,13 @@ class WorkspaceView:
                     if sheet.casefold() not in table["sheet"].casefold():
                         continue
                     if column and not any(column.casefold() in str(c).casefold()
-                                          for c in [*table["columns"], *headers]):
+                                          for c in [*table["columns"], *headers,
+                                                    *[f["name"] for f in table.get("structure", {}).get("fields", [])]]):
                         continue
                     candidates.append({"table": table["name"], "source": item["uri"],
                         "source_version": item["version"], "sheet": table["sheet"],
-                        "columns": table["columns"], "source_headers": headers, "rows": table["rows"]})
+                        "columns": table["columns"], "source_headers": headers, "rows": table["rows"],
+                        "structure": table.get("structure"), "source_rows": table.get("source_rows", False)})
             else:
                 continue
             for row in candidates:
@@ -97,8 +105,13 @@ class WorkspaceView:
                     pairs.sort(key=lambda pair: not any(column.casefold() in str(c).casefold() for c in pair))
                 row["columns"] = [pair[0] for pair in pairs[:50]]
                 row["source_headers"] = [pair[1] for pair in pairs[:50]]
+                if row.get("structure"):
+                    row["structure"] = {**row["structure"], "fields": row["structure"]["fields"][:50],
+                                        "fields_truncated": len(row["structure"]["fields"]) > 50}
         end = offset + len(page)
+        provider = self.manifest.get("snapshots", {}).get("db", {}).get("provider")
         return {"workspace_revision": self.manifest["workspace_revision"], "kind": kind,
+                "sql_dialect": "mysql" if provider == "dolt" else provider,
                 "items": page, "count": len(page), "total_count": len(rows),
                 "next_offset": end if end < len(rows) else None, "truncated": end < len(rows)}
 
@@ -106,11 +119,7 @@ class WorkspaceView:
         if offset < 0 or not 1 <= limit <= 200 or not 1 <= max_chars <= 100000:
             raise ValueError("offset must be nonnegative, limit 1..200, max_chars 1..100000")
         # Only published source URIs/relative paths are accepted, never arbitrary paths.
-        matches = [s for s in self.manifest["sources"]
-                   if path in {s["uri"], s["relative_path"]}]
-        if len(matches) != 1:
-            raise CapabilityError("workspace", "source does not belong to the pinned revision")
-        source = matches[0]
+        source = self.source(path)
         prepared = self._prepared(source)
         evidence = {"workspace_revision": self.manifest["workspace_revision"],
                     "source": source["uri"], "source_version": source["version"],
@@ -134,7 +143,14 @@ class WorkspaceView:
             else:
                 rows = [[r.get(name) for name in names] for r in table["records"][offset:offset + limit]]
             end = offset + len(rows)
+            from datamind.workspace_tables import column_letter
+            data_columns = [c for c in table["columns"] if c not in {"_source_file", "_source_row"}]
             return {**evidence, "kind": "table", "table": table["name"], "sheet": table["sheet"],
+                    "source_rows": list(range(offset + 2, end + 2)) if table.get("source_rows") else None,
+                    "source_columns": ({c: column_letter(data_columns.index(c) + 1) for c in names if c in data_columns}
+                                       if table.get("source_rows") else None),
+                    "structure": ({**table["structure"], "fields": [f for f in table["structure"]["fields"] if f["column"] in names]}
+                                  if table.get("structure") else None),
                     "columns": names, "rows": rows, "offset": offset, "count": len(rows),
                     "total_count": table["rows"], "next_offset": end if end < table["rows"] else None,
                     "truncated": end < table["rows"] or len(names) < len(table["columns"]),

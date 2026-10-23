@@ -51,6 +51,7 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
         return {}, text
     header, body = m.group(1), m.group(2)
     data: dict[str, object] = {}
+    in_metadata = False
     for raw in header.splitlines():
         line = raw.rstrip()
         if not line or line.startswith("#"):
@@ -60,6 +61,13 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
         key, _, val = line.partition(":")
         key = key.strip()
         val = val.strip()
+        if raw[:1].isspace():
+            # Codex-compatible metadata, with legacy top-level fields retained.
+            # Ignore unrelated nested keys rather than overwriting name/description.
+            if not in_metadata or key not in {"version", "keywords"}:
+                continue
+        else:
+            in_metadata = key == "metadata" and not val
         if not val:
             data[key] = ""
             continue

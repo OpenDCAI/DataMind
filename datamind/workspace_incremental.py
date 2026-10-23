@@ -73,7 +73,7 @@ def save_artifact(root, key, value):
     return path.relative_to(root).as_posix()
 
 
-def canonical_tables(workspace, item, snapshot):
+def canonical_tables(workspace, item, snapshot, *, mappings=None):
     """Stream CSV/TSV and XLSX rows into immutable typed-cell table objects."""
     source = Path(item["uri"])
     streams = []
@@ -88,6 +88,12 @@ def canonical_tables(workspace, item, snapshot):
         )
         header = next(rows, None)
         if header is not None:
+            width = max((len(row) for row in rows), default=len(header))
+            width = max(width, len(header))
+            handle.seek(0)
+            rows = csv.reader(handle, delimiter="\t" if source.suffix.lower() == ".tsv" else ",")
+            next(rows)
+            header += [""] * (width - len(header))
             streams.append((source.stem, header, rows))
     elif source.suffix.lower() == ".xlsx":
         import openpyxl
@@ -113,7 +119,7 @@ def canonical_tables(workspace, item, snapshot):
                 if (
                     not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value)
                     or value.casefold() in used
-                    or value.casefold() == "_source_file"
+                    or value.casefold() in {"_source_file", "_source_row"}
                 ):
                     value = "col_" + str(i)
                 base = value
@@ -123,7 +129,7 @@ def canonical_tables(workspace, item, snapshot):
                     n += 1
                 cols.append(value)
                 used.add(value.casefold())
-            cols.append("_source_file")
+            cols.extend(["_source_file", "_source_row"])
             fd, temp = tempfile.mkstemp(dir=workspace.root, prefix=".table-")
             count = 0
             sha = hashlib.sha256()
@@ -131,12 +137,12 @@ def canonical_tables(workspace, item, snapshot):
                 with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
                     writer = csv.writer(handle)
                     writer.writerow(cols)
-                    for row in rows:
+                    for ordinal, row in enumerate(rows, 2):
                         values = list(row[: len(header)])
                         values += [""] * (len(header) - len(values))
                         # Preserve existing TEXT import semantics, including NULL.
                         values = [None if x is None else str(x) for x in values] + [
-                            item["uri"]
+                            item["uri"], str(ordinal)
                         ]
                         writer.writerow(
                             [json.dumps(x, ensure_ascii=False) for x in values]
@@ -162,6 +168,7 @@ def canonical_tables(workspace, item, snapshot):
                         "rows": count,
                         "hash": key,
                         "path": target.relative_to(workspace.root).as_posix(),
+                        "source_rows": True,
                     }
                 )
             finally:
@@ -169,7 +176,8 @@ def canonical_tables(workspace, item, snapshot):
     finally:
         for closer in closers:
             closer.close()
-    return output
+    from datamind.workspace_tables import interpret_tables
+    return interpret_tables(workspace.root, output, mappings)
 
 
 @asynccontextmanager
@@ -193,6 +201,7 @@ async def update_incremental(
     max_triples_per_file,
     metrics,
     graph_sources,
+    table_mappings=None,
 ):
     from datamind.workspace import _atomic_json
     from datamind.workspace_graph import put_graph
@@ -247,6 +256,12 @@ async def update_incremental(
             "Run explicit workspace migration before changing an existing snapshot Workspace to incremental storage"
         )
     old = workspace.manifest(parent) if parent else None
+    from datamind.workspace_tables import PARSER_VERSION, resolve_mappings
+    mappings = resolve_mappings(inventory, table_mappings, old)
+    if table_mappings and "db" not in selected:
+        raise ConfigError("Table mappings require the DB surface")
+    if "db" not in selected:
+        mappings = {}
     prior = (
         {s["uri"]: s for s in old["sources"]}
         if old and old.get("format_version") == 2
@@ -302,7 +317,8 @@ async def update_incremental(
     context = current_context()
     skills = list(context.extra.get("applied_skills", {}).values()) if context else []
     recipe = {
-        "version": "workspace-v2-assets-1",
+        "version": "workspace-v2-assets-2",
+        "table_parser": PARSER_VERSION,
         "surfaces": sorted(selected),
         "embedding": cfg.embedding.model_dump(mode="json", exclude={"api_key"}),
         "chunk_size": cfg.retrieval.chunk_size,
@@ -391,6 +407,7 @@ async def update_incremental(
                             item["version"],
                             pipeline,
                             assertion if assertion is not None else graph_ref,
+                            mappings.get(item["uri"], []),
                         ]
                     )
                 )
@@ -408,6 +425,7 @@ async def update_incremental(
                         and old
                         and old["pipeline_hash"] == pipeline
                         and previous.get("version") == item["version"]
+                        and previous.get("table_mapping", []) == mappings.get(item["uri"], [])
                     ):
                         artifact = workspace.root / previous["artifact"]
                         prepared = json.loads(artifact.read_text())
@@ -518,10 +536,18 @@ async def update_incremental(
                                     workspace.root, []
                                 )
                         if "db" in selected and suffix in TABLE_EXTS:
-                            prepared["tables"] = await blocking(
-                                canonical_tables, workspace, item, blob
-                            )
-                            metrics["parsed_table_files"] += 1
+                            previous = prior.get(item["uri"], {})
+                            old_tables = []
+                            if previous.get("version") == item["version"] and previous.get("artifact"):
+                                old_tables = json.loads((workspace.root / previous["artifact"]).read_text()).get("tables", [])
+                            if old_tables and all(t.get("source_rows") for t in old_tables):
+                                from datamind.workspace_tables import interpret_tables
+                                prepared["tables"] = await blocking(interpret_tables, workspace.root, old_tables, mappings.get(item["uri"]))
+                            else:
+                                prepared["tables"] = await blocking(
+                                    canonical_tables, workspace, item, blob, mappings=mappings.get(item["uri"])
+                                )
+                                metrics["parsed_table_files"] += 1
                         artifact = workspace.root / save_artifact(
                             workspace.root, key, prepared
                         )
@@ -532,6 +558,7 @@ async def update_incremental(
                 source_entry = {
                     **item,
                     "source_id": "file:" + digest(item["uri"].encode()),
+                    "table_mapping": mappings.get(item["uri"], []),
                     "snapshot": blob_ref,
                     "artifact": artifact.relative_to(workspace.root).as_posix(),
                     "graph_artifact": prepared["graph_artifact"],
