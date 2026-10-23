@@ -48,6 +48,10 @@ async def test_dolt_snapshots_reuse_unchanged_tables_and_prune_history(tmp_path)
                 "db_query_sql",
                 sql=f"SELECT SUM(CAST(amount AS DOUBLE)) AS total FROM `{table}`",
             )
+            catalog = await reader.call("workspace_catalog", kind="tables", source="sales.csv", column="amount")
+            assert catalog["items"][0]["table"] == table
+            asset = await reader.call("workspace_read_asset", path="sales.csv", columns=["amount"])
+            assert sum(float(row[0]) for row in asset["rows"]) == result["rows"][0][0]
             with pytest.raises(CapabilityError):
                 await reader.call(
                     "db_query_sql", sql=f"SELECT * FROM `dolt/main`.`{table}`"

@@ -63,6 +63,8 @@ async def test_real_official_sdk_transport_initializes_without_model_turn(tmp_pa
         server = next(s for s in status.data if s.name == 'datamind')
         assert server.tools_error is None
         assert 'datamind_operation_begin' in server.tools
+        assert 'datamind_workspace_catalog' in server.tools
+        assert 'datamind_workspace_read_asset' in server.tools
         assert 'datamind_graph_neighbors' in server.tools
         assert 'datamind_ask' not in server.tools
 

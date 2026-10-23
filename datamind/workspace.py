@@ -239,7 +239,7 @@ class Workspace(WorkspaceCatalog):
                                  'truncated': bool(entry.get('truncated', False))}
             if set(external) != set(expected):
                 raise ConfigError('Supply triples (including explicit empty lists) for every document source')
-        pipeline = {'version': 'workspace-v1', 'surfaces': sorted(selected),
+        pipeline = {'version': 'workspace-v1-assets-1', 'surfaces': sorted(selected),
                     'embedding': self.settings.embedding.model_dump(mode='json', exclude={'api_key'}),
                     'model': self.settings.llm.fallback_model or self.settings.llm.model,
                     'chunk_size': self.settings.retrieval.chunk_size,
@@ -293,6 +293,7 @@ class Workspace(WorkspaceCatalog):
                     prepared = {'chunks': [], 'vectors': [], 'triples': [], 'tables': [], 'truncated': False}
                     is_table = original.suffix.lower() in TABLE_EXTS
                     text = (await asyncio.to_thread(extract_document, snapshot)).text if original.suffix.lower() in DOCUMENT_EXTS else ''
+                    prepared['parsed_text'] = text
                     if 'kb' in selected and text:
                         parts = _split_text(text, chunk_size=settings.retrieval.chunk_size,
                                             chunk_overlap=settings.retrieval.chunk_overlap)
@@ -428,7 +429,7 @@ class Workspace(WorkspaceCatalog):
                 settings.graph.backend='networkx'
                 system=await self._system(settings,selected)
                 root=settings.data.base_dir
-            reader=WorkspaceReader(system,manifest,root,read_retries=read_retries,
+            reader=WorkspaceReader(system,manifest,root,checkpoint_root=self.root,read_retries=read_retries,
                 timeout_s=settings.agent.wall_clock_timeout_s)
             reader._system_settings=self.settings
             reader._lease=(self,token)
@@ -449,7 +450,7 @@ class Workspace(WorkspaceCatalog):
 class WorkspaceReader:
     """Read-only facade fixed to a retained generation, including raw evidence."""
 
-    def __init__(self, system, manifest, root, *, read_retries=1, timeout_s=300.):
+    def __init__(self, system, manifest, root, *, checkpoint_root=None, read_retries=1, timeout_s=300.):
         if not 0 <= read_retries <= 5:
             raise ValueError("read_retries must be between 0 and 5")
         self._system = system
@@ -460,6 +461,16 @@ class WorkspaceReader:
         tools = system.read_tools
         system.tools = tools
         self.tools = tools
+        from datamind.workspace_discovery import WorkspaceView
+        view = WorkspaceView(manifest, root, checkpoint_root=checkpoint_root,
+                             ingest=system.services.ingest)
+        async def catalog(**kwargs):
+            return await asyncio.to_thread(view.catalog, **kwargs)
+        async def read_asset(**kwargs):
+            return await asyncio.to_thread(view.read_asset, **kwargs)
+        for name, handler in [('workspace_catalog', catalog), ('workspace_read_asset', read_asset)]:
+            spec = tools.get(name)
+            tools.replace(replace(spec, handler=handler))
         raw = tools.get('raw_file_read')
         original = raw.handler
 

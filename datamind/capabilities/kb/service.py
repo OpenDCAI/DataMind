@@ -29,6 +29,7 @@ from .indexer import (
     list_documents,
     write_manifest_atomic,
 )
+from .dedup import unique_passages
 
 _log = get_logger("kb.service")
 
@@ -83,9 +84,11 @@ class KBService:
     ) -> list[dict[str, Any]]:
         if self._compatibility_error:
             raise ConfigError(self._compatibility_error)
-        k = top_k or self.retrieval_cfg.top_k
-        chunks = await self.retriever.aretrieve(query, top_k=k, filters=filters)
-        return [c.model_dump() for c in chunks]
+        k = self.retrieval_cfg.top_k if top_k is None else top_k
+        if not 1 <= k <= 50:
+            raise ValueError("top_k must be between 1 and 50")
+        chunks = await self.retriever.aretrieve(query, top_k=min(k * 4, 200), filters=filters)
+        return unique_passages(chunks, k)
 
     async def count(self) -> int:
         return await self.vector_store.count()
@@ -218,9 +221,12 @@ class KBService:
         if not any(v["version"] == version for v in versions):
             raise CapabilityError("kb", f"version {version} does not exist in this LanceDB table")
 
-        k = top_k or self.retrieval_cfg.top_k
-        chunks = await self.retriever.aretrieve_at_version(query, top_k=k, filters=filters, version=version)
-        return [c.model_dump() for c in chunks]
+        k = self.retrieval_cfg.top_k if top_k is None else top_k
+        if not 1 <= k <= 50:
+            raise ValueError("top_k must be between 1 and 50")
+        chunks = await self.retriever.aretrieve_at_version(
+            query, top_k=min(k * 4, 200), filters=filters, version=version)
+        return unique_passages(chunks, k)
 
     async def list_versions(self) -> list[dict[str, Any]]:
         if self.vector_store.name != "lancedb":

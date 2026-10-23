@@ -20,6 +20,7 @@ from datamind.capabilities.ingest.formats import (
     DOCUMENT_EXTS,
     TABLE_EXTS,
     extract_document,
+    worksheet_rows,
 )
 from datamind.capabilities.kb.indexer import _hash, _split_text
 from datamind.workspace_native import blocking, completed
@@ -94,7 +95,7 @@ def canonical_tables(workspace, item, snapshot):
         book = openpyxl.load_workbook(snapshot, read_only=True, data_only=True)
         closers.append(book)
         for sheet in book.worksheets:
-            rows = iter(sheet.values)
+            rows = iter(worksheet_rows(sheet))
             header = next(rows, None)
             if header is not None:
                 streams.append((sheet.title, header, rows))
@@ -156,6 +157,7 @@ def canonical_tables(workspace, item, snapshot):
                     {
                         "name": "ws_" + digest((source_id + sheet).encode())[:24],
                         "sheet": sheet,
+                        "headers": [str(c) if c is not None else "" for c in header],
                         "columns": cols,
                         "rows": count,
                         "hash": key,
@@ -300,7 +302,7 @@ async def update_incremental(
     context = current_context()
     skills = list(context.extra.get("applied_skills", {}).values()) if context else []
     recipe = {
-        "version": "workspace-v2",
+        "version": "workspace-v2-assets-1",
         "surfaces": sorted(selected),
         "embedding": cfg.embedding.model_dump(mode="json", exclude={"api_key"}),
         "chunk_size": cfg.retrieval.chunk_size,
@@ -429,7 +431,10 @@ async def update_incremental(
                             "truncated": False,
                         }
                         if "kb" in selected and suffix in DOCUMENT_EXTS:
-                            text_value = (await blocking(extract_document, blob)).text
+                            extracted = await blocking(extract_document, blob)
+                            text_value = extracted.text
+                            prepared["parsed_text"] = text_value
+                            prepared["parse_warnings"] = extracted.warnings
                             parts = _split_text(
                                 text_value,
                                 chunk_size=cfg.retrieval.chunk_size,

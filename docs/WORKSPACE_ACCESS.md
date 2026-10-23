@@ -1,0 +1,93 @@
+# Optional retrieval and reusable evidence
+
+The main Codex agent chooses whether the data layer helps. A file conversion or
+small task with known paths can use native tools. Indexed discovery, SQL joins,
+relationship queries and repeated access to parsed sources can use DataMind.
+The plugin and official SDK host use the same instructions and data tools.
+
+## Discovery and reads
+
+Start `datamind_operation_begin(mode="read")` only when accessing DataMind.
+The response contains `operation_id`, `revision`, `mode`, and `workspace` with
+the source root, source count, selected surfaces and truncation count. It no
+longer embeds the internal manifest. Python diagnostics can still explicitly
+call `Workspace.manifest(revision)`.
+
+Fetch `workspace-retrieve` by name when its procedure is needed. `skill_list` is
+for discovery, not a required step before an already-known `skill_get`.
+
+```python
+from datamind.mcp import execute
+
+op = await execute("datamind_operation_begin", {"mode": "read"})
+token = op["operation_id"]
+try:
+    catalog = await execute("datamind_workspace_catalog", {
+        "operation_id": token, "kind": "tables", "source": "sales.xlsx",
+        "sheet": "Orders", "column": "amount", "limit": 10,
+    })
+    # Inspect the returned physical table name/column mapping before writing SQL.
+    asset = await execute("datamind_workspace_read_asset", {
+        "operation_id": token, "path": "sales.xlsx", "sheet": "Orders",
+        "offset": 0, "limit": 20,
+    })
+finally:
+    await execute("datamind_operation_close", {"operation_id": token})
+```
+
+`workspace_catalog(kind="sources")` searches published paths. `kind="tables"`
+searches physical names, file paths, sheet names and columns. `query` uses
+case-insensitive whitespace-separated terms; `source`, `sheet`, and `column`
+are case-insensitive substring filters. Results include the source version and
+workspace revision, with `total_count`, `next_offset` and `truncated`. Limits
+are 1–100, default 20. Wide column lists show at most 50 entries; a column filter
+puts matching columns first. Use `db_describe_table` for the complete SQL schema.
+
+The catalog covers published sources, not all files on disk. An empty result
+does not prove a raw file is absent. Same-named files at different paths retain
+distinct identities. Do not silently mix current source files with historical
+query results; use a pinned source read or disclose the changed evidence.
+
+`workspace_read_asset` accepts a published URI or exact workspace-relative path.
+For text, `offset`/`max_chars` count characters. For a sheet, `offset` counts data
+rows, `limit` is 1–200, and `columns` selects SQL column names. Rows preserve the
+import's stored TEXT/NULL representation; no unit or numeric meaning is inferred.
+Responses include source version, pipeline hash and explicit truncation/next
+offset fields. Discovery and parsed reads do not open an embedding or SQL backend.
+
+New builds retain extracted text with their immutable source artifacts; table
+reads reuse canonical table objects or legacy checkpoint records. Old text
+artifacts without cached extraction fall back to parsing their frozen source
+and return `reused=false`. No index rebuild is required just to read an older
+revision. New incremental tables retain original header labels alongside SQL
+column names; older artifacts may only retain SQL names. XLSX import reads actual
+cells without trusting the workbook's declared dimension; original bytes and
+hashes are preserved.
+
+KB search overfetches a bounded candidate pool, then merges identical passage
+text. Each result retains its primary source plus up to 20 duplicate source
+locations and a truncation indicator. The count is for retrieved candidates,
+not the entire corpus. Source/tenant metadata filters and historical versions
+apply before merging. Different text or internal whitespace is not collapsed.
+
+## Evaluation controls
+
+`benchmark.workspace_protocol.run_recoverable_turn` consumes SDK events and
+resumes transient failures in the same thread, with bounded retries inside one
+wall-clock deadline. Use the same recovery settings for all methods. Attempts
+and errors remain visible; exhausted infrastructure failures are identified
+separately from task quality. Every request, including retries, still belongs
+in usage accounting. The evaluation adapter must connect its event logger and
+request-ID usage collector; the helper does not estimate missing token usage.
+
+`source_audit` checks reference/workspace bytes and flags suspicious Python
+syntax labels for manual review. Flags never rewrite official scores. Keep
+metadata, rubrics and expected answers out of builders and task agents. Retain
+official scores alongside validity flags and any separately defined human or
+blind comparative assessment.
+
+For a routing ablation compare raw Codex, optional DataMind, and a separately
+labeled retrieval-guided condition over identical source bytes and budgets.
+Use repeated paired trials and report completion, quality, uncached/cached/output
+tokens, useful data calls, native operations and build cost separately. A small
+smoke result establishes functionality, not general performance superiority.

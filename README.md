@@ -112,6 +112,14 @@ async def graph_lookup():
 `DataPlane.call` validates arguments, applies hooks and records write receipts.
 Main-agent planning, semantic extraction and answer synthesis stay outside DataMind.
 
+DataMind is optional within a task. Codex can handle a few known files directly;
+use the data layer when indexed discovery, exact SQL, relationships or reusable
+parsed evidence save work. Starting a read operation returns a compact revision
+and coverage summary. Use `workspace_catalog` for paginated source discovery, or
+`kind="tables"` with `source`, `sheet` and `column` filters. Read parsed evidence
+with `workspace_read_asset`; all these calls share the operation's pinned version.
+There is no mandatory `skill_list` step. See [retrieval and evaluation](docs/WORKSPACE_ACCESS.md).
+
 For custom endpoints and unattended tool authorization, see
 [Codex gateway deployment](./docs/CODEX_GATEWAY_DEPLOYMENT.md).
 

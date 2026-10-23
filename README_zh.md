@@ -31,6 +31,12 @@ pip install -e .
 
 在 Codex 中要求使用 DataMind 入库或查询。插件先开启操作上下文，再按需读取
 `workspace-ingest`、`source-update` 或 `workspace-retrieve` Skill。
+普通的少量已知文件任务可直接使用 Codex 原生工具，无需为了插件而增加操作步骤。
+需要索引检索、精确 SQL、关系查询或解析结果复用时再使用 DataMind。
+开启读取操作只返回简短版本/覆盖摘要；`workspace_catalog` 支持分页查源文件，
+或通过 `kind="tables"` 按文件、sheet、列找表。`workspace_read_asset` 返回已解析的
+文本或有限行数的表格，保留来源版本。无需固定先调用 `skill_list`。
+详见[检索接入与评测](./docs/WORKSPACE_ACCESS.md)。
 图、SQL、Skills 和 Memory 的直接操作不需要 DataMind 对话模型密钥。
 KB 仍需要 embedding 服务，例如：
 

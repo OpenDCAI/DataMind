@@ -76,6 +76,14 @@ def workspace_tools(settings, active=None):
     async def history():
         return Workspace(settings).history()
 
+    async def catalog(**kwargs):
+        async with Workspace(settings, builder=build_data_plane).reader(enable=set()) as reader:
+            return await reader.call('workspace_catalog', **kwargs)
+
+    async def read_asset(**kwargs):
+        async with Workspace(settings, builder=build_data_plane).reader(enable=set()) as reader:
+            return await reader.call('workspace_read_asset', **kwargs)
+
     async def policy(mode, keep_last=10):
         return Workspace(settings).configure_retention(mode, keep_last)
 
@@ -96,6 +104,23 @@ def workspace_tools(settings, active=None):
 
     metadata = {'access': 'write', 'workspace_management': True}
     management = [
+        ToolSpec('workspace_catalog', 'Find published sources or SQL tables by filename/path, sheet or column. Paginated; no database/model call. Check coverage before repeating native reads.',
+                 {'type': 'object', 'properties': {
+                     'kind': {'enum': ['sources', 'tables'], 'default': 'sources'},
+                     'query': {'type': 'string'}, 'source': {'type': 'string'},
+                     'sheet': {'type': 'string'}, 'column': {'type': 'string'},
+                     'offset': {'type': 'integer', 'minimum': 0, 'default': 0},
+                     'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100, 'default': 20}}},
+                 catalog, {'access': 'read'}),
+        ToolSpec('workspace_read_asset', 'Read reusable published text or a bounded sheet row range, with source version and revision evidence. Does not re-parse cached assets or run SQL. Offsets count characters for text, data rows for sheets.',
+                 {'type': 'object', 'properties': {
+                     'path': {'type': 'string'}, 'sheet': {'type': 'string'},
+                     'offset': {'type': 'integer', 'minimum': 0, 'default': 0},
+                     'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200, 'default': 100},
+                     'max_chars': {'type': 'integer', 'minimum': 1, 'maximum': 100000, 'default': 20000},
+                     'columns': {'type': 'array', 'maxItems': 100, 'uniqueItems': True,
+                                 'items': {'type': 'string'}}}, 'required': ['path']},
+                 read_asset, {'access': 'read'}),
         ToolSpec('workspace_history', 'List retained and pruned Workspace revisions and retention policy.',
                  {'type': 'object', 'properties': {}}, history, {'access': 'read'}),
         ToolSpec('workspace_retention', 'Choose latest, recent N, or all history. Applies to future cleanup; does not immediately delete data.',

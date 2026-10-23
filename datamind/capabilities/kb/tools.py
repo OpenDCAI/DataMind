@@ -79,7 +79,8 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
             description=(
                 "Search the knowledge base (vector RAG). "
                 "Use this for any question about the documents you have indexed. "
-                "Returns the top-k most relevant chunks with their text, source path, and relevance score."
+                "Returns top-k distinct passages with text, source path, relevance score and duplicate source locations. "
+                "Tables are discovered with workspace_catalog(kind='tables'), not passage search."
             ),
             input_schema={
                 "type": "object",
