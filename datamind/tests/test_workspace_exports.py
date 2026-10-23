@@ -225,3 +225,65 @@ async def test_snapshot_gc_keeps_shared_canonical_tables(ws):
     async with w.reader(enable=set()) as reader:
         result = await reader.call("workspace_export_bundle", requests=[{"path": "crm.xlsx"}])
         assert result["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_text_exports_reuse_frozen_parse_without_opening_backends(ws, monkeypatch):
+    w, source = ws
+    note = source / "notes.md"
+    note.write_text("第一版来源\nRevenue is reported in USD.")
+    first = await w.update(str(source), surfaces=["db"])
+    note.write_text("Second version")
+    await w.update(str(source), surfaces=["db"])
+    note.unlink()
+    from datamind.capabilities.ingest import formats
+    monkeypatch.setattr(formats, "extract_document", lambda *a: pytest.fail("unexpected parsing"))
+    from datamind import runtime
+    monkeypatch.setattr(runtime, "build_db_service", lambda *a, **k: pytest.fail("SQL backend opened"))
+    monkeypatch.setattr(runtime, "build_embedding", lambda *a, **k: pytest.fail("embedding opened"))
+    async with w.reader(first["workspace_revision"], enable=set()) as reader:
+        result = await reader.call("workspace_export_bundle", requests=[{"path": "notes.md"}, {"path": "crm.xlsx"}])
+        manifest, _ = load_export(result)
+        text = next(item for item in manifest["items"] if item["kind"] == "text")
+        assert Path(text["path"]).read_text() == "第一版来源\nRevenue is reported in USD."
+        assert text["parsed_cache_reused"] and result["count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_byte_limit_fails_instead_of_returning_truncated_text(ws):
+    w, source = ws
+    (source / "large.md").write_text("原文" * 2000)
+    await w.update(str(source), surfaces=["db"])
+    async with w.reader(enable=set()) as reader:
+        with pytest.raises(ValueError, match="max_bytes"):
+            await reader.call("workspace_export_bundle", requests=[{"path": "large.md"}], max_bytes=1024)
+
+
+@pytest.mark.asyncio
+async def test_export_profile_directory_cannot_redirect_to_other_data(ws, monkeypatch):
+    w, source = ws
+    await w.update(str(source), surfaces=["db"])
+    cache = source.parent / "exports"
+    cache.mkdir()
+    (cache / "default").symlink_to(source, target_is_directory=True)
+    monkeypatch.setenv("DATAMIND_EXPORT_ROOT", str(cache))
+    with pytest.raises(CapabilityError, match="symlink"):
+        async with w.reader(enable=set()):
+            pytest.fail("unsafe export root accepted")
+
+
+def test_legacy_export_does_not_fabricate_original_cell_positions(tmp_path):
+    from datamind.workspace_discovery import WorkspaceView
+    from datamind.workspace_exports import export_bundle
+    table = {"name": "legacy", "sheet": "Sheet1", "columns": ["label", "_source_file"],
+             "headers": ["label"], "rows": 1, "records": [{"label": "retained", "_source_file": "/old.csv"}]}
+    (tmp_path / "artifact.json").write_text(json.dumps({"tables": [table]}))
+    manifest = {"workspace_revision": "legacy-revision", "sources": [{"uri": "/old.csv",
+        "relative_path": "old.csv", "version": "sha256:fixture", "artifact": "artifact.json"}]}
+    view = WorkspaceView(manifest, tmp_path)
+    result = export_bundle(view, [{"path": "old.csv"}], tmp_path / "exports")
+    exported, rows = load_export(result)
+    assert exported["items"][0]["lineage"] == "unavailable_legacy_republish_required"
+    assert rows[0][0] == {"label": "retained", "_source_row": None}
+    asset = view.read_asset(path="old.csv")
+    assert asset["source_rows"] is None and asset["source_columns"] is None
