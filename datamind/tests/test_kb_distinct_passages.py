@@ -34,3 +34,6 @@ async def test_dedup_keeps_sources_filters_and_historical_version(historical):
     assert retriever.seen["filters"] == {"tenant": "a"}
     if historical:
         assert retriever.seen["version"] == 7
+    # The MCP's 50-result cap must not become a breaking limit on Python callers.
+    results = await search("record", top_k=75, **({"version": 7} if historical else {}))
+    assert len(results) == 2 and retriever.seen["top_k"] >= 75

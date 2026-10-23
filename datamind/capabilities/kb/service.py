@@ -85,9 +85,11 @@ class KBService:
         if self._compatibility_error:
             raise ConfigError(self._compatibility_error)
         k = self.retrieval_cfg.top_k if top_k is None else top_k
-        if not 1 <= k <= 50:
-            raise ValueError("top_k must be between 1 and 50")
-        chunks = await self.retriever.aretrieve(query, top_k=min(k * 4, 200), filters=filters)
+        if k < 1:
+            raise ValueError("top_k must be positive")
+        # MCP bounds model-facing requests to 50. Keep larger explicit Python
+        # requests compatible without multiplying their candidate count by four.
+        chunks = await self.retriever.aretrieve(query, top_k=min(k * 4, max(k, 200)), filters=filters)
         return unique_passages(chunks, k)
 
     async def count(self) -> int:
@@ -222,10 +224,10 @@ class KBService:
             raise CapabilityError("kb", f"version {version} does not exist in this LanceDB table")
 
         k = self.retrieval_cfg.top_k if top_k is None else top_k
-        if not 1 <= k <= 50:
-            raise ValueError("top_k must be between 1 and 50")
+        if k < 1:
+            raise ValueError("top_k must be positive")
         chunks = await self.retriever.aretrieve_at_version(
-            query, top_k=min(k * 4, 200), filters=filters, version=version)
+            query, top_k=min(k * 4, max(k, 200)), filters=filters, version=version)
         return unique_passages(chunks, k)
 
     async def list_versions(self) -> list[dict[str, Any]]:
