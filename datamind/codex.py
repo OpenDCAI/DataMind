@@ -33,7 +33,7 @@ def sdk_config(*, workspace: str, data_root: str, profile: str = 'default',
         result['env'] = dict(env)
         context_keys={'DATAMIND_SESSION_ID','DATAMIND_REQUEST_ID','DATAMIND_ACCESS_MODE',
                       'DATAMIND_WORKSPACE_REVISION','DATAMIND_READ_SCOPE','DATAMIND_ENABLED_SURFACES',
-                      'DATAMIND_WORKSPACE_READ_RETRIES','DATAMIND_TEST_READ_FAULT'}
+                      'DATAMIND_WORKSPACE_READ_RETRIES','DATAMIND_TEST_READ_FAULT','DATAMIND_EXPORT_ROOT'}
         forwarded=sorted(key for key in env if key in context_keys or key.startswith('DATAMIND__'))
         if forwarded:
             result['config_overrides'] += ('mcp_servers.datamind.env_vars='+json.dumps(forwarded),)

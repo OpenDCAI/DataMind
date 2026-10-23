@@ -2,6 +2,7 @@
 
 import hashlib
 import shutil
+from pathlib import Path
 import pytest
 from datamind.config import Settings
 from datamind.workspace import Workspace
@@ -10,6 +11,39 @@ from datamind.core.errors import CapabilityError
 pytestmark = pytest.mark.skipif(
     shutil.which("dolt") is None, reason="requires real Dolt binary"
 )
+
+
+@pytest.mark.asyncio
+async def test_dolt_mapping_only_update_reuses_table_and_exports_pinned_cells(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("DATAMIND_EXPORT_ROOT", str(tmp_path / "exports"))
+    root = tmp_path / "sources"
+    root.mkdir()
+    source = root / "sales.csv"
+    source.write_text("Report\nitem,amount\nA,10\nB,20\n")
+    cfg = Settings(_env_file=None, data={"base_dir": tmp_path / "runtime"}, db={"dialect": "dolt"},
+        workspace={"storage_mode": "incremental", "retention": "all", "auto_gc": False})
+    w = Workspace(cfg)
+    first = await w.update(str(root), surfaces=["db"])
+    mappings = [{"uri": str(source), "version": "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest(),
+                 "sheets": [{"sheet": "sales", "header_row": 2,
+                             "fields": [{"column": "col_2", "name": "收入", "unit": "元"}]}]}]
+    second = await w.update(str(root), surfaces=["db"], table_mappings=mappings)
+    assert first["snapshots"]["db"] == second["snapshots"]["db"]
+    assert second["metrics"]["parsed_table_files"] == 0
+    async with w.reader(first["workspace_revision"]) as older:
+        old_catalog = await older.call("workspace_catalog", kind="tables")
+        assert old_catalog["sql_dialect"] == "mysql"
+        table = old_catalog["items"][0]["table"]
+        query = await older.call("db_query_sql", sql=f"SELECT col_2,_source_row FROM `{table}` WHERE CAST(_source_row AS SIGNED)=4")
+        assert query["rows"] == [["20", "4"]]
+        async with w.reader(enable=set()) as newer:
+            exported = await newer.call("workspace_export_bundle", requests=[{"path": "sales.csv"}])
+            rows = [json.loads(line) for line in Path(exported["items"][0]["path"]).read_text().splitlines()]
+            assert rows == [{"item": "A", "收入": "10", "_source_row": 3}, {"item": "B", "收入": "20", "_source_row": 4}]
+            w.rollback(first["workspace_revision"], expected_revision=second["workspace_revision"])
+            pinned = await newer.call("workspace_export_bundle", requests=[{"path": "sales.csv"}])
+            assert pinned["workspace_revision"] == second["workspace_revision"]
 
 
 @pytest.mark.asyncio
@@ -48,6 +82,10 @@ async def test_dolt_snapshots_reuse_unchanged_tables_and_prune_history(tmp_path)
                 "db_query_sql",
                 sql=f"SELECT SUM(CAST(amount AS DOUBLE)) AS total FROM `{table}`",
             )
+            catalog = await reader.call("workspace_catalog", kind="tables", source="sales.csv", column="amount")
+            assert catalog["items"][0]["table"] == table
+            asset = await reader.call("workspace_read_asset", path="sales.csv", columns=["amount"])
+            assert sum(float(row[0]) for row in asset["rows"]) == result["rows"][0][0]
             with pytest.raises(CapabilityError):
                 await reader.call(
                     "db_query_sql", sql=f"SELECT * FROM `dolt/main`.`{table}`"

@@ -204,7 +204,7 @@ async def test_direct_publication_pins_kb_sql_graph_and_raw_across_calls(setting
         assert all(r['status'] == 'stored' for r in result['result']['results']), result
         manifest = result['result']['results'][0]['details']
         assert manifest['metrics']['graph_extraction_calls'] == 0
-        assert manifest['applied_skills'][0]['version'] == '1.3.0'
+        assert manifest['applied_skills'][0]['version'] == '1.4.0'
         return manifest['workspace_revision']
     first = await publish('OldOwner')
     reader = await begin('read')

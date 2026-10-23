@@ -29,6 +29,18 @@ DOCUMENT_EXTS = {
 TABLE_EXTS = {".csv", ".tsv", ".xls", ".xlsx"}
 
 
+def worksheet_rows(sheet):
+    """Read actual XML extent, retaining columns beyond a short title row.
+
+    A first streaming pass finds the real width instead of trusting an inflated
+    or undersized dimension. The second pads every row to that width, matching
+    the existing table import semantics without altering the original bytes.
+    """
+    sheet.reset_dimensions()
+    width = max((len(row) for row in sheet.iter_rows()), default=0)
+    return sheet.iter_rows(max_col=width, values_only=True) if width else iter(())
+
+
 @dataclass(frozen=True)
 class ExtractedDocument:
     source: str
@@ -287,14 +299,17 @@ def extract_tabular(path: str | Path) -> list[tuple[str, list[str], list[dict[st
             raise RuntimeError("legacy .xls import requires conversion to .xlsx")
         workbook = openpyxl.load_workbook(str(source), read_only=True, data_only=True)
         output: list[tuple[str, list[str], list[dict[str, Any]]]] = []
-        for sheet in workbook.worksheets:
-            values = list(sheet.values)
-            if not values:
-                continue
-            columns = [str(cell).strip() if cell is not None and str(cell).strip() else f"col_{index}"
-                       for index, cell in enumerate(values[0], 1)]
-            rows = [dict(zip(columns, list(row) + [None] * (len(columns) - len(row)))) for row in values[1:]]
-            output.append((sheet.title, columns, rows))
+        try:
+            for sheet in workbook.worksheets:
+                values = list(worksheet_rows(sheet))
+                if not values:
+                    continue
+                columns = [str(cell).strip() if cell is not None and str(cell).strip() else f"col_{index}"
+                           for index, cell in enumerate(values[0], 1)]
+                rows = [dict(zip(columns, list(row) + [None] * (len(columns) - len(row)))) for row in values[1:]]
+                output.append((sheet.title, columns, rows))
+        finally:
+            workbook.close()
         return output
     raise RuntimeError(f"no table extractor for '{suffix or '<none>'}'")
 

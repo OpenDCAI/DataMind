@@ -17,6 +17,14 @@ from datamind.capabilities.skills.code_skills import build_code_skills
 # ------------------------------------------------------------- loader ---
 
 
+def test_codex_metadata_retains_receipt_version_and_search_terms(tmp_path):
+    path = tmp_path / "SKILL.md"
+    path.write_text("---\nname: ingest\ndescription: Ingest tables\nmetadata:\n  version: 1.4.0\n  keywords: [table, 入库]\n  name: must-not-override\n---\nBody")
+    skill = load_skill(path)
+    assert skill.version == "1.4.0" and skill.keywords == ("table", "入库")
+    assert skill.name == "ingest"
+
+
 def test_load_skill_with_frontmatter(tmp_path: Path):
     sk = tmp_path / "my-skill"
     sk.mkdir()

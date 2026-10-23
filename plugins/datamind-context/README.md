@@ -13,7 +13,12 @@ The bootstrap resolves the checkout from DATAMIND_REPO_ROOT or its installation
 marker. The server is also available in installed wheels as `python -m datamind.mcp`.
 The official Codex SDK host uses that same server and procedure catalogue.
 
-Start with `datamind_operation_begin`. Pass operation_id on subsequent calls:
+Use native Codex tools directly when a few known files suffice. When DataMind
+retrieval or reuse helps, start `datamind_operation_begin` and pass operation_id
+on subsequent calls. Setup returns a compact summary; use the paginated
+`datamind_workspace_catalog` to find sources or tables by file/sheet/column,
+and `datamind_workspace_read_asset` to reuse parsed evidence. Fetch a named
+Skill when needed; listing Skills is optional:
 
 - write mode: fetch `workspace-ingest` / `source-update`, prepare the folder,
   read sources, extract triples with Codex, then workspace_publish;

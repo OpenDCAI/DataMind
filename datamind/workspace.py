@@ -144,7 +144,7 @@ class Workspace(WorkspaceCatalog):
                               'version': 'sha256:' + sha.hexdigest()})
         return inventory
 
-    async def update(self, path: str, *, surfaces=('kb', 'graph', 'db'), relation_types=None, max_triples_per_file=200, graph_sources=None) -> dict[str, Any]:
+    async def update(self, path: str, *, surfaces=('kb', 'graph', 'db'), relation_types=None, max_triples_per_file=200, graph_sources=None, table_mappings=None) -> dict[str, Any]:
         """Publish a generation and report logical compute/materialization costs.
 
         Metrics are per attempt, including unsuccessful attempts. Provider usage
@@ -165,7 +165,8 @@ class Workspace(WorkspaceCatalog):
             update = update_incremental if incremental_enabled(self, surfaces) else Workspace._update
             with bind_context(ctx):
                 result = await update(self, path, surfaces=surfaces, relation_types=relation_types,
-                    max_triples_per_file=max_triples_per_file, metrics=metrics, graph_sources=graph_sources)
+                    max_triples_per_file=max_triples_per_file, metrics=metrics, graph_sources=graph_sources,
+                    table_mappings=table_mappings)
             metrics["status"] = "published"
             if self.settings.workspace.auto_gc:
                 try:metrics["retention_cleanup"] = await self.collect(dry_run=False,compact=self.retention['mode']!='all')
@@ -196,7 +197,7 @@ class Workspace(WorkspaceCatalog):
                         try: _atomic_json(report, metrics)
                         except OSError: metrics['metrics_persisted'] = False
 
-    async def _update(self, path: str, *, surfaces, relation_types, max_triples_per_file, metrics, graph_sources=None) -> dict[str, Any]:
+    async def _update(self, path: str, *, surfaces, relation_types, max_triples_per_file, metrics, graph_sources=None, table_mappings=None) -> dict[str, Any]:
         """Prepare and publish one generation, retaining the previous one on failure.
 
         Cached complete-source results are reused. Index materialization is currently
@@ -239,7 +240,17 @@ class Workspace(WorkspaceCatalog):
                                  'truncated': bool(entry.get('truncated', False))}
             if set(external) != set(expected):
                 raise ConfigError('Supply triples (including explicit empty lists) for every document source')
-        pipeline = {'version': 'workspace-v1', 'surfaces': sorted(selected),
+        from datamind.workspace_tables import PARSER_VERSION, resolve_mappings
+        with self._connect() as conn:
+            parent, parent_epoch = conn.execute('SELECT revision, epoch FROM head WHERE singleton=1').fetchone()
+        previous = self.manifest(parent) if parent else None
+        mappings = resolve_mappings(inventory, table_mappings, previous)
+        if table_mappings and 'db' not in selected:
+            raise ConfigError('Table mappings require the DB surface')
+        if 'db' not in selected:
+            mappings = {}
+        prior = {s['uri']: s for s in (previous or {}).get('sources', [])}
+        pipeline = {'version': 'workspace-v1-assets-2', 'table_parser': PARSER_VERSION, 'surfaces': sorted(selected),
                     'embedding': self.settings.embedding.model_dump(mode='json', exclude={'api_key'}),
                     'model': self.settings.llm.fallback_model or self.settings.llm.model,
                     'chunk_size': self.settings.retrieval.chunk_size,
@@ -254,7 +265,6 @@ class Workspace(WorkspaceCatalog):
         revision = 'revision-' + uuid.uuid4().hex
         metrics['workspace_revision'] = revision
         with self._connect() as conn:
-            parent, parent_epoch = conn.execute('SELECT revision, epoch FROM head WHERE singleton=1').fetchone()
             conn.execute('INSERT INTO revisions VALUES (?, ?, ?, NULL)', (revision, parent, 'BUILDING'))
         settings = self._settings_for(revision)
         system = None
@@ -281,7 +291,8 @@ class Workspace(WorkspaceCatalog):
                 metrics['source_copy_ms'] += (time.monotonic() - stage_started) * 1000
                 source_id = 'file:' + _digest(item['uri'].encode())
                 cache_key = _digest(json.dumps([source_id, item['version'], pipeline_hash,
-                    external.get(item['uri']) if external is not None else None], sort_keys=True).encode())
+                    external.get(item['uri']) if external is not None else None,
+                    mappings.get(item['uri'], [])], sort_keys=True).encode())
                 cache_path = self.root / 'checkpoints' / (cache_key + '.json')
                 stage_started = time.monotonic()
                 if cache_path.is_file():
@@ -293,6 +304,7 @@ class Workspace(WorkspaceCatalog):
                     prepared = {'chunks': [], 'vectors': [], 'triples': [], 'tables': [], 'truncated': False}
                     is_table = original.suffix.lower() in TABLE_EXTS
                     text = (await asyncio.to_thread(extract_document, snapshot)).text if original.suffix.lower() in DOCUMENT_EXTS else ''
+                    prepared['parsed_text'] = text
                     if 'kb' in selected and text:
                         parts = _split_text(text, chunk_size=settings.retrieval.chunk_size,
                                             chunk_overlap=settings.retrieval.chunk_overlap)
@@ -325,8 +337,17 @@ class Workspace(WorkspaceCatalog):
                             if len(triples) >= min(30, remaining):
                                 prepared['truncated'] = True
                     if 'db' in selected and is_table:
-                        metrics['parsed_table_files'] += 1
-                        prepared['tables'] = await asyncio.to_thread(extract_tabular, snapshot)
+                        from datamind.workspace_incremental import canonical_tables
+                        from datamind.workspace_tables import interpret_tables
+                        before = prior.get(item['uri'], {})
+                        old_tables = []
+                        if before.get('version') == item['version'] and before.get('checkpoint'):
+                            old_tables = json.loads((self.root / before['checkpoint']).read_text()).get('tables', [])
+                        if old_tables and all(isinstance(t, dict) and t.get('source_rows') for t in old_tables):
+                            prepared['tables'] = await asyncio.to_thread(interpret_tables, self.root, old_tables, mappings.get(item['uri']))
+                        else:
+                            metrics['parsed_table_files'] += 1
+                            prepared['tables'] = await asyncio.to_thread(canonical_tables, self, item, snapshot, mappings=mappings.get(item['uri']))
                     metrics['source_compute_ms'] += (time.monotonic() - stage_started) * 1000
                     metrics['sources_computed'] += 1
                     stage_started = time.monotonic()
@@ -342,14 +363,29 @@ class Workspace(WorkspaceCatalog):
                         ids=[c['id'] for c in chunks], texts=[c['text'] for c in chunks],
                         embeddings=prepared['vectors'], metadatas=[c['metadata'] for c in chunks])
                 graph_triples.extend(GraphTriple(**t) for t in prepared['triples'])
-                for sheet, columns, rows in prepared['tables']:
-                    if not rows:
-                        continue
-                    table = 'ws_' + _digest((source_id + sheet).encode())[:24]
-                    safe_cols, safe_rows = ingest._read_from_records(rows, source_file=item['uri'])
-                    await ingest._ingest_rows(table=table, rows=safe_rows, safe_cols=safe_cols,
-                                              if_exists='replace', source_file=item['uri'])
+                from datamind.workspace_tables import table_rows
+                for table in prepared['tables']:
+                    # New checkpoints share exactly the same canonical rows as Dolt.
+                    if isinstance(table, dict):
+                        rows = table_rows(self.root, table)
+                        first_batch = True
+                        import itertools
+                        while batch := list(itertools.islice(rows, 1000)):
+                            await ingest._ingest_rows(table=table['name'], rows=batch, safe_cols=table['columns'],
+                                if_exists='replace' if first_batch else 'append', source_file=item['uri'])
+                            first_batch = False
+                        if first_batch:
+                            await ingest._ingest_rows(table=table['name'], rows=[], safe_cols=table['columns'],
+                                if_exists='replace', source_file=item['uri'])
+                    else:
+                        sheet, columns, rows = table
+                        if rows:
+                            name = 'ws_' + _digest((source_id + sheet).encode())[:24]
+                            safe_cols, safe_rows = ingest._read_from_records(rows, source_file=item['uri'])
+                            await ingest._ingest_rows(table=name, rows=safe_rows, safe_cols=safe_cols,
+                                if_exists='replace', source_file=item['uri'])
                 manifest_sources.append({**item, 'source_id': source_id,
+                    'table_mapping': mappings.get(item['uri'], []),
                     'snapshot': str(snapshot.relative_to(settings.data.base_dir)),
                     'checkpoint': str(cache_path.relative_to(self.root))})
                 metrics['sources_completed'] += 1
@@ -428,7 +464,8 @@ class Workspace(WorkspaceCatalog):
                 settings.graph.backend='networkx'
                 system=await self._system(settings,selected)
                 root=settings.data.base_dir
-            reader=WorkspaceReader(system,manifest,root,read_retries=read_retries,
+            from datamind.workspace_exports import export_root
+            reader=WorkspaceReader(system,manifest,root,checkpoint_root=self.root,export_root=export_root(self.settings),read_retries=read_retries,
                 timeout_s=settings.agent.wall_clock_timeout_s)
             reader._system_settings=self.settings
             reader._lease=(self,token)
@@ -449,7 +486,7 @@ class Workspace(WorkspaceCatalog):
 class WorkspaceReader:
     """Read-only facade fixed to a retained generation, including raw evidence."""
 
-    def __init__(self, system, manifest, root, *, read_retries=1, timeout_s=300.):
+    def __init__(self, system, manifest, root, *, checkpoint_root=None, export_root=None, read_retries=1, timeout_s=300.):
         if not 0 <= read_retries <= 5:
             raise ValueError("read_retries must be between 0 and 5")
         self._system = system
@@ -460,6 +497,21 @@ class WorkspaceReader:
         tools = system.read_tools
         system.tools = tools
         self.tools = tools
+        from datamind.workspace_discovery import WorkspaceView
+        view = WorkspaceView(manifest, root, checkpoint_root=checkpoint_root,
+                             ingest=system.services.ingest)
+        async def catalog(**kwargs):
+            return await asyncio.to_thread(view.catalog, **kwargs)
+        async def read_asset(**kwargs):
+            return await asyncio.to_thread(view.read_asset, **kwargs)
+        async def export_bundle(**kwargs):
+            from datamind.workspace_exports import export_bundle as export
+            from datamind.workspace_native import blocking
+            return await blocking(export, view, destination=export_root, **kwargs)
+        for name, handler in [('workspace_catalog', catalog), ('workspace_read_asset', read_asset),
+                              ('workspace_export_bundle', export_bundle)]:
+            spec = tools.get(name)
+            tools.replace(replace(spec, handler=handler))
         raw = tools.get('raw_file_read')
         original = raw.handler
 

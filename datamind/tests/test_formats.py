@@ -51,3 +51,62 @@ def test_pdf_prefers_mineru_and_falls_back_to_pypdf(tmp_path: Path, monkeypatch)
     result = extract_document(pdf)
     assert result.text == "fallback"
     assert any("fell back to pypdf" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("dimension", ["A1:XFD1048576", "A1:A1"])
+@pytest.mark.parametrize("prefixed", [False, True])
+def test_xlsx_reads_actual_cells_despite_incorrect_declared_dimensions(tmp_path, dimension, prefixed):
+    import hashlib
+    import re
+    import zipfile
+    import openpyxl
+    from datamind.config import DataSettings
+    from datamind.workspace import Workspace
+    from datamind.workspace_incremental import canonical_tables
+    book = openpyxl.Workbook()
+    book.active.append(["item", "amount"])
+    book.active.append(["A", 12])
+    path = tmp_path / "source.xlsx"; book.save(path); book.close()
+    with zipfile.ZipFile(path) as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+    parts["xl/worksheets/sheet1.xml"] = re.sub(
+        rb'<dimension ref="[^"]+"', f'<dimension ref="{dimension}"'.encode(),
+        parts["xl/worksheets/sheet1.xml"])
+    if prefixed:
+        import xml.etree.ElementTree as ET
+        ET.register_namespace("x", "http://schemas.openxmlformats.org/spreadsheetml/2006/main")
+        parts["xl/worksheets/sheet1.xml"] = ET.tostring(ET.fromstring(parts["xl/worksheets/sheet1.xml"]))
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, value in parts.items():
+            archive.writestr(name, value)
+    original = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert extract_tabular(path)[0][2] == [{"item": "A", "amount": 12}]
+    workspace = Workspace(DataSettings(_env_file=None, data={"base_dir": tmp_path / "runtime"}))
+    tables = canonical_tables(workspace, {"uri": str(path)}, path)
+    assert tables[0]["columns"] == ["item", "amount", "_source_file", "_source_row"]
+    from datamind.workspace_tables import table_rows
+    assert next(table_rows(workspace.root, tables[0]))["_source_row"] == "2"
+    assert tables[0]["rows"] == 1
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == original
+
+
+def test_xlsx_title_row_does_not_hide_later_columns_and_empty_sheet_is_skipped(tmp_path):
+    import openpyxl
+    from datamind.config import DataSettings
+    from datamind.workspace import Workspace
+    from datamind.workspace_incremental import canonical_tables
+    book = openpyxl.Workbook()
+    book.active.append(["Quarterly report"])
+    book.active.append(["sku", "amount"])
+    book.active.append(["A", 12])
+    book.create_sheet("Empty")
+    path = tmp_path / "title.xlsx"; book.save(path); book.close()
+    tables = extract_tabular(path)
+    assert len(tables) == 1
+    assert tables[0][1] == ["Quarterly report", "col_2"]
+    assert tables[0][2][1]["col_2"] == 12
+    workspace = Workspace(DataSettings(_env_file=None, data={"base_dir": tmp_path / "runtime"}))
+    tables = canonical_tables(workspace, {"uri": str(path)}, path)
+    assert len(tables) == 1 and tables[0]["columns"] == ["col_1", "col_2", "_source_file", "_source_row"]
+    assert tables[0]["structure"]["header_row"] == 2
+    assert tables[0]["rows"] == 2

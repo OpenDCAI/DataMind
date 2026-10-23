@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import tomllib
+import json
+from pathlib import Path
+import datamind
 
 import pytest
 
@@ -52,7 +55,11 @@ async def test_real_official_sdk_transport_initializes_without_model_turn(tmp_pa
     sdk = pytest.importorskip('openai_codex')
     # Starts the bundled CLI app-server and performs its real JSON-RPC handshake.
     # No thread.run / turn.start, no model traffic or billable inference.
-    config = sdk.CodexConfig(**sdk_config(workspace=str(tmp_path),data_root=str(tmp_path)))
+    # Pin the child to the same package as this test, including isolated image
+    # runs where an older DataMind wheel may also be installed.
+    module_root = str(Path(datamind.__file__).resolve().parents[1])
+    config = sdk.CodexConfig(**sdk_config(workspace=str(tmp_path),data_root=str(tmp_path),
+        config_overrides=(f'mcp_servers.datamind.env.PYTHONPATH={json.dumps(module_root)}',)))
     from openai_codex.async_client import AsyncCodexClient
     from openai_codex.generated.v2_all import ListMcpServerStatusResponse
     async with AsyncCodexClient(config) as client:
@@ -63,6 +70,9 @@ async def test_real_official_sdk_transport_initializes_without_model_turn(tmp_pa
         server = next(s for s in status.data if s.name == 'datamind')
         assert server.tools_error is None
         assert 'datamind_operation_begin' in server.tools
+        assert 'datamind_workspace_catalog' in server.tools
+        assert 'datamind_workspace_read_asset' in server.tools
+        assert 'datamind_workspace_export_bundle' in server.tools
         assert 'datamind_graph_neighbors' in server.tools
         assert 'datamind_ask' not in server.tools
 
@@ -87,9 +97,10 @@ def test_preapproval_is_explicit_and_limited_to_known_tools(tmp_path):
 def test_host_context_forwarded_to_mcp_without_forwarding_gateway_credentials(tmp_path):
     cfg=sdk_config(workspace=str(tmp_path),data_root=str(tmp_path),env={
         'DATAMIND_ACCESS_MODE':'read','DATAMIND_REQUEST_ID':'request-a',
+        'DATAMIND_EXPORT_ROOT':'/shared/evidence',
         'DATAMIND__EMBEDDING__API_KEY':'embed-secret','DATAMIND_CODEX_GATEWAY_KEY':'model-secret'})
     options=tomllib.loads('\n'.join(cfg['config_overrides']))
     assert set(options['mcp_servers']['datamind']['env_vars'])=={
-        'DATAMIND_ACCESS_MODE','DATAMIND_REQUEST_ID','DATAMIND__EMBEDDING__API_KEY'}
+        'DATAMIND_ACCESS_MODE','DATAMIND_REQUEST_ID','DATAMIND__EMBEDDING__API_KEY','DATAMIND_EXPORT_ROOT'}
     assert 'embed-secret' not in str(cfg['config_overrides'])
     assert 'model-secret' not in str(cfg['config_overrides'])

@@ -71,6 +71,15 @@ async def _migrate(workspace):
             s["uri"]: workspace._settings_for(revision).data.base_dir / s["snapshot"]
             for s in old["sources"]
         }
+        canonical = {}
+        for source in old["sources"]:
+            checkpoint = source.get("checkpoint")
+            if checkpoint and (workspace.root / checkpoint).is_file():
+                cached = json.loads((workspace.root / checkpoint).read_text())
+                if "parsed_text" in cached:
+                    prepared[source["uri"]]["parsed_text"] = cached["parsed_text"]
+                canonical.update({t["name"]: (source["uri"], t) for t in cached.get("tables", [])
+                                  if isinstance(t, dict) and t.get("source_rows")})
         # Validate copied source bytes. Never read mutable originals, which may
         # have changed or been deleted since the old revision was published.
         for uri, path in snapshots.items():
@@ -166,6 +175,10 @@ async def _migrate(workspace):
                     for (name,) in connection.execute(
                         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
                     ).fetchall():
+                        if name in canonical:
+                            uri, table = canonical[name]
+                            prepared[uri]["tables"].append(table)
+                            continue
                         quoted = '"' + name.replace('"', '""') + '"'
                         cursor = connection.execute("SELECT * FROM " + quoted)
                         columns = [c[0] for c in cursor.description]

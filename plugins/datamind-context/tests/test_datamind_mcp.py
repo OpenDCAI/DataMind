@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from datamind.mcp import definitions, handle
+from datamind import __version__
 
 
 def test_catalogue_exposes_direct_tools_without_nested_agents():
@@ -21,7 +22,9 @@ def test_catalogue_exposes_direct_tools_without_nested_agents():
 def test_initialize_teaches_codex_main_agent_contract():
     result = handle({'jsonrpc':'2.0','id':1,'method':'initialize'})['result']
     assert 'main agent' in result['instructions']
-    assert result['serverInfo']['version'] == '2.1.0'
+    assert result['serverInfo']['version'] == __version__
+    metadata = json.loads((Path(__file__).parents[1] / '.codex-plugin/plugin.json').read_text())
+    assert metadata['version'] == __version__
 
 
 def test_plugin_and_wheel_entrypoints_run_real_stdio_without_llm(tmp_path):

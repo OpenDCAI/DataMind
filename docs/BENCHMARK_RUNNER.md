@@ -2,6 +2,8 @@
 
 For paired read-fault and actual process-interruption experiments, see
 [Read recovery and robustness experiments](READ_RECOVERY.md).
+For paired Workspace task recovery, source validity checks and optional-tool
+ablations, see [Workspace access and evaluation](WORKSPACE_ACCESS.md).
 
 DataMind provides a dataset-neutral benchmark entry point for repeatable,
 long-running evaluations. Dataset adapters, official scorers, expected answers,

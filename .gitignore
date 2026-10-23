@@ -8,6 +8,7 @@ __pycache__/
 dist/
 build/
 .venv/
+.datamind-cache/
 
 # Benchmark data & results
 data/bench_raw/

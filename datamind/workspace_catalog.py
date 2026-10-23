@@ -294,6 +294,10 @@ class WorkspaceCatalog:
                                     )
                             elif item.get("checkpoint"):
                                 referenced.add(item["checkpoint"])
+                                artifact = self.root / item["checkpoint"]
+                                if artifact.exists():
+                                    referenced.update(t["path"] for t in json.loads(artifact.read_text()).get("tables", [])
+                                                      if isinstance(t, dict) and "path" in t)
                     files = [
                         p
                         for prefix in (".source-", ".table-", ".migrate-table-")

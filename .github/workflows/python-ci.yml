@@ -57,6 +57,8 @@ jobs:
           datamind/tests/test_workspace_revisions.py
           datamind/tests/test_workspace_incremental.py
           datamind/tests/test_ingestion_skills.py
+          datamind/tests/test_workspace_discovery.py
+          datamind/tests/test_workspace_exports.py
 
   databases:
     name: MySQL and Dolt integration
@@ -138,6 +140,8 @@ jobs:
           datamind/tests/test_cli_codex.py
           datamind/tests/test_http_api.py
           datamind/tests/test_experiment_faults.py
+          datamind/tests/test_workspace_protocol.py
+          datamind/tests/test_kb_distinct_passages.py
           plugins/datamind-context/tests/test_datamind_mcp.py
 
   gate:
