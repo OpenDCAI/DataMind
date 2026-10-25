@@ -11,6 +11,7 @@ from datamind.core.logging import get_logger
 from datamind.core.protocols import GraphEvidence, GraphStore, GraphTriple
 from .evidence import persist_input
 from datamind.core.registry import graph_registry
+from datamind.core.errors import CapabilityError
 
 # Importing providers populates graph_registry.
 from . import providers  # noqa: F401
@@ -82,6 +83,13 @@ class GraphService:
 
     async def search_entities(self, query: str, *, top_k: int = 5) -> list[dict[str, Any]]:
         return [e.model_dump() for e in await self.store.search_entities(query, top_k=top_k)]
+    
+    async def search_entities_at_version(self, query: str, *, top_k: int = 5, version: str = None) -> list[dict[str, Any]]:
+        if self.store.name != "terminusdb":
+            raise CapabilityError("kb", "rollback is only supported by the LanceDB vector store")
+        if not isinstance(version, str):
+            raise CapabilityError("kb", f"version must be an string, got {type(version).__name__}")
+        return [e.model_dump() for e in await self.store.search_entities(query, top_k=top_k, version=version)]
 
     async def traverse(
         self,
@@ -96,6 +104,25 @@ class GraphService:
             max_results=max_results,
         )
         return [p.model_dump() for p in paths]
+    
+    async def traverse_at_version(
+        self,
+        start: str,
+        *,
+        max_hops: int = 2,
+        relation_filter: list[str] | None = None,
+        max_results: int = 100,
+        version: str = None,
+    ) -> list[dict[str, Any]]:
+        if self.store.name != "terminusdb":
+            raise CapabilityError("kb", "rollback is only supported by the LanceDB vector store")
+        if not isinstance(version, str):
+            raise CapabilityError("kb", f"version must be an string, got {type(version).__name__}")
+        paths = await self.store.traverse(
+            start, max_hops=max_hops, relation_filter=relation_filter,
+            max_results=max_results, version=version,
+        )
+        return [p.model_dump() for p in paths]
 
     async def neighbors(
         self,
@@ -107,6 +134,20 @@ class GraphService:
     ) -> list[dict[str, Any]]:
         edges = await self.store.neighbors(
             entity, direction=direction, relation_filter=relation_filter, limit=limit,
+        )
+        return [e.model_dump() for e in edges]
+    
+    async def neighbors_at_version(
+        self,
+        entity: str,
+        *,
+        direction: str = "both",
+        relation_filter: list[str] | None = None,
+        limit: int = 100,
+        version: str = None,
+    ) -> list[dict[str, Any]]:
+        edges = await self.store.neighbors(
+            entity, direction=direction, relation_filter=relation_filter, limit=limit, version=version
         )
         return [e.model_dump() for e in edges]
 
@@ -127,8 +168,38 @@ class GraphService:
         persist = getattr(self.store, "persist", None)
         if callable(persist):
             await persist()
+            
+        add_version = getattr(self.store, "add_version", None)
+        if add_version and callable(add_version):
+            info = self.store.get_triples_info(added=parsed)
+            await add_version(info)
+        
         return {"upserted": len(parsed)}
 
+    async def rollback(self, version: str = None) -> dict[str, Any]:
+        if self.store.name != "terminusdb":
+            raise CapabilityError("kb", "rollback is only supported by the LanceDB vector store")
+        if not isinstance(version, str):
+            raise CapabilityError("kb", f"version must be an string, got {type(version).__name__}")
+        
+        versions = await self.list_versions()
+        if not any(v["version"] == version for v in versions):
+            raise CapabilityError("kb", f"version {version} does not exist in this LanceDB table")
+
+        result = await self.store.rollback(version=version)
+        return {
+            "status": "ok",
+            "message": f"Successfully rolled back to version {version}",
+            "rollback_version": version, # Target
+            "new_version": result["version"],  # New Commit
+        }
+
+    async def list_versions(self) -> dict[str, Any]:
+        if self.store.name != "terminusdb":
+            raise CapabilityError("kb", "list_versions is only supported by the LanceDB vector store")
+
+        return await self.store.list_versions()
+    
     def stats(self) -> dict[str, int]:
         stats = getattr(self.store, "stats", None)
         return stats() if callable(stats) else {}
@@ -147,6 +218,13 @@ def build_graph_service(settings: Settings) -> GraphService:
         store = graph_registry.create(
             "networkx",
             persist_path=str(storage_dir / "graph.json"),
+        )
+    elif backend == "terminusdb":
+        store = graph_registry.create(
+            "terminusdb",
+            dsn=settings.graph.dsn,
+            password=settings.graph.password,
+            persist_path=str(storage_dir / "graph"),
         )
     else:
         # DSN-based remote backends (neo4j, ...) — future work.

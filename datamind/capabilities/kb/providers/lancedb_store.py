@@ -33,7 +33,6 @@ class LanceDBVectorStore:
         except ImportError as exc:
             from datamind.core.errors import ConfigError
             raise ConfigError("LanceDB requires pip install datamind[versioning]") from exc
-        self.name = "lancedb"
         self._write_lock = threading.RLock()
         self.dimension = dimension
         self._persist_dir = Path(persist_dir)

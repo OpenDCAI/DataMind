@@ -1856,17 +1856,29 @@ class IngestService:
             triples.append(triple)
         return triples
 
-    async def _commit_graph_source(self, source: str | None, triples: list[GraphTriple]) -> None:
+    async def _commit_graph_source(self, source: str | None, triples: list[GraphTriple], version_info: bool = False) -> None:
+        """
+        Args:
+            version_info: Whether to record this update as a new graph version
+                when the store supports versioning.
+        """
+        
         reconcile = getattr(self._graph.store, "reconcile_source_triples", None)
         if source and callable(reconcile):
-            await reconcile(source, triples)
+            info = await reconcile(source, triples)
         else:
-            await self._graph.store.upsert_triples(triples)
+            info = await self._graph.store.upsert_triples(triples)
         persist = getattr(self._graph.store, "persist", None)
         if callable(persist):
             result = persist()
             if hasattr(result, "__await__"):
                 await result
+        
+        if version_info:
+            add_version = getattr(self._graph.store, "add_version", None)
+            if add_version and callable(add_version):
+                await add_version(info)
+        return info or {}
 
     async def graph_add_triples_from_text(
         self, *, text: str, max_triples: int = 30, source: str | None = None,
@@ -1884,7 +1896,8 @@ class IngestService:
             source_version=source_version,
             locator={"uri": str(evidence_path), "char_start": 0, "char_end": len(text)},
         )
-        await self._commit_graph_source(source, triples)
+        await self._commit_graph_source(source, triples, version_info=True)
+        
         return {"triples_added": len(triples), "source": source,
                 "samples": [t.model_dump(mode="json") for t in triples[:8]]}
 
@@ -1916,6 +1929,7 @@ class IngestService:
             raise CapabilityError("ingest", f"path does not exist: {resolved}")
 
         processed, skipped, removed = [], [], []
+        infos = {}
         for candidate in candidates:
             try:
                 candidate = _resolve_safe_path(str(candidate), self._allowed_roots)
@@ -1945,11 +1959,19 @@ class IngestService:
                     results.append({"source": part_source, "triples_added": len(extracted)})
                 if self._file_hash(candidate) != raw_version:
                     raise CapabilityError("ingest", "source changed during extraction; retry")
-                await self._commit_graph_source(str(candidate), triples)
+                info = await self._commit_graph_source(str(candidate), triples)
+                
                 processed.append({"path": str(candidate), "source": str(candidate),
                     "source_version": raw_version, "triples_added": len(triples),
                     "parts_processed": len(results), "parts": results,
-                    "truncated": len(results) < len(parts) or len(triples) >= max_triples_per_file})
+                    "truncated": len(results) < len(parts) or len(triples) >= max_triples_per_file, **info})
+                
+                for key, value in info.items():
+                    if isinstance(value, (int, float)):
+                        infos[key] = infos.get(key, 0) + value
+                    elif isinstance(value, list):
+                        infos.setdefault(key, []).extend(value)
+                        
             except Exception as exc:
                 skipped.append(f"{candidate}: {type(exc).__name__}: {exc}")
 
@@ -1958,12 +1980,107 @@ class IngestService:
             for old_source in sorted(sources()):
                 old = Path(old_source)
                 if old.is_relative_to(resolved) and (recursive or old.parent == resolved) and not old.exists():
-                    await self._commit_graph_source(old_source, [])
+                    info = await self._commit_graph_source(old_source, [])
+                    for key, value in info.items():
+                        if isinstance(value, (int, float)):
+                            infos[key] = infos.get(key, 0) + value
+                        elif isinstance(value, list):
+                            infos.setdefault(key, []).extend(value)
                     removed.append(old_source)
+                    
+        add_version = getattr(self._graph.store, "add_version", None)
+        if add_version and callable(add_version):
+            await add_version(infos)
         return {"path": str(resolved), "files_processed": len(processed),
-                "triples_added": sum(p["triples_added"] for p in processed), "files": processed,
-                "removed_sources": removed, "skipped": skipped[:20], "skipped_count": len(skipped)}
+                "triples_added": sum(p["triples_added"] for p in processed), 
+                "triples_deleted": sum(p.get("triples_deleted") or 0 for p in processed),
+                "files": processed, "removed_sources": removed, 
+                "skipped": skipped[:20], "skipped_count": len(skipped)}
+    
+    async def graph_delete_path(
+        self,
+        *,
+        path: str,
+        recursive: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Delete graph data associated with a file or directory and remove source files from disk.
 
+        The source files must not be deleted by the caller before invoking this method.
+        This method is responsible for coordinating graph cleanup and filesystem deletion.
+        """
+        
+        if self._graph is None:
+            raise CapabilityError("ingest", "Graph surface is disabled")
+        if not path or not path.strip():
+            raise CapabilityError("ingest", "path is required")
+        if getattr(self._graph.store, "name", None) != "terminusdb":
+            raise CapabilityError("ingest", "graph_delete_path is only supported by the TerminusDB graph backend")
+        
+        resolved = _resolve_safe_path(path, self._allowed_roots)
+        if resolved.is_file():
+            if resolved.suffix.lower() not in _GRAPH_DOCUMENT_EXTS:
+                raise CapabilityError(
+                    "ingest",
+                    f"unsupported extension '{resolved.suffix}'. Supported: {sorted(_GRAPH_DOCUMENT_EXTS)}",
+                )
+            candidates = [resolved]
+        elif resolved.is_dir():
+            iterator = resolved.rglob("*") if recursive else resolved.glob("*")
+            candidates = sorted(
+                item for item in iterator
+                if item.is_file() and item.suffix.lower() in _GRAPH_DOCUMENT_EXTS
+            )
+        else:
+            raise CapabilityError("ingest", f"path does not exist: {resolved}")
+
+        processed: list[dict[str, Any]] = []
+        skipped: list[str] = []
+        total = 0
+        for candidate in candidates:
+            try:
+                if candidate.suffix.lower() in _TEXT_EXTS:
+                    content = candidate.read_text(encoding="utf-8", errors="replace")
+                else:
+                    content = extract_document(candidate).text
+                if not content.strip():
+                    skipped.append(f"{candidate}: empty")
+                    candidate.unlink()
+                    continue
+                result = await self._graph.store.delete_from_source(
+                    source=str(candidate), key="source", value=str(candidate)
+                )
+                deleted = int(result.get("triples_deleted", 0))
+                total += deleted
+                
+                # Actually delete the source files from disk.
+                candidate.unlink()
+                processed.append({
+                    "path": str(candidate),
+                    "triples_deleted": deleted,
+                })
+            except Exception as exc:
+                _log.warning(
+                    "graph_delete_file_skipped",
+                    extra={"path": str(candidate), "error": str(exc)},
+                )
+                skipped.append(f"{candidate}: {type(exc).__name__}: {exc}")
+        
+        
+        result = {
+            "path": str(resolved),
+            "files_deleted": len(processed),
+            "triples_deleted": total,
+            "files": processed,
+            "skipped": skipped[:20],
+            "skipped_count": len(skipped),
+        }
+        add_version = getattr(self._graph.store, "add_version", None)
+        if add_version and callable(add_version):
+            await add_version(result)
+            
+        return result
+        
     @staticmethod
     def _parse_triples_json(raw: str) -> list[dict[str, Any]]:
         """Valid empty output retracts edges; malformed output must never do so."""
