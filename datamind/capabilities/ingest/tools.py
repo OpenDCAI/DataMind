@@ -666,7 +666,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         ),
     ]
 
-    if svc.ingest_mode == "cocoindex":
+    if svc and svc.ingest_mode == "cocoindex":
         tools.extend([
             ToolSpec(
                 name="kb_update_workspace",
@@ -681,6 +681,35 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
             ),
         ])
 
+    if (
+        svc is not None
+        and getattr(svc, "_graph", None) is not None
+        and getattr(svc._graph, "store", None) is not None
+        and svc._graph.store.name == "terminusdb"
+    ):
+        tools.extend([
+            ToolSpec(
+                name="graph_delete_path",
+                description=(
+                    "Delete a file or directory from the dist workspace and remove "
+                    "the graph triples ingested from that path. "
+                    "When recursive is true, recursively delete directory contents. "
+                    "Only delete paths inside the configured dist workspace. "
+                    "Preserve graph data unrelated to the deleted path."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the source file or directory to delete."},
+                        "recursive": {"type": "boolean", "default": True},
+                    },
+                    "required": ["path"],
+                },
+                handler=_kb_update_worksapce,
+                metadata={"group": "ingest", "surface": "graph", "access": "write"},
+            ),
+        ])
+        
     return tools
 
 __all__ = ["build_ingest_tools"]

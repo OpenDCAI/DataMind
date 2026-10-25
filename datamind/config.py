@@ -123,6 +123,7 @@ class GraphConfig(BaseModel):
 
     backend: str = "networkx"  # networkx | neo4j | ...
     dsn: str | None = None     # e.g. bolt://user:pw@host:7687
+    password: str | None = None # for terminusdb | ...
     embed_entities: bool = False
 
 

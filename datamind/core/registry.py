@@ -46,6 +46,7 @@ class Registry(Generic[T]):
                     f"new={cls.__module__}.{cls.__name__})"
                 )
             self._entries[name] = cls
+            cls.name = name # Set the backend identifier for runtime backend detection.
             return cls
 
         return deco
