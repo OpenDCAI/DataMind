@@ -2,12 +2,15 @@
 
 import asyncio
 import hashlib
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 
 from datamind.config import Settings
 from datamind.core.errors import CapabilityError
 from datamind.workspace import Workspace
+from datamind.workspace_native import prune_native, TerminusDBRepository
 
 
 class Embed:
@@ -21,6 +24,88 @@ class Embed:
 
     async def embed_query(self, text):
         return [1.0, 0.0, 0.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_terminusdb_gc_removes_unretained_revision_branches(tmp_path, monkeypatch):
+    root = tmp_path / "runtime"
+    (root / "shared" / "terminusdb").mkdir(parents=True)
+    workspace = SimpleNamespace(root=root)
+    workspace.settings = SimpleNamespace(
+        workspace=SimpleNamespace(lock_timeout_s=5),
+    )
+
+    class Client:
+        def __init__(self):
+            self.deleted = []
+
+        def get_all_branches(self):
+            return [
+                {"name": "main"},
+                {"name": "dm_build_keep"},
+                {"name": "dm_build_remove"},
+                {"name": "feature"},
+            ]
+
+        def delete_branch(self, name):
+            self.deleted.append(name)
+
+    client = Client()
+    store = SimpleNamespace(_client=client)
+
+    @asynccontextmanager
+    async def session(self, revision=None):
+        yield store
+
+    monkeypatch.setattr(TerminusDBRepository, "session", session)
+    manifests = [
+        {
+            "format_version": 2,
+            "snapshots": {
+                "graph": {"provider": "terminusdb", "revision": "revision-keep"}
+            },
+        }
+    ]
+
+    report = await prune_native(workspace, manifests)
+
+    assert client.deleted == ["dm_build_remove"]
+    assert report["graph"] == {
+        "retained_branches": ["dm_build_keep"],
+        "removed_branches": ["dm_build_remove"],
+        "physical_gc_pending": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_terminusdb_gc_keeps_branches_for_legacy_manifests(tmp_path, monkeypatch):
+    root = tmp_path / "runtime"
+    (root / "shared" / "terminusdb").mkdir(parents=True)
+    workspace = SimpleNamespace(root=root)
+    workspace.settings = SimpleNamespace(
+        workspace=SimpleNamespace(lock_timeout_s=5),
+    )
+
+    class Client:
+        def get_all_branches(self):
+            return [{"name": "dm_build_old"}]
+
+        def delete_branch(self, name):
+            raise AssertionError("legacy revision branch must be retained")
+
+    @asynccontextmanager
+    async def session(self, revision=None):
+        yield SimpleNamespace(_client=Client())
+
+    monkeypatch.setattr(TerminusDBRepository, "session", session)
+    manifests = [{
+        "format_version": 2,
+        "snapshots": {"graph": {"provider": "terminusdb", "version": "commit"}},
+    }]
+
+    report = await prune_native(workspace, manifests)
+
+    assert report["graph"]["removed_branches"] == []
 
 
 @pytest.fixture

@@ -20,6 +20,7 @@ import os
 import sqlite3
 from pathlib import Path
 
+import httpx
 import pytest
 import pytest_asyncio
 
@@ -53,7 +54,10 @@ def terminusdb_config() -> tuple[str, str]:
         pytest.skip(
             "set DATAMIND_TEST_TERMINUSDB_DSN to run destructive TerminusDB tests"
         )
-    return dsn, os.getenv("DATAMIND_TEST_TERMINUSDB_PASSWORD", None)
+    password = os.getenv("DATAMIND_TEST_TERMINUSDB_PASSWORD")
+    if not password:
+        pytest.skip("set DATAMIND_TEST_TERMINUSDB_PASSWORD to run TerminusDB tests")
+    return dsn, password
 
 
 @pytest_asyncio.fixture
