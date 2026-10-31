@@ -18,8 +18,10 @@ import subprocess
 import time
 import httpx
 
+from filelock import FileLock
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urlsplit
 
 from datamind.core.logging import get_logger
 from datamind.core.protocols import Edge, Entity, GraphPath, GraphTriple
@@ -37,14 +39,16 @@ class TerminusDBGraphStore:
         dsn: str,
         password: str,
         persist_path: str | Path,
+        branch: str = "main",
     ) -> None:
         self._dsn = dsn
         self._password = password
         self._path = Path(persist_path)
         self._path.mkdir(parents=True, exist_ok=True)
-        self._terminusdb_home = None
         self._db = "kg_default"
         self._team = "admin"
+        self._branch = branch
+        self._terminusdb_docker_home = None
         self._init_terminusdb()
         self._client = self._get_client()
         self._schema()
@@ -77,75 +81,94 @@ class TerminusDBGraphStore:
             return False
     
     def _init_terminusdb(self):
-        """Clone official Compose configuration and start TerminusDB."""
+        """Start a managed local TerminusDB when no configured server responds."""
+        if not self._dsn:
+            raise ValueError(
+                "Missing TerminusDB DSN. Configure DATAMIND__GRAPH__DSN."
+            )
         if self._is_terminusdb_running():
             return
-    
+
+        parsed = urlsplit(self._dsn)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError(f"Invalid TerminusDB DSN: {self._dsn!r}")
+        if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise RuntimeError(
+                f"Cannot connect to remote TerminusDB at {self._dsn}; "
+                "DataMind only auto-starts a server for localhost DSNs"
+            )
+        if parsed.scheme != "http" or parsed.path not in {"", "/"}:
+            raise RuntimeError(
+                "Managed local TerminusDB requires a base DSN such as "
+                "http://127.0.0.1:6363"
+            )
+        if not self._password:
+            raise ValueError(
+                "Missing TerminusDB password. Configure DATAMIND__GRAPH__PASSWORD."
+            )
+        if any(char in self._password for char in "\r\n"):
+            raise ValueError("TerminusDB password must not contain newlines")
+
         repo_url = "https://github.com/terminusdb/terminusdb"
         home = Path.home() / ".datamind" / "terminusdb"
         home = home.expanduser().resolve()
         home.parent.mkdir(parents=True, exist_ok=True)
-        self._terminusdb_home = home
-        
-        # 1. Check prerequisites.
-        if not shutil.which("docker"):
-            raise RuntimeError("Docker is not installed or not in PATH.")
 
-        subprocess.run(
-            ["docker", "compose", "version"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-        # 2. Clone once; preserve the existing checkout and data.
-        if not (home / ".git").exists():
-            if home.exists() and any(home.iterdir()):
-                raise RuntimeError(
-                    f"{home} exists but is not a TerminusDB checkout. "
-                    "Choose another directory."
-                )
+        # Multiple server workers may construct the provider concurrently.
+        with FileLock(str(home.parent / "terminusdb-start.lock"), timeout=120):
+            if self._is_terminusdb_running():
+                return
+            if not shutil.which("docker"):
+                if not shutil.which("docker"):
+                    raise RuntimeError(
+                        "Docker is not installed or not in PATH. "
+                        "Install Docker to use the default setup, or install TerminusDB "
+                        "from source code following https://terminusdb.com/docs/install-terminusdb-from-source-code/ "
+                        "and make sure the `terminusdb` binary is available in PATH."
+                    )
+            if not shutil.which("git"):
+                raise RuntimeError("Git is not installed or not in PATH")
             subprocess.run(
-                ["git", "clone", "--depth", "1", repo_url, str(home)],
+                ["docker", "compose", "version"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            if not (home / ".git").exists():
+                if home.exists() and any(home.iterdir()):
+                    raise RuntimeError(
+                        f"{home} exists but is not a TerminusDB checkout"
+                    )
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", repo_url, str(home)],
+                    check=True,
+                )
+
+            compose_env = os.environ.copy()
+            compose_env.update(
+                {
+                    "TERMINUSDB_SERVER_DB_PATH": str(self._path.resolve()),
+                    "TERMINUSDB_SERVER_PORT": str(parsed.port or 6363),
+                    "TERMINUSDB_ADMIN_PASS": self._password,
+                }
+            )
+            subprocess.run(
+                ["docker", "compose", "up", "-d"],
+                cwd=home,
+                env=compose_env,
                 check=True,
             )
-
-        # 3. Create credentials if this is a new installation.
-        env_file = home / ".env"
-        if not env_file.exists():
-            port = self._dsn.split(":")[-1]
-            fd = os.open(
-                env_file,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-            with os.fdopen(fd, "w") as f:
-                f.write(f"TERMINUSDB_SERVER_DB_PATH={str(self._path)}\n")
-                f.write(f"TERMINUSDB_SERVER_PORT={port}\n")
-
-        # 4. Start in the background. Compose's storage directories
-        #    are relative to the checkout directory.
-        subprocess.run(
-            ["docker", "compose", "up", "-d"],
-            cwd=home,
-            check=True,
-        )
-        
-        # Wait for TerminusDB to become available (up to 60 seconds).
-        timeout = 60
-        interval = 2
-        deadline = time.monotonic() + timeout
-
-        while time.monotonic() < deadline:
-            if self._is_terminusdb_running():
-                print(f"TerminusDB is ready at {self._dsn}")
-                break
-            time.sleep(interval)
-        else:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                if self._is_terminusdb_running():
+                    _log.info("terminusdb_ready", extra={"dsn": self._dsn})
+                    self._terminusdb_docker_home = home
+                    return
+                time.sleep(2)
             raise RuntimeError(
-                f"TerminusDB failed to become ready within {timeout} seconds "
-                f"at {self._dsn}. Check the Docker logs with "
-                f"'docker compose -f {home / 'docker-compose.yml'} logs'."
+                f"TerminusDB failed to become ready within 60 seconds at {self._dsn}. "
+                f"Run 'cd {home} && docker compose logs' for details."
             )
 
     def _get_client(self):
@@ -167,7 +190,7 @@ class TerminusDBGraphStore:
         except Exception as e:
             raise RuntimeError(
                 f"TerminusDB connection failed: "
-                f"dsn={self._dsn}, password={self._password}, "
+                f"dsn={self._dsn}, "
                 f"error_type={type(e).__name__}, "
                 f"error={e}"
             ) from e
@@ -186,6 +209,7 @@ class TerminusDBGraphStore:
             user=self._team,
             key=self._password,
             server_url=self._dsn,
+            branch=self._branch,
         )
         return client
     
@@ -288,16 +312,16 @@ class TerminusDBGraphStore:
         return False
     
     async def aclose(self) -> None:
-        """Stop TerminusDB only if this instance started it."""
-        if not self._is_terminusdb_running() or not self._terminusdb_home:
+        """Release this store without stopping the shared database service."""
+        if not self._is_terminusdb_running() or not self._terminusdb_docker_home:
             # manually close
             return
-
+        
         process = await asyncio.create_subprocess_exec(
             "docker",
             "compose",
             "stop",
-            cwd=self._terminusdb_home,
+            cwd=self._terminusdb_docker_home,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -327,7 +351,7 @@ class TerminusDBGraphStore:
         to_replace = []
         for doc in documents:
             doc_id = doc["@id"]
-            if not self._has_doc(doc):
+            if not self._has_doc(doc_id):
                 to_insert.append(doc)
                 continue
             existing = self._client.get_document(doc_id)
@@ -566,12 +590,10 @@ class TerminusDBGraphStore:
             subject = doc.get("subject")
             obj = doc.get("object")
 
-            if subject:
-                if self._validate_key(subject, key, value):
-                    connected_node_ids.add(subject.get("@id"))
-            if obj:
-                if self._validate_key(obj, key, value):
-                    connected_node_ids.add(obj.get("@id"))
+            if isinstance(subject, dict) and subject.get("@id"):
+                connected_node_ids.add(subject["@id"])
+            if isinstance(obj, dict) and obj.get("@id"):
+                connected_node_ids.add(obj["@id"])
 
         orphaned_node_ids = sorted(
             node_id
@@ -660,10 +682,12 @@ class TerminusDBGraphStore:
             previous_triples,
             triples,
         )
-        await self._delete_triples(removed, key="profile")
         changed = [*added, *updated]
         if changed:
             await self.upsert_triples(changed)
+        # Add replacement edges before orphan cleanup so nodes shared by an
+        # old and a new edge are never deleted between the two operations.
+        await self._delete_triples(removed, key="profile")
 
         return self.get_triples_info(added, updated, removed)
         
@@ -676,10 +700,12 @@ class TerminusDBGraphStore:
             previous_triples,
             triples,
         )
-        await self._delete_triples(removed, key="source", value=source)
         changed = [*added, *updated]
         if changed:
             await self.upsert_triples(changed)
+        # A replacement edge may retain one endpoint from the removed edge.
+        # Insert it first so source-scoped orphan cleanup keeps that node.
+        await self._delete_triples(removed, key="source", value=source)
         
         return self.get_triples_info(added, updated, removed)
         
@@ -713,10 +739,12 @@ class TerminusDBGraphStore:
             previous_triples,
             triples,
         )
-        await self._delete_triples(removed, key="lineage", value=root)
         changed = [*added, *updated]
         if changed:
             await self.upsert_triples(changed)
+        # Lineage revisions commonly retain workspace/file endpoints. Insert
+        # replacements before orphan cleanup so those shared nodes survive.
+        await self._delete_triples(removed, key="lineage", value=root)
             
         return self.get_triples_info(added, updated, removed)
     
@@ -797,12 +825,24 @@ class TerminusDBGraphStore:
     def _documents_at_version(self, version: str | None) -> list[dict]:
         """Read instance documents from HEAD or an immutable commit."""
         with self._state_lock:
-            previous_ref = self._client.ref
-            try:
-                self._client.ref = version
-                return self._client.get_all_documents(as_list=True)
-            finally:
-                self._client.ref = previous_ref
+            if version is not None:
+                # get_all_documents silently ignores commit=...; select the
+                # immutable commit through the client's ref URL instead.
+                client = self._client
+                # Workspace-pinned stores are already connected to their
+                # durable dm_build_<revision> branch.  In that path the
+                # version is only metadata; reading branch HEAD avoids
+                # resolving a commit against the wrong ref.
+                if client.branch and client.branch.startswith("dm_build_"):
+                    return client.get_all_documents(as_list=True)
+                previous_ref = client.ref
+                try:
+                    client.ref = str(version)
+                    return client.get_all_documents(as_list=True)
+                finally:
+                    client.ref = previous_ref
+            return self._client.get_all_documents(as_list=True)
+      
 
     @staticmethod
     def _entity_id(document_id: str) -> str:
@@ -1082,7 +1122,40 @@ class TerminusDBGraphStore:
                     "WHERE database = ? ORDER BY rowid",
                     (self._db,),
                 )
-            ]     
+            ]   
+    
+    async def schema(self, version: str | None = None) -> dict[str, Any]:
+        """Return observed graph vocabulary from TerminusDB instance documents."""
+        from collections import Counter
+
+        def _schema_sync():
+            with self._state_lock:
+                documents = self._documents_at_version(version)
+
+                types = Counter()
+                relations = Counter()
+
+                for doc in documents:
+                    if not isinstance(doc, dict):
+                        continue
+
+                    doc_type = doc.get("@type")
+
+                    if doc_type != "GraphEdge":
+                        types[doc_type or "entity"] += 1
+                    else:
+                        relations[doc.get("relation", "related")] += 1
+
+                return {
+                    "node_types": dict(sorted(types.items())),
+                    "relations": dict(sorted(relations.items())),
+                    "extensible": True,
+                    "nodes": sum(types.values()),
+                    "edges": sum(relations.values()),
+                }
+
+        return await asyncio.to_thread(_schema_sync)
+     
     # -------------------------------------------------------------- helpers
 
     @staticmethod
@@ -1099,31 +1172,29 @@ class TerminusDBGraphStore:
             },
         )
 
-    def stats(self) -> dict[str, int]:
-        """Return the number of graph nodes and edges in TerminusDB."""
+    def stats(self, version: str | None = None) -> dict[str, int]:
+        """Return the number of graph nodes and edges at a specific version."""
         with self._state_lock:
-            edge_docs = self._client.get_documents_by_type(
-                "GraphEdge",
-                as_list=True,
-            )
+            documents = self._documents_at_version(version)
 
             node_ids: set[str] = set()
             edge_count = 0
 
-            for doc in edge_docs:
+            for doc in documents:
                 if not isinstance(doc, dict):
+                    continue
+
+                if doc.get("@type") != "GraphEdge":
                     continue
 
                 subject = doc.get("subject")
                 obj = doc.get("object")
 
-                # TerminusDB may return references as {"@id": "..."}.
                 if isinstance(subject, dict):
                     subject = subject.get("@id")
                 if isinstance(obj, dict):
                     obj = obj.get("@id")
 
-                # Count only valid graph edges.
                 if not isinstance(subject, str) or not subject:
                     continue
                 if not isinstance(obj, str) or not obj:

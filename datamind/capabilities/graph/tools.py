@@ -93,7 +93,7 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
         return await graph.upsert(triples)
 
     async def _schema():
-        return graph.store.schema()
+        return await graph.store.schema()
 
     async def _list_versions():
         return await graph.list_versions()

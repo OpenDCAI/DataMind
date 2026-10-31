@@ -15,6 +15,7 @@ import signal
 import time
 import socket
 import subprocess
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from filelock import AsyncFileLock
@@ -22,6 +23,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from datamind.core.errors import CapabilityError
 from datamind.capabilities.db.providers.dolt import DoltDialect
+from datamind.capabilities.graph.providers.terminusdb_store import TerminusDBGraphStore
 
 
 async def completed(awaitable):
@@ -485,4 +487,185 @@ async def prune_native(workspace, manifests, *, compact=False):
             "retained_versions": sorted(versions),
             "physical_gc_pending": not compact,
         }
+    graph_bindings = [
+        m.get("snapshots", {}).get("graph", {})
+        for m in manifests
+        if m.get("format_version") == 2
+    ]
+    graph_bindings = [b for b in graph_bindings if b.get("provider") == "terminusdb"]
+    graph_path = workspace.root / "shared" / "terminusdb"
+    if graph_path.is_dir() and graph_bindings:
+        # Older manifests do not contain the branch name. Keep all branches
+        # until those revisions are migrated, rather than deleting blindly.
+        unknown = any("revision" not in binding for binding in graph_bindings)
+        retained = {
+            "dm_build_" + str(binding["revision"]).removeprefix("revision-")
+            for binding in graph_bindings
+            if binding.get("revision") is not None
+        }
+        repo = TerminusDBRepository(workspace)
+        removed = []
+        async with repo.session() as store:
+            branches = await blocking(store._client.get_all_branches)
+            for item in branches:
+                name = item.get("name")
+                if (
+                    not isinstance(name, str)
+                    or not name.startswith("dm_build_")
+                    or unknown
+                    or name in retained
+                ):
+                    continue
+                await blocking(store._client.delete_branch, name)
+                removed.append(name)
+        report["graph"] = {
+            "retained_branches": sorted(retained),
+            "removed_branches": sorted(removed),
+            "physical_gc_pending": True,
+        }
     return report
+
+
+class TerminusDBRepository:
+    def __init__(self, workspace):
+        self.workspace = workspace
+        self.path = workspace.root / "shared" / "terminusdb"
+        self.path.mkdir(parents=True, exist_ok=True)
+
+    def _revision_branch(self, revision: str) -> str:
+        return f"dm_build_{revision.removeprefix('revision-')}"
+
+    def _new_store(self, branch=None):
+        kwargs = {
+            "dsn": self.workspace.settings.graph.dsn,
+            "password": self.workspace.settings.graph.password,
+            "persist_path": self.path,
+        }
+        if branch is not None:
+            kwargs["branch"] = branch
+        return TerminusDBGraphStore(**kwargs)
+
+    @asynccontextmanager
+    async def session(self, revision=None):
+        async with AsyncFileLock(
+            str(self.workspace.root / "terminusdb.lock"),
+            timeout=self.workspace.settings.workspace.lock_timeout_s,
+        ):
+            store = None
+            try:
+                branch = self._revision_branch(revision) if revision is not None else None
+                # Client construction performs HTTP requests, schema checks and
+                # possibly process startup; never block the event loop on it.
+                store = await blocking(self._new_store, branch)
+                yield store
+            finally:
+                # TerminusDB is shared by repository sessions.  The provider's
+                # ``aclose`` stops a managed server, so calling it here would
+                # tear down the server after every query and force a restart on
+                # the next one.  Server lifetime is managed by the application.
+                pass
+
+    async def create_revision_branch(
+        self,
+        branch: str,
+    ):
+        async with self.session() as store:
+            client = store._client
+
+            branches = await blocking(client.get_all_branches)
+            existing = {
+                item["name"] for item in branches
+            }
+
+            if branch not in existing:
+                await blocking(client.create_branch, branch)
+    
+    async def delete_revision_branch(self, branch: str):
+        async with self.session() as store:
+            client = store._client
+
+            branches = await blocking(client.get_all_branches)
+            existing = {
+                item["name"] for item in branches
+            }
+
+            if branch in existing:
+                await blocking(client.delete_branch, branch)
+                 
+    async def build(self, root, prior, sources, source_graphs, lineage_graphs, revision):
+        branch = self._revision_branch(revision)
+        await self.create_revision_branch(branch)
+        try:
+            async with self.session(revision) as store:
+                current_uris = {item["uri"] for item in sources}
+                previous_uris = set(prior)
+                changes = []
+                for item in sources:
+                    changes.append(await store.reconcile_source_triples(
+                        item["uri"], source_graphs.get(item["uri"], [])
+                    ))
+                for uri in previous_uris - current_uris:
+                    changes.append(await store.reconcile_source_triples(uri, []))
+                changes.append(await store.reconcile_lineage_triples(str(root), lineage_graphs))
+                await store.add_version({"kind": "workspace", "workspace_revision": revision,
+                                        "lineage_artifact": None, "changes": changes})
+                
+                version = store._get_latest_version()
+                
+                if not version:
+                    raise RuntimeError(
+                        f"TerminusDB commit not found for revision {revision}"
+                    )
+
+                return version
+        except BaseException:
+            # A successful commit must remain reachable through its revision
+            # branch so pinned reads can resolve it later.  Remove only failed
+            # staging branches; retention/GC owns successful branch cleanup.
+            await self.delete_revision_branch(branch)
+            raise
+        
+class PinnedTerminusGraph:
+    """Read-only GraphStore view pinned to one immutable TerminusDB commit."""
+
+    def __init__(self, workspace, version, revision=None):
+        self.repository = TerminusDBRepository(workspace)
+        self._version = version
+        self._revision = revision
+
+    def _session(self):
+        return self.repository.session(self._revision)
+
+    async def _documents(self):
+        async with self._session() as store:
+            return store._documents_at_version(self._version)
+
+    async def search_entities(self, query, *, top_k=5):
+        async with self._session() as store:
+            return await store.search_entities(query, top_k=top_k, version=self._version)
+
+    async def neighbors(self, entity, *, direction="both", relation_filter=None, limit=100):
+        async with self._session() as store:
+            return await store.neighbors(
+                entity, direction=direction, relation_filter=relation_filter,
+                limit=limit, version=self._version,
+            )
+
+    async def traverse(self, start, *, max_hops=2, relation_filter=None, max_results=100):
+        async with self._session() as store:
+            return await store.traverse(
+                start, max_hops=max_hops, relation_filter=relation_filter,
+                max_results=max_results, version=self._version,
+            )
+
+    async def stats(self):
+        async with self._session() as store:
+            return await store.stats(version=self._version)
+
+    async def schema(self):
+        async with self._session() as store:
+            return await store.schema(version=self._version)
+        
+    async def aclose(self):
+        pass
+
