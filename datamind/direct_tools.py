@@ -204,12 +204,12 @@ def graph_source_tools(ingest):
             triple.evidence = [GraphEvidence(source_id='file:' + hashlib.sha256(str(source).encode()).hexdigest(),
                 source_version=version, locator={'uri': str(evidence_path), 'original_uri': str(source)},
                 method='extracted', pipeline_version='codex-explicit-v1')]
-        await ingest._commit_graph_source(str(source), parsed)
+        await ingest._commit_graph_source(str(source), parsed, version_info=True)
         return {'source': str(source), 'source_version': version, 'triples_added': len(parsed)}
 
     async def forget_source(path):
         source = _resolve_safe_path(path, ingest._allowed_roots)
-        await ingest._commit_graph_source(str(source), [])
+        await ingest._commit_graph_source(str(source), [], version_info=True)
         return {'source': str(source), 'retracted': True, 'source_file_deleted': False}
 
     return [

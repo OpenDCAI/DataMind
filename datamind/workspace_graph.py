@@ -10,7 +10,6 @@ from contextlib import closing
 from pathlib import Path
 from datamind.core.protocols import Edge, Entity, GraphPath, GraphTriple
 
-
 def connect(root):
     db = sqlite3.connect(Path(root) / "graph.sqlite3", timeout=30)
     db.execute("PRAGMA journal_mode=WAL")
@@ -71,6 +70,7 @@ def prune_graph(root, manifests, *, compact=False):
         for s in m["sources"]
         if s.get("graph_artifact")
     }
+    keep.update(m.get("lineage_artifact") for m in manifests if m.get("lineage_artifact"))
     with closing(connect(root)) as db, db:
         for (key,) in db.execute("SELECT id FROM artifacts").fetchall():
             if key not in keep:
@@ -111,7 +111,7 @@ class GraphView:
             ).fetchone()[0],
         }
 
-    def schema(self):
+    async def schema(self):
         stats = self.stats()
         types = Counter(typ for _, typ in self._nodes())
         relations = dict(

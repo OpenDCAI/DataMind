@@ -200,15 +200,18 @@ async def update_incremental(
     relation_types,
     max_triples_per_file,
     metrics,
-    graph_sources,
+    graph_sources=None,
     table_mappings=None,
 ):
     from datamind.workspace import _atomic_json
+    from datamind.capabilities.ingest.lineage import LineageFile, build_lineage_triples
     from datamind.workspace_graph import put_graph
-    from datamind.workspace_native import DoltRepository
+    from datamind.workspace_native import DoltRepository, TerminusDBRepository
 
     selected = set(surfaces)
     cfg = workspace.settings
+    terminus_graph = "graph" in selected and cfg.graph.backend == "terminusdb"
+    auto_graph_extraction = terminus_graph and graph_sources is None
     if not selected or not selected <= {"kb", "graph", "db"}:
         raise ConfigError("Invalid workspace surfaces")
     if not 1 <= max_triples_per_file <= 10000:
@@ -221,8 +224,11 @@ async def update_incremental(
         raise ConfigError(
             "Incremental Workspace DB requires local Dolt without an external DSN"
         )
-    if "graph" in selected and graph_sources is None:
-        raise ConfigError("Incremental Workspace requires Codex-prepared graph_sources")
+    if "graph" in selected and graph_sources is None and not auto_graph_extraction:
+        raise ConfigError(
+            "Incremental Workspace requires Codex-prepared graph_sources "
+            "or automatic graph extraction"
+        )
     source = Path(path).expanduser().resolve()
     started = time.monotonic()
     inventory = await blocking(workspace._inventory, source)
@@ -301,7 +307,7 @@ async def update_incremental(
             "triples": [t.model_dump(mode="json") for t in triples],
             "truncated": bool(entry.get("truncated")),
         }
-    if "graph" in selected:
+    if "graph" in selected and not auto_graph_extraction:
         for uri, item in docs.items():
             if uri not in assertions:
                 before = prior.get(uri)
@@ -314,6 +320,35 @@ async def update_incremental(
                         "Supply graph assertions for every new or changed document, including empty lists"
                     )
                 # Unchanged assertions are immutable and reused, not re-extracted.
+    if auto_graph_extraction:
+        try:
+            system = await workspace._system(cfg, {"graph"})
+            ingest = system.services.ingest
+            for uri, item in docs.items():
+                before = prior.get(uri)
+                if (
+                    before is None
+                    or before["version"] != item["version"]
+                    or not before.get("graph_triples")
+                ):
+                    results = await ingest.graph_add_path(
+                        path=uri, recursive=False, max_triples_per_file=max_triples_per_file,
+                        relation_types=relation_types, commit=False
+                    )
+                    file_result = results["files"][0]
+                    triples = file_result.get("triples", [])
+                    for triple in triples:
+                        for evidence in triple.get("evidence", []):
+                            evidence["pipeline_version"] = "legacy-model"
+                            evidence["method"] = "extracted"
+
+                    assertions[uri] = {
+                        "triples": triples,
+                        "truncated": bool(file_result.get("truncated")),
+                    }
+        finally:
+            await system.aclose()
+            system = None
     context = current_context()
     skills = list(context.extra.get("applied_skills", {}).values()) if context else []
     recipe = {
@@ -348,6 +383,7 @@ async def update_incremental(
         embedding = None
         sources = []
         bindings = {}
+        source_graphs = {}
         all_chunks = {}
         tables = {}
         try:
@@ -433,10 +469,16 @@ async def update_incremental(
                     elif item["uri"] in getattr(workspace, "_migration_prepared", {}):
                         prepared = dict(workspace._migration_prepared[item["uri"]])
                         if "graph" in selected:
-                            prepared["graph_artifact"] = put_graph(
-                                workspace.root,
-                                assertion["triples"] if assertion else [],
-                            )
+                            if not terminus_graph:
+                                prepared["graph_artifact"] = put_graph(
+                                    workspace.root,
+                                    assertion["triples"] if assertion else [],
+                                )
+                            else:
+                                prepared["graph_triples"] = assertion["triples"] if assertion else []
+                                prepared["graph_artifact"] = None
+                                
+                            prepared["truncated"] = assertion["truncated"] if assertion else False
                         artifact = workspace.root / save_artifact(
                             workspace.root, key, prepared
                         )
@@ -445,6 +487,7 @@ async def update_incremental(
                         prepared = {
                             "chunks": [],
                             "tables": [],
+                            "graph_triples": [],
                             "graph_artifact": None,
                             "truncated": False,
                         }
@@ -524,17 +567,21 @@ async def update_incremental(
                                 for i, part in enumerate(parts)
                             ]
                         if "graph" in selected:
-                            if assertion is not None:
-                                prepared["graph_artifact"] = put_graph(
-                                    workspace.root, assertion["triples"]
-                                )
-                                prepared["truncated"] = assertion["truncated"]
-                            elif graph_ref:
-                                prepared["graph_artifact"] = graph_ref
+                            if not terminus_graph:
+                                if assertion is not None:
+                                    prepared["graph_artifact"] = put_graph(
+                                        workspace.root, assertion["triples"]
+                                    )
+                                    prepared["truncated"] = assertion["truncated"]
+                                elif graph_ref:
+                                    prepared["graph_artifact"] = graph_ref
+                                else:
+                                    prepared["graph_artifact"] = put_graph(
+                                        workspace.root, []
+                                    )
                             else:
-                                prepared["graph_artifact"] = put_graph(
-                                    workspace.root, []
-                                )
+                                prepared["graph_triples"] = assertion["triples"]
+                                prepared["truncated"] = assertion["truncated"]
                         if "db" in selected and suffix in TABLE_EXTS:
                             previous = prior.get(item["uri"], {})
                             old_tables = []
@@ -565,6 +612,10 @@ async def update_incremental(
                     "truncated": prepared["truncated"],
                 }
                 sources.append(source_entry)
+                if terminus_graph:
+                    source_graphs[item["uri"]] = [
+                        GraphTriple(**value) for value in prepared.get("graph_triples", [])
+                    ]
                 all_chunks.update((c["id"], c) for c in prepared["chunks"])
                 tables.update((t["name"], t) for t in prepared["tables"])
                 metrics["sources_completed"] += 1
@@ -573,7 +624,6 @@ async def update_incremental(
                 from datamind.capabilities.kb.providers.lancedb_store import (
                     LanceDBVectorStore,
                 )
-
                 kb_key = digest(
                     encoded(
                         [
@@ -672,10 +722,39 @@ async def update_incremental(
                     + len(before.keys() - hashes.keys())
                 )
             if "graph" in selected:
-                bindings["graph"] = {
-                    "provider": "sqlite-source-graph",
-                    "path": "graph.sqlite3",
-                }
+                lineage = build_lineage_triples(root=source, files=[
+                    LineageFile(
+                        uri=item["uri"], relative_path=item["relative_path"],
+                        version=item["version"],
+                        content_path=workspace.root / item["snapshot"],
+                    )
+                    for item in sources
+                ])
+
+                lineage_artifact = None if terminus_graph else put_graph(
+                    workspace.root, [t.model_dump(mode="json") for t in lineage]
+                )
+                lineage_version = "sha256:" + digest(encoded([
+                    (t.subject, t.relation, t.object) for t in lineage
+                ]))
+                if terminus_graph:
+                    version = await TerminusDBRepository(workspace).build(
+                        root=source, prior=prior, sources=sources,
+                        source_graphs=source_graphs, lineage_graphs=lineage, 
+                        revision=revision
+                    )
+                    bindings["graph"] = {
+                        "provider": "terminusdb", "version": version,
+                        "revision": revision,
+                        "lineage_version": lineage_version
+                    }
+                else:
+                    bindings["graph"] = {
+                        "provider": "sqlite-source-graph",
+                        "path": "graph.sqlite3",
+                        "lineage_artifact": lineage_artifact,
+                        "lineage_version": lineage_version
+                    }
             metrics["materialization_ms"] += (time.monotonic() - start) * 1000
             if await blocking(workspace._inventory, source) != inventory:
                 raise CapabilityError(
@@ -691,6 +770,10 @@ async def update_incremental(
                 "pipeline_hash": pipeline,
                 "sources": sources,
                 "snapshots": bindings,
+                "lineage_artifact": lineage_artifact if "graph" in selected else None,
+                "lineage_version": (
+                    lineage_version if "graph" in selected else None
+                ),
                 "reused_sources": metrics["sources_reused"],
                 "applied_skills": skills,
                 "truncated_sources": [s["uri"] for s in sources if s["truncated"]],
@@ -710,7 +793,7 @@ async def update_incremental(
                     "UPDATE revisions SET state='PUBLISHED' WHERE id=?", (revision,)
                 )
                 db.execute(
-                    "UPDATE head SET revision=?,epoch=epoch+1 WHERE singleton=1",
+                    "UPDATE head SET revision=?,epoch=epoch+1,dirty=0,detached=0 WHERE singleton=1",
                     (revision,),
                 )
             metrics["publication_ms"] = (time.monotonic() - start) * 1000
@@ -735,7 +818,7 @@ async def reader_system(workspace, manifest, selected):
     from datamind.capabilities.kb.providers.lancedb_store import LanceDBVectorStore
     from datamind.core.registry import retriever_registry
     from datamind.core.contracts import ToolAccess
-    from datamind.workspace_native import PinnedVectors, PinnedDB
+    from datamind.workspace_native import PinnedVectors, PinnedDB, PinnedTerminusGraph
     from datamind.workspace_graph import GraphView
     from datamind import runtime
 
@@ -802,18 +885,30 @@ async def reader_system(workspace, manifest, selected):
                 [s for s in build_kb_tools(kb) if s.access != ToolAccess.WRITE]
             )
         if "graph" in selected:
-            graph = GraphService(
-                store=GraphView(
-                    workspace.root,
-                    {
-                        s["graph_artifact"]
-                        for s in manifest["sources"]
-                        if s.get("graph_artifact")
-                    },
-                ),
-                data_dir=settings.data.data_dir,
-                storage_dir=workspace.root,
-            )
+            binding = manifest["snapshots"]["graph"]
+            if binding["provider"] == "terminusdb":
+                graph = GraphService(
+                    store=PinnedTerminusGraph(
+                        workspace, binding["version"], binding.get("revision")
+                    ),
+                    data_dir=settings.data.data_dir,
+                    storage_dir=workspace.root,
+                )
+            else:
+                artifacts = {
+                    s["graph_artifact"]
+                    for s in manifest["sources"]
+                    if s.get("graph_artifact")
+                }
+                lineage_artifact = binding.get("lineage_artifact") or manifest.get("lineage_artifact")
+                if lineage_artifact:
+                    artifacts.add(lineage_artifact)
+                store = GraphView(workspace.root, artifacts)
+                graph = GraphService(
+                    store=store,
+                    data_dir=settings.data.data_dir,
+                    storage_dir=workspace.root,
+                )
             system.services.graph = graph
             system.tools.extend(
                 [s for s in build_graph_tools(graph) if s.access != ToolAccess.WRITE]

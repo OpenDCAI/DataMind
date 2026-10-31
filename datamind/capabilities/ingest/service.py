@@ -52,6 +52,7 @@ from datamind.core.logging import get_logger
 from datamind.core.protocols import GraphEvidence, GraphTriple, TextModelClient
 
 from .formats import DOCUMENT_EXTS, TABLE_EXTS, extract_document, extract_tabular
+from .lineage import LineageFile, build_lineage_triples
 
 _log = get_logger("ingest")
 
@@ -75,13 +76,7 @@ _WORKSPACE_SURFACE_EXTS: dict[str, tuple[str, ...]] = {
     ".pptx": ("kb", "graph_text"),
 }
 
-_LINEAGE_TEXT_EXTS = {".txt", ".md", ".markdown", ".html", ".json", ".xml", ".py", ".java"}
-_LINEAGE_TABLE_EXTS = {".csv", ".tsv"}
 _GRAPH_DOCUMENT_EXTS = DOCUMENT_EXTS - TABLE_EXTS
-_LINEAGE_VERSION_MARKER_RE = re.compile(
-    r"[ _\-]*(v\d+|final|draft|copy|revised|updated|old|new|\(\d+\)|\d{4}[-_]\d{2}[-_]\d{2})$",
-    re.IGNORECASE,
-)
 
 
 def _infer_table_name(stem: str) -> str:
@@ -310,126 +305,16 @@ class IngestService:
             }
 
         root = str(resolved if resolved.is_dir() else resolved.parent)
-        root_id = _hash(root, "lineage")[:12]
-        workspace_node = f"workspace::{root_id}"
-        file_nodes: dict[str, str] = {}
-        file_text: dict[str, str] = {}
-        file_columns: dict[str, set[str]] = {}
-        for item in files:
-            candidate = Path(item["path"])
-            rel = item.get("relative_path") or candidate.name
-            node = f"file::{root_id}::{rel}"
-            file_nodes[str(candidate)] = node
-            suffix = item.get("extension", "")
-            if suffix in _LINEAGE_TEXT_EXTS:
-                try:
-                    file_text[str(candidate)] = candidate.read_text(
-                        encoding="utf-8", errors="replace"
-                    )[:200_000]
-                except OSError:
-                    pass
-            if suffix in _LINEAGE_TABLE_EXTS:
-                try:
-                    delimiter = "\t" if suffix == ".tsv" else ","
-                    with candidate.open("r", encoding="utf-8", errors="replace", newline="") as handle:
-                        header = next(csv.reader(handle, delimiter=delimiter), [])
-                    file_columns[str(candidate)] = {
-                        re.sub(r"[^a-z0-9]+", "_", col.strip().lower()).strip("_")
-                        for col in header if col.strip()
-                    }
-                except (OSError, StopIteration):
-                    pass
-
-        triples: list[GraphTriple] = []
-        properties_base = {"_lineage_root": root, "_source_managed": True}
-        for item in files:
-            candidate = Path(item["path"])
-            node = file_nodes[str(candidate)]
-            triples.append(GraphTriple(
-                subject=workspace_node,
-                relation="contains",
-                object=node,
-                source=root,
-                properties={**properties_base, "source_file": str(candidate), "sha256": item.get("sha256")},
-            ))
-
-        # Mentions: a text file explicitly names another file in the same workspace.
-        for source_path, text_content in file_text.items():
-            source_node = file_nodes[source_path]
-            for target_path, target_node in file_nodes.items():
-                if source_path == target_path:
-                    continue
-                target_name = Path(target_path).name
-                if target_name and target_name in text_content:
-                    triples.append(GraphTriple(
-                        subject=source_node, relation="mentions", object=target_node,
-                        source=root,
-                        properties={**properties_base, "source_file": source_path},
-                    ))
-
-        table_items = list(file_columns.items())
-        for index, (left_path, left_cols) in enumerate(table_items):
-            for right_path, right_cols in table_items[index + 1:]:
-                union = left_cols | right_cols
-                if not union:
-                    continue
-                jaccard = len(left_cols & right_cols) / len(union)
-                if jaccard >= 0.5:
-                    triples.append(GraphTriple(
-                        subject=file_nodes[left_path], relation="schema_overlap",
-                        object=file_nodes[right_path], source=root,
-                        properties={**properties_base, "source_file": left_path, "jaccard": round(jaccard, 3)},
-                    ))
-
-        paths = list(file_nodes.items())
-        for index, (left_path, left_node) in enumerate(paths):
-            left_stem = _LINEAGE_VERSION_MARKER_RE.sub(
-                "", Path(left_path).stem
-            ).strip().lower()
-            for right_path, right_node in paths[index + 1:]:
-                if left_stem and left_stem == _LINEAGE_VERSION_MARKER_RE.sub(
-                    "", Path(right_path).stem
-                ).strip().lower() and Path(left_path).name != Path(right_path).name:
-                    triples.append(GraphTriple(
-                        subject=left_node, relation="version_of", object=right_node,
-                        source=root,
-                        properties={**properties_base, "source_file": left_path},
-                    ))
-
-        by_hash: dict[str, list[str]] = {}
-        for item in files:
-            digest = item.get("sha256")
-            if digest:
-                by_hash.setdefault(str(digest), []).append(str(item["path"]))
-        for digest, members in by_hash.items():
-            if len(members) < 2:
-                continue
-            for index, left_path in enumerate(members):
-                for right_path in members[index + 1:]:
-                    triples.append(GraphTriple(
-                        subject=file_nodes[left_path], relation="shared_artifact",
-                        object=file_nodes[right_path], source=root,
-                        properties={**properties_base, "source_file": left_path, "sha256": digest},
-                    ))
-
-        # Explicit file dependencies use workspace-relative paths and are never inferred.
-        for edge in dependencies or []:
-            if edge.get("relation", "depends_on") != "depends_on":
-                raise CapabilityError("ingest", "explicit file dependencies only support depends_on")
-            endpoints = []
-            for field in ("source", "target"):
-                value = edge.get(field)
-                if not value:
-                    raise CapabilityError("ingest", f"dependency {field} is required")
-                endpoint = str((Path(root) / value).resolve())
-                if endpoint not in file_nodes:
-                    raise CapabilityError("ingest", f"dependency file not in inventory: {value}")
-                endpoints.append(endpoint)
-            triples.append(GraphTriple(
-                subject=file_nodes[endpoints[0]], relation="depends_on",
-                object=file_nodes[endpoints[1]], source=root,
-                properties={**properties_base, "source_file": endpoints[0], "evidence": "explicit"},
-            ))
+        lineage_files = [LineageFile(
+            uri=str(Path(item["path"])),
+            relative_path=item.get("relative_path") or Path(item["path"]).name,
+            version=str(item.get("sha256") or ""),
+            content_path=Path(item["path"]),
+        ) for item in files]
+        triples = build_lineage_triples(
+            root=root, files=lineage_files, dependencies=dependencies,
+        )
+        workspace_node = next((t.subject for t in triples if t.relation == "contains"), None)
 
         reconcile = getattr(self._graph.store, "reconcile_lineage_triples", None)
         if callable(reconcile):
@@ -441,6 +326,21 @@ class IngestService:
             result = persist()
             if hasattr(result, "__await__"):
                 await result
+
+        add_version = getattr(self._graph.store, "add_version", None)
+        if callable(add_version):
+            lineage_version = hashlib.sha256(
+                json.dumps(
+                    [(t.subject, t.relation, t.object) for t in triples],
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            await add_version({
+                "kind": "lineage", "root": root,
+                "version": f"sha256:{lineage_version}",
+                "files": len(files), "edges": len(triples),
+            })
+
         return {
             "path": str(resolved),
             "workspace_node": workspace_node,
@@ -1023,7 +923,7 @@ class IngestService:
             "chunks_deleted": len(delete_ids),
             "version": version_info.get("version") if version_info else None,
             "msg": version_info.get("msg") if version_info else None,
-            "delete_parsed_chunks": parsed_chunks
+            "delete_parsed_chunks": parsed_chunks,
         }
 
     def _sync_prechunked_files(
@@ -1856,17 +1756,29 @@ class IngestService:
             triples.append(triple)
         return triples
 
-    async def _commit_graph_source(self, source: str | None, triples: list[GraphTriple]) -> None:
+    async def _commit_graph_source(self, source: str | None, triples: list[GraphTriple], version_info: bool = False) -> None:
+        """
+        Args:
+            version_info: Whether to record this update as a new graph version
+                when the store supports versioning.
+        """
+        
         reconcile = getattr(self._graph.store, "reconcile_source_triples", None)
         if source and callable(reconcile):
-            await reconcile(source, triples)
+            info = await reconcile(source, triples)
         else:
-            await self._graph.store.upsert_triples(triples)
+            info = await self._graph.store.upsert_triples(triples)
         persist = getattr(self._graph.store, "persist", None)
         if callable(persist):
             result = persist()
             if hasattr(result, "__await__"):
                 await result
+        
+        if version_info:
+            add_version = getattr(self._graph.store, "add_version", None)
+            if add_version and callable(add_version):
+                await add_version(info)
+        return info or {}
 
     async def graph_add_triples_from_text(
         self, *, text: str, max_triples: int = 30, source: str | None = None,
@@ -1884,13 +1796,14 @@ class IngestService:
             source_version=source_version,
             locator={"uri": str(evidence_path), "char_start": 0, "char_end": len(text)},
         )
-        await self._commit_graph_source(source, triples)
+        await self._commit_graph_source(source, triples, version_info=True)
+        
         return {"triples_added": len(triples), "source": source,
                 "samples": [t.model_dump(mode="json") for t in triples[:8]]}
 
     async def graph_add_path(
         self, *, path: str, recursive: bool = True, max_triples_per_file: int = 30,
-        relation_types: list[str] | None = None,
+        relation_types: list[str] | None = None, commit: bool = True,
     ) -> dict[str, Any]:
         """Replace each complete document revision, preserving other source supports.
 
@@ -1916,6 +1829,7 @@ class IngestService:
             raise CapabilityError("ingest", f"path does not exist: {resolved}")
 
         processed, skipped, removed = [], [], []
+        infos = {}
         for candidate in candidates:
             try:
                 candidate = _resolve_safe_path(str(candidate), self._allowed_roots)
@@ -1945,25 +1859,129 @@ class IngestService:
                     results.append({"source": part_source, "triples_added": len(extracted)})
                 if self._file_hash(candidate) != raw_version:
                     raise CapabilityError("ingest", "source changed during extraction; retry")
-                await self._commit_graph_source(str(candidate), triples)
+                info = await self._commit_graph_source(str(candidate), triples) if commit else {}
+                
                 processed.append({"path": str(candidate), "source": str(candidate),
                     "source_version": raw_version, "triples_added": len(triples),
                     "parts_processed": len(results), "parts": results,
-                    "truncated": len(results) < len(parts) or len(triples) >= max_triples_per_file})
+                    "truncated": len(results) < len(parts) or len(triples) >= max_triples_per_file,
+                    "triples": [triple.model_dump(mode="json") for triple in triples], **info})
+                
+                for key, value in info.items():
+                    if isinstance(value, (int, float)):
+                        infos[key] = infos.get(key, 0) + value
+                    elif isinstance(value, list):
+                        infos.setdefault(key, []).extend(value)
+                        
             except Exception as exc:
                 skipped.append(f"{candidate}: {type(exc).__name__}: {exc}")
 
         sources = getattr(self._graph.store, "source_paths", None)
-        if directory and callable(sources):
+        if commit and directory and callable(sources):
             for old_source in sorted(sources()):
                 old = Path(old_source)
                 if old.is_relative_to(resolved) and (recursive or old.parent == resolved) and not old.exists():
-                    await self._commit_graph_source(old_source, [])
+                    info = await self._commit_graph_source(old_source, [])
+                    for key, value in info.items():
+                        if isinstance(value, (int, float)):
+                            infos[key] = infos.get(key, 0) + value
+                        elif isinstance(value, list):
+                            infos.setdefault(key, []).extend(value)
                     removed.append(old_source)
+                    
+        add_version = getattr(self._graph.store, "add_version", None)
+        if commit and add_version and callable(add_version):
+            await add_version(infos)
         return {"path": str(resolved), "files_processed": len(processed),
-                "triples_added": sum(p["triples_added"] for p in processed), "files": processed,
-                "removed_sources": removed, "skipped": skipped[:20], "skipped_count": len(skipped)}
+                "triples_added": sum(p["triples_added"] for p in processed), 
+                "triples_deleted": sum(p.get("triples_deleted") or 0 for p in processed),
+                "files": processed, "removed_sources": removed, 
+                "skipped": skipped[:20], "skipped_count": len(skipped)}
+    
+    async def graph_delete_path(
+        self,
+        *,
+        path: str,
+        recursive: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Delete graph data associated with a file or directory and remove source files from disk.
 
+        The source files must not be deleted by the caller before invoking this method.
+        This method is responsible for coordinating graph cleanup and filesystem deletion.
+        """
+        
+        if self._graph is None:
+            raise CapabilityError("ingest", "Graph surface is disabled")
+        if not path or not path.strip():
+            raise CapabilityError("ingest", "path is required")
+        if getattr(self._graph.store, "name", None) != "terminusdb":
+            raise CapabilityError("ingest", "graph_delete_path is only supported by the TerminusDB graph backend")
+        
+        resolved = _resolve_safe_path(path, self._allowed_roots)
+        if resolved.is_file():
+            if resolved.suffix.lower() not in _GRAPH_DOCUMENT_EXTS:
+                raise CapabilityError(
+                    "ingest",
+                    f"unsupported extension '{resolved.suffix}'. Supported: {sorted(_GRAPH_DOCUMENT_EXTS)}",
+                )
+            candidates = [resolved]
+        elif resolved.is_dir():
+            iterator = resolved.rglob("*") if recursive else resolved.glob("*")
+            candidates = sorted(
+                item for item in iterator
+                if item.is_file() and item.suffix.lower() in _GRAPH_DOCUMENT_EXTS
+            )
+        else:
+            raise CapabilityError("ingest", f"path does not exist: {resolved}")
+
+        processed: list[dict[str, Any]] = []
+        skipped: list[str] = []
+        total = 0
+        for candidate in candidates:
+            try:
+                if candidate.suffix.lower() in _TEXT_EXTS:
+                    content = candidate.read_text(encoding="utf-8", errors="replace")
+                else:
+                    content = extract_document(candidate).text
+                if not content.strip():
+                    skipped.append(f"{candidate}: empty")
+                    candidate.unlink()
+                    continue
+                result = await self._graph.store.delete_from_source(
+                    source=str(candidate), key="source", value=str(candidate)
+                )
+                deleted = int(result.get("triples_deleted", 0))
+                total += deleted
+                
+                # Actually delete the source files from disk.
+                candidate.unlink()
+                processed.append({
+                    "path": str(candidate),
+                    "triples_deleted": deleted,
+                })
+            except Exception as exc:
+                _log.warning(
+                    "graph_delete_file_skipped",
+                    extra={"path": str(candidate), "error": str(exc)},
+                )
+                skipped.append(f"{candidate}: {type(exc).__name__}: {exc}")
+        
+        
+        result = {
+            "path": str(resolved),
+            "files_deleted": len(processed),
+            "triples_deleted": total,
+            "files": processed,
+            "skipped": skipped[:20],
+            "skipped_count": len(skipped),
+        }
+        add_version = getattr(self._graph.store, "add_version", None)
+        if add_version and callable(add_version):
+            await add_version(result)
+            
+        return result
+        
     @staticmethod
     def _parse_triples_json(raw: str) -> list[dict[str, Any]]:
         """Valid empty output retracts edges; malformed output must never do so."""

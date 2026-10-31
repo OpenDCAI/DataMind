@@ -59,7 +59,7 @@ class NetworkXGraphStore:
             },
         )
 
-    def schema(self) -> dict[str, Any]:
+    async def schema(self) -> dict[str, Any]:
         """Observed vocabulary, not a restrictive ontology."""
         from collections import Counter
         with self._state_lock:

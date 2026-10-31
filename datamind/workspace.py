@@ -26,6 +26,7 @@ from datamind.core.context import RequestContext
 from datamind.core.errors import CapabilityError, ConfigError, ExternalServiceError
 from datamind.core.logging import bind_context, current_context
 from datamind.core.protocols import GraphTriple, GraphEvidence
+from datamind.capabilities.ingest.lineage import LineageFile, build_lineage_triples
 from datamind.core.recovery import recover_read, recovery_summary
 from datamind.workspace_catalog import WorkspaceCatalog
 
@@ -66,11 +67,15 @@ class Workspace(WorkspaceCatalog):
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS revisions (
                     id TEXT PRIMARY KEY, parent TEXT, state TEXT, error TEXT);
-                CREATE TABLE IF NOT EXISTS head (singleton INTEGER PRIMARY KEY, revision TEXT, epoch INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS head (singleton INTEGER PRIMARY KEY, revision TEXT, epoch INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 0, detached INTEGER NOT NULL DEFAULT 0);
                 INSERT OR IGNORE INTO head (singleton, revision) VALUES (1, NULL);
             ''')
             if 'epoch' not in {row[1] for row in conn.execute('PRAGMA table_info(head)')}:
                 conn.execute('ALTER TABLE head ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0')
+            if 'dirty' not in {row[1] for row in conn.execute('PRAGMA table_info(head)')}:
+                conn.execute('ALTER TABLE head ADD COLUMN dirty INTEGER NOT NULL DEFAULT 0')
+            if 'detached' not in {row[1] for row in conn.execute('PRAGMA table_info(head)')}:
+                conn.execute('ALTER TABLE head ADD COLUMN detached INTEGER NOT NULL DEFAULT 0')
         self._init_catalog()
 
     def _connect(self):
@@ -80,6 +85,65 @@ class Workspace(WorkspaceCatalog):
     def current_revision(self) -> str | None:
         with self._connect() as conn:
             return conn.execute('SELECT revision FROM head WHERE singleton=1').fetchone()[0]
+
+    def mark_dirty(self, path: str | Path | None = None) -> bool:
+        """Mark the published workspace dirty when a source path was mutated."""
+        revision = self.current_revision
+        if revision is None:
+            return False
+        manifest = self.manifest(revision)
+        if path is not None:
+            source = Path(manifest['source_root']).resolve()
+            candidate = Path(path).expanduser().resolve()
+            if candidate != source and not candidate.is_relative_to(source):
+                return False
+        with self._connect() as conn:
+            conn.execute('UPDATE head SET dirty=1 WHERE singleton=1')
+        return True
+
+    async def source_inventory_version(self) -> str | None:
+        """Hash the current source inventory for mutation-boundary checks."""
+        revision = self.current_revision
+        if revision is None:
+            return None
+        source = Path(self.manifest(revision)['source_root'])
+        inventory = await asyncio.to_thread(self._inventory, source)
+        return _digest(json.dumps([
+            (item['relative_path'], item['uri'], item['version'])
+            for item in inventory
+        ], ensure_ascii=False, separators=(',', ':')).encode())
+
+    async def assert_current_revision(self) -> str | None:
+        """Reject latest reads when source files differ from the published revision."""
+        revision = self.current_revision
+        if revision is None:
+            return None
+        with self._connect() as conn:
+            dirty, detached = conn.execute(
+                'SELECT dirty, detached FROM head WHERE singleton=1'
+            ).fetchone()
+        if detached and not dirty:
+            return revision
+        manifest = self.manifest(revision)
+        source = Path(manifest['source_root'])
+        current = await asyncio.to_thread(self._inventory, source)
+
+        published = _digest(json.dumps([
+            (item['relative_path'], item['uri'], item['version'])
+            for item in manifest.get('sources', [])
+        ], ensure_ascii=False, separators=(',', ':')).encode())
+        existing = _digest(json.dumps([
+            (item['relative_path'], item['uri'], item['version'])
+            for item in current
+        ], ensure_ascii=False, separators=(',', ':')).encode())
+
+        if not dirty and published == existing:
+            return revision
+        raise CapabilityError(
+            'workspace',
+            'workspace source files changed after the latest published revision; '
+            'run workspace_publish in a write operation before reading latest data',
+        )
 
     def status(self, revision: str) -> dict[str, Any]:
         with self._connect() as conn:
@@ -106,7 +170,11 @@ class Workspace(WorkspaceCatalog):
             head = conn.execute('SELECT revision FROM head WHERE singleton=1').fetchone()[0]
             if expected_revision is not None and head != expected_revision:
                 raise CapabilityError('workspace', 'publication conflict; current revision changed')
-            conn.execute('UPDATE head SET revision=?, epoch=epoch+1 WHERE singleton=1', (revision,))
+            conn.execute(
+                'UPDATE head SET revision=?, epoch=epoch+1, dirty=0, detached=1 '
+                'WHERE singleton=1',
+                (revision,),
+            )
         return {'workspace_revision': revision, 'previous_revision': head}
 
     def _settings_for(self, revision: str):
@@ -333,6 +401,10 @@ class Workspace(WorkspaceCatalog):
                                 source_version=item['version'], locator={'part': i},
                                 relation_types=relation_types,
                             )
+                            for triple in triples:
+                                for evidence in (triple.evidence or []):
+                                    evidence.pipeline_version = "legacy-model"
+                                    evidence.method = "extracted"
                             prepared['triples'].extend(t.model_dump(mode='json') for t in triples)
                             if len(triples) >= min(30, remaining):
                                 prepared['truncated'] = True
@@ -392,6 +464,15 @@ class Workspace(WorkspaceCatalog):
                 metrics['materialization_ms'] += (time.monotonic() - stage_started) * 1000
             stage_started = time.monotonic()
             if 'graph' in selected:
+                lineage = build_lineage_triples(
+                    root=source,
+                    files=[LineageFile(
+                        uri=item['uri'], relative_path=item['relative_path'],
+                        version=item['version'],
+                        content_path=Path(settings.data.base_dir) / item['snapshot'],
+                    ) for item in manifest_sources],
+                )
+                graph_triples.extend(lineage)
                 await system.services.graph.store.upsert_triples(graph_triples)
                 await system.services.graph.store.persist()
             if 'kb' in selected:
@@ -404,6 +485,10 @@ class Workspace(WorkspaceCatalog):
                 graph_path = settings.data.storage_dir / 'graph.json'
                 bindings['graph'] = {'provider': 'networkx',
                     'path': str(graph_path.relative_to(settings.data.base_dir)),
+                    'lineage_version': 'sha256:' + _digest(json.dumps(
+                        [(t.subject, t.relation, t.object) for t in lineage],
+                        ensure_ascii=False, separators=(',', ':'),
+                    ).encode()),
                     'sha256': _digest(graph_path.read_bytes())}
             if 'db' in selected:
                 db_path = Path(system.services.db.engine.url.database)
@@ -427,7 +512,11 @@ class Workspace(WorkspaceCatalog):
                 if (current, epoch) != (parent, parent_epoch):
                     raise CapabilityError('workspace', 'publication conflict; another build published first')
                 conn.execute('UPDATE revisions SET state=? WHERE id=?', ('PUBLISHED', revision))
-                conn.execute('UPDATE head SET revision=?, epoch=epoch+1 WHERE singleton=1', (revision,))
+                conn.execute(
+                    'UPDATE head SET revision=?, epoch=epoch+1, dirty=0, detached=0 '
+                    'WHERE singleton=1',
+                    (revision,),
+                )
             metrics['publication_ms'] = (time.monotonic() - stage_started) * 1000
             return manifest
         except BaseException as exc:

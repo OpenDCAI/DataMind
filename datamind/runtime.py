@@ -80,11 +80,11 @@ async def assemble_data_plane(settings: Settings, *, enable: set[str] | None = N
         if "memory" in active else None
     )
     ingest = build_ingest_service(
-            settings=settings,
-            kb=kb,
-            db=db,
-            graph=graph,
-            llm_client=fallback_client,
+        settings=settings,
+        kb=kb,
+        db=db,
+        graph=graph,
+        llm_client=fallback_client,
     )
     services = DataServices(
         client=client,
