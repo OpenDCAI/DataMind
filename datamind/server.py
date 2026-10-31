@@ -397,8 +397,12 @@ async def upload_file(
     # A same-name upload represents a new revision of the same user document.
     # Keep its stable path so re-ingestion can replace KB chunks and graph
     # edges that came from the previous revision.
-    replaced = target.exists() and target.read_bytes() != body
-    target.write_bytes(body)
+    existed = target.exists()
+    changed = not existed or target.read_bytes() != body
+    replaced = existed and changed
+    if changed:
+        target.write_bytes(body)
+        Workspace(st.settings).mark_dirty(target)
 
     return {
         "saved_to": str(target),

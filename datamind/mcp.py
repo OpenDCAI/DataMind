@@ -15,6 +15,7 @@ from datamind import __version__
 from datamind.config import DataSettings
 from datamind.core.contracts import ToolAccess
 from datamind.core.logging import bind_context
+from datamind.core.errors import CapabilityError
 from datamind.data_plane import build_data_plane
 from datamind.direct_tools import catalogue, workspace_tools
 from datamind.operations import OperationStore
@@ -112,6 +113,11 @@ async def execute(name, arguments):
         if revision and args.get('pin_workspace') is False:
             raise ValueError('revision cannot be combined with pin_workspace=false')
         if mode == 'read' and (revision or args.get('pin_workspace', True)):
+            # Reconcile the source workspace before acquiring the read lease.
+            # The lease therefore always pins a complete, immutable revision;
+            # no graph mutation can occur inside a read operation.
+            if revision is None:
+                await workspace.assert_current_revision()
             lease,revision = workspace.acquire_lease(revision)
             if revision is None:
                 raise ValueError('No published workspace. Start a write operation to publish one, or set pin_workspace=false for live stores.')
@@ -175,10 +181,24 @@ async def execute(name, arguments):
                 if target.startswith('build_'):
                     enable = {'graph'}
                 system = await build_data_plane(settings, enable=enable, workspace_enable=workspace_enable)
+                track_inventory = (
+                    spec.access == ToolAccess.WRITE
+                    and target not in {'workspace_publish', 'workspace_migrate'}
+                )
+                before_inventory = (
+                    await workspace.source_inventory_version() if track_inventory else None
+                )
                 try:
                     result = await system.call(target, args, context=ctx, read_only=mode == 'read')
                 finally:
                     await system.aclose()
+                    if before_inventory is not None:
+                        try:
+                            changed = await workspace.source_inventory_version() != before_inventory
+                        except (OSError, CapabilityError):
+                            changed = True
+                        if changed:
+                            workspace.mark_dirty()
         return {'operation_id': token, 'workspace_revision': None if live else revision, 'result': result}
     except BaseException as exc:
         failed=type(exc).__name__

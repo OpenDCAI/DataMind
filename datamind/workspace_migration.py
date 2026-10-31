@@ -149,6 +149,12 @@ async def _migrate(workspace):
                 store = services.graph.store
                 for source, target, data in store._g.edges(data=True):
                     edge = store._edge(source, target, data)
+                    # V1 stores deterministic workspace lineage in the same
+                    # graph as document assertions. V2 rebuilds lineage from
+                    # the frozen inventory, so it must not be assigned to a
+                    # document source or migrated as a user assertion.
+                    if edge.properties.get("_lineage_root"):
+                        continue
                     uri = edge.properties.get("source")
                     if uri not in graph:
                         raise ConfigError("Legacy graph source is absent from manifest")

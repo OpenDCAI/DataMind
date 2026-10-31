@@ -91,6 +91,7 @@ cocoindex = ["lancedb>=0.40,<0.41", "pylance>=9,<10", "pyarrow>=19", "cocoindex>
 dolt = ["pymysql>=1.1", "mysql-connector-python>=9"]
 mysql = ["pymysql>=1.1", "cryptography>=42"]
 postgres = ["psycopg[binary]>=3.1"]
+terminusdb = ["terminusdb-client>=10.2"] 
 voyage = ["voyageai>=0.2"]
 huggingface = ["sentence-transformers>=2.5"]
 dev = [
