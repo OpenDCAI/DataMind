@@ -1,6 +1,6 @@
 # Public deployment security boundary
 
-DataMind v1.0.0 is a local-first inference-time data plane. The bundled
+DataMind 2.0 is a local-first inference-time data plane. The bundled
 FastAPI server is a useful development and private-network interface; it is
 **not an internet-facing authentication or authorization gateway**.
 
@@ -15,7 +15,7 @@ The default `datamind.server:app` configuration:
   header is not an identity proof;
 - stores profile data, SQLite databases, graph files, indexes, uploads, and
   audit logs on the server filesystem;
-- lets StoreAgent perform writes within its registered catalogue;
+- lets the same Codex host perform writes on explicitly write-authorized requests;
 - can ask for confirmation on destructive SQL, but the API itself is not a
   human approval or policy-management service;
 - caps an individual upload at 25 MiB and strips directory components from the
@@ -48,16 +48,16 @@ Place DataMind behind a maintained edge service or reverse proxy that provides:
 5. Structured access logs and alerting at the proxy and application layers.
 6. A separate profile/database per trust boundary, with backups and a tested
    restore path.
-7. Network egress restrictions for the model gateway, database, CCR, and any
+7. Network egress restrictions for the model gateway, database and any
    embedding provider.
 8. Secret injection through the deployment platform; never expose API keys to
-   the browser, commit `.env.datamind`, or put real keys in CCR config checked
+   the browser, commit `.env.datamind`, or put real keys in gateway config checked
    into source control.
 
 ## Data and tool policy
 
 - Keep `DATAMIND__DB__READ_ONLY=true` unless a narrowly scoped write path has
-  been reviewed. StoreAgent imports should target a controlled database or
+  been reviewed. Codex-authorized imports should target a controlled database or
   staging profile, not an operator's production connection by default.
 - Keep `PathAllowlistHook`, `DestructiveSqlHook`, and `AuditLogHook` enabled.
   Review any `DATAMIND__HOOKS__PATH_ALLOWLIST_EXTRA` entry as a filesystem grant.
@@ -69,14 +69,15 @@ Place DataMind behind a maintained edge service or reverse proxy that provides:
 - Review audit logs as operational records, but do not assume they are a
   complete compliance trail until log shipping, retention, and access control
   are configured.
-- The SDK backend uses `bypassPermissions` for its isolated process, while
-  disabling unrelated shell/filesystem tools and exposing only the DataMind MCP
-  catalogue. This is not a reason to run it on an untrusted public endpoint;
-  keep the SDK/CCR process private and validate the vendor stack separately.
+- Codex hosting uses the official runtime's sandbox and approvals. Read requests
+  use a read-only sandbox and read-only MCP binding; write requests use
+  workspace-write. Approve only the DataMind tools required by your workload.
+  DataMind hooks cover its tools, not every unrelated tool installed in Codex.
+  Applications own host configuration, available tools, and process isolation.
 
 ## Explicit non-goals
 
-The v1.0 server does not provide built-in SSO, API key issuance, role-based
+The bundled server does not provide built-in SSO, API key issuance, role-based
 access control, quota accounting, malware scanning, secret rotation, database
 row-level security, or a durable human approval queue. Add those controls
 before describing a deployment as a public multi-tenant service.
@@ -88,4 +89,4 @@ python -m uvicorn datamind.server:app --host 127.0.0.1 --port 8000
 ```
 
 For deployment review, pair this page with the [stable API contract](./STABLE_API.md)
-and the [native / SDK support matrix](./SUPPORT_MATRIX.md).
+and the [Codex host support matrix](./SUPPORT_MATRIX.md).

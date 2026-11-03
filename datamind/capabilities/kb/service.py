@@ -18,6 +18,7 @@ from datamind.core.errors import ConfigError
 from datamind.core.logging import get_logger
 from datamind.core.protocols import EmbeddingProvider, Retriever, TextModelClient, VectorStore
 from datamind.core.registry import retriever_registry, vector_store_registry
+from datamind.core.errors import CapabilityError
 
 # Importing providers populates the registries.
 from . import providers  # noqa: F401
@@ -149,6 +150,42 @@ class KBService:
             await rebuild()
         return stats
 
+    async def record_incremental_ingest(self) -> None:
+        """Record compatibility metadata after an incremental KB write.
+
+        ``IngestService`` writes chunks directly to the live vector store for
+        low-latency file ingestion. Keep the same manifest contract as a full
+        reindex so a fresh process can safely reopen the resulting index.
+
+        A failed manifest write marks the service incompatible (fail fast on
+        subsequent operations) instead of leaving the disk state ambiguous.
+        Incremental writes also bypass ``reindex()``, so retrievers that cache
+        a lexical index (hybrid BM25) are nudged to rebuild — otherwise the
+        new chunks stay invisible to lexical search until the next restart.
+        """
+        if self.manifest_path is not None:
+            manifest = build_index_manifest(
+                data_dir=self.data_dir,
+                embedding_provider=str(self._manifest_base.get("embedding_provider", self.embedding.name)),
+                embedding_model=str(self._manifest_base.get("embedding_model", "unknown")),
+                dimension=int(self.embedding.dimension),
+                chunk_size=self.retrieval_cfg.chunk_size,
+                chunk_overlap=self.retrieval_cfg.chunk_overlap,
+            )
+            try:
+                write_manifest_atomic(self.manifest_path, manifest)
+            except Exception:
+                self._compatibility_error = "KB manifest write failed; run explicit reindex"
+                raise
+            self._manifest_base = {
+                key: manifest[key]
+                for key in ("embedding_provider", "embedding_model", "dimension", "chunk_size", "chunk_overlap", "corpus_hash")
+            }
+            self._compatibility_error = None
+        rebuild = getattr(self.retriever, "rebuild_lexical", None)
+        if callable(rebuild):
+            await rebuild()
+
     async def aclose(self) -> None:
         close = getattr(self.vector_store, "aclose", None)
         if callable(close):
@@ -157,6 +194,67 @@ class KBService:
     async def list_documents(self) -> list[dict[str, Any]]:
         return await list_documents(self.data_dir)
 
+    async def search_at_version(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        filters: dict[str, Any] | None = None,
+        version: int = None
+    ) -> list[dict[str, Any]]:
+        """Search the KB as of a specific LanceDB version.
+        """
+        if self._compatibility_error:
+            raise ConfigError(self._compatibility_error)
+        if self.vector_store.name != "lancedb":
+            raise CapabilityError("kb", "search_at_version is only supported by the LanceDB vector store")
+        # LanceDB versions are positive ints.
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise CapabilityError("kb", f"version must be an integer, got {type(version).__name__}")
+        if version < 1:
+            raise CapabilityError("kb", f"version must be a positive integer, got {version}")
+        versions = await self.list_versions()
+
+        if not any(v["version"] == version for v in versions):
+            raise CapabilityError("kb", f"version {version} does not exist in this LanceDB table")
+
+        k = top_k or self.retrieval_cfg.top_k
+        chunks = await self.retriever.aretrieve_at_version(query, top_k=k, filters=filters, version=version)
+        return [c.model_dump() for c in chunks]
+
+    async def list_versions(self) -> list[dict[str, Any]]:
+        if self.vector_store.name != "lancedb":
+            raise CapabilityError("kb", "list_versions is only supported by the LanceDB vector store")
+
+        return await self.vector_store.list_versions()
+
+    async def rollback(self, version: int) -> dict[str, Any]:
+        """Restore the KB to the data of `version`, as a NEW commit.
+
+        History is preserved: the target version and everything after it stay
+        in the version list; a fresh commit with the target's data is appended.
+        """
+        if self.vector_store.name != "lancedb":
+            raise CapabilityError("kb", "rollback is only supported by the LanceDB vector store")
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise CapabilityError("kb", f"version must be an integer, got {type(version).__name__}")
+        if version < 1:
+            raise CapabilityError("kb", f"version must be a positive integer, got {version}")
+        versions = await self.list_versions()
+        if not any(v["version"] == version for v in versions):
+            raise CapabilityError("kb", f"version {version} does not exist in this LanceDB table")
+
+        result = await self.vector_store.rollback(version=version)
+        rebuild = getattr(self.retriever, "rebuild_lexical", None)
+        if callable(rebuild):
+            await rebuild()
+        return {
+            "status": "ok",
+            "message": f"Successfully rolled back to version {version}",
+            "rollback_version": version, # Target
+            "new_version": result["version"],  # New Commit
+            "count": result["count"],
+        }
 
 # ---------------------------------------------------------------------------
 # Factory
@@ -178,9 +276,10 @@ def build_kb_service(
     embedding = embedding or build_embedding(settings.embedding, fallback_llm=settings.llm)
     storage_dir = settings.data.storage_dir
     storage_dir.mkdir(parents=True, exist_ok=True)
+
     vector_store = vector_store_registry.create(
-        "chroma",
-        persist_dir=str(storage_dir / "chroma"),
+        settings.kb.vector_store,
+        persist_dir=str(storage_dir / settings.kb.vector_store),
         collection_name=collection_name,
         dimension=embedding.dimension,
     )
@@ -210,6 +309,9 @@ def build_kb_service(
     elif strategy == "hybrid":
         retriever = retriever_registry.create(
             "hybrid", vector_store=vector_store, embedding=embedding,
+            vector_failure_fallback=settings.retrieval.vector_failure_fallback,
+            vector_retries=settings.retrieval.vector_retries,
+            vector_timeout_s=settings.retrieval.vector_timeout_s,
         )
     else:
         raise ConfigError(

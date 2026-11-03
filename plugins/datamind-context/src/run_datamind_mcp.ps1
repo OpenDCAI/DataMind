@@ -28,6 +28,11 @@ if (-not $RepoRoot) {
     $RepoRoot = (Resolve-Path (Join-Path $PluginDir '..\..')).Path
 }
 
+# Settings loads .env/.env.datamind relative to the process working
+# directory. Codex starts plugins from its cache directory, so use the
+# resolved DataMind checkout as the working root.
+Set-Location -Path $RepoRoot
+
 $McpScript = Join-Path $PluginDir 'src\datamind_mcp.py'
 
 # 1. Explicit override.

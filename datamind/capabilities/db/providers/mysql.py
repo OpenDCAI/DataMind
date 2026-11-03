@@ -5,8 +5,8 @@ Expected DSN format:
 
     mysql+pymysql://user:password@host:3306/dbname?charset=utf8mb4
 
-We apply `SET SESSION TRANSACTION READ ONLY` per-connection in read-only
-mode. On servers where the user lacks the privilege this is a no-op — the
+We start a read-only transaction for each query. Closing the query
+connection rolls it back without changing pooled session defaults. On servers where the user lacks the privilege this is a no-op — the
 upstream safeguard (is_destructive / contains_multiple_statements) still
 holds the line.
 """
@@ -41,9 +41,9 @@ class MySQLDialect(BaseSQLDialect):
         return super().build_engine(dsn, **kwargs)
 
     def _before_query(self, conn: Any) -> None:
-        # Best-effort; privilege-dependent.
+        # Scope the hint to this transaction, not future pooled writes.
         try:
-            conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
+            conn.execute(text("START TRANSACTION READ ONLY"))
         except Exception:  # pragma: no cover
             pass
 

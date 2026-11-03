@@ -1,4 +1,4 @@
-"""Two-agent contracts and StoreAgent receipt behaviour."""
+"""Data contracts and receipt behaviour independent of the main agent."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,7 +16,6 @@ from datamind.core.context import RequestContext
 from datamind.core.contracts import IngestReceipt, SourceRef
 from datamind.core.logging import bind_context
 from datamind.core.tools import ToolRegistry, ToolSpec
-from datamind.capabilities.ingest.tools import build_ingest_tools
 
 
 def test_source_ref_is_content_stable(tmp_path: Path):
@@ -181,20 +180,6 @@ async def test_store_can_write_after_retrieve_marks_sqlite_connection_read_only(
 
     assert stored["rows_inserted"] == 1
     assert retrieved.rows == [["created"]]
-
-
-def test_workspace_write_tools_have_receipt_surface_metadata():
-    class _Ingest:
-        pass
-
-    # The wrappers are assembled around the concrete service in production;
-    # this check only inspects the declarative tool boundary.
-    tools = build_ingest_tools(_Ingest())
-    names = {"build_start", "build_freeze", "build_export", "surface_ingest_path"}
-    for spec in tools:
-        if spec.name in names:
-            assert spec.metadata["surface"] == "workspace"
-            assert spec.metadata["access"] == "write"
 
 
 @pytest.mark.asyncio

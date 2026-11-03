@@ -1,6 +1,7 @@
 """DB dialect providers — importing this package registers everything."""
 from __future__ import annotations
 
+from . import dolt  # noqa: F401
 from . import sqlite  # noqa: F401
 
 # MySQL is registered even without pymysql installed — we only fail when

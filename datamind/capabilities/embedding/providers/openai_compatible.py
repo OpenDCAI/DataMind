@@ -23,6 +23,7 @@ import httpx
 from datamind.core.errors import ExternalServiceError
 from datamind.core.logging import get_logger
 from datamind.core.registry import embedding_registry
+from datamind.core.recovery import read_retry_budget_active
 
 _log = get_logger("embedding.openai_compatible")
 
@@ -147,6 +148,10 @@ class OpenAICompatibleEmbedding:
                     )
                 resp.raise_for_status()
                 body = resp.json()
+                if not isinstance(body, dict):
+                    raise ExternalServiceError(
+                        "embedding", "response body must be an object",
+                    )
                 data = body.get("data") or []
                 if not data:
                     raise ExternalServiceError(
@@ -159,9 +164,21 @@ class OpenAICompatibleEmbedding:
                         f"response count mismatch: expected {len(inputs)}, got {len(data)}",
                     )
                 try:
-                    ordered = sorted(data, key=lambda row: int(row["index"]))
-                    indices = [int(row["index"]) for row in ordered]
-                    vecs = [list(row["embedding"]) for row in ordered]
+                    indexed_vectors = []
+                    for row in data:
+                        if not isinstance(row, dict):
+                            raise TypeError("each response row must be an object")
+                        index = row["index"]
+                        # JSON booleans are distinct from integer indices even
+                        # though bool is an int subclass in Python. Do not
+                        # coerce floats or strings: truncation can turn a
+                        # malformed response into a seemingly complete batch.
+                        if isinstance(index, bool) or not isinstance(index, int):
+                            raise ValueError("response index must be a JSON integer")
+                        indexed_vectors.append((index, list(row["embedding"])))
+                    ordered = sorted(indexed_vectors, key=lambda item: item[0])
+                    indices = [index for index, _vector in ordered]
+                    vecs = [vector for _index, vector in ordered]
                 except (KeyError, TypeError, ValueError) as exc:
                     raise ExternalServiceError(
                         "embedding", "response rows require integer index and embedding",
@@ -183,7 +200,9 @@ class OpenAICompatibleEmbedding:
                         f"dimension mismatch for {self._model}: expected {self.dimension}, got {actual_dimension}",
                     )
                 if any(
-                    not isinstance(value, (int, float)) or not math.isfinite(float(value))
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
                     for vec in vecs for value in vec
                 ):
                     raise ExternalServiceError("embedding", "response contains non-finite vector values")
@@ -194,6 +213,17 @@ class OpenAICompatibleEmbedding:
                         "embedding_dimension_detected",
                         extra={"model": self._model, "dim": self.dimension},
                     )
+                # Provider-reported usage only. Never infer tokens from text
+                # length or label an unavailable usage report as zero cost.
+                from datamind.core.logging import current_context
+                ctx = current_context()
+                usage = body.get("usage")
+                if ctx is not None and isinstance(usage, dict):
+                    tokens = usage.get("total_tokens")
+                    if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
+                        ctx.extra.setdefault("embedding_usage", []).append({
+                            "model": self._model, "total_tokens": tokens,
+                        })
                 return vecs
             except httpx.HTTPStatusError as exc:
                 # Ordinary 4xx (especially 401/403) are deterministic.
@@ -210,6 +240,10 @@ class OpenAICompatibleEmbedding:
                     and getattr(exc, "status_code", None) in {408, 409, 429, 500, 502, 503, 504}
                 )
                 if not retriable:
+                    raise
+                if read_retry_budget_active():
+                    # Let the enclosing reader/retriever spend its one budget;
+                    # don't multiply HTTP retries by tool/vector retries.
                     raise
                 if attempt < self._max_retries:
                     retry_after = None

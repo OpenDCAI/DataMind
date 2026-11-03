@@ -8,6 +8,15 @@ __pycache__/
 dist/
 build/
 .venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+# Local credentials and generated diagnostics; keep reviewed templates.
+.env.*
+!.env*.example
+logs/
+*.log
 
 # Benchmark data & results
 data/bench_raw/

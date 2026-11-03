@@ -103,6 +103,11 @@ class ToolRegistry:
         for s in specs:
             self.add(s)
 
+    def replace(self, spec: ToolSpec) -> None:
+        """Replace an existing tool, preserving the registry seen by its loop."""
+        self.get(spec.name)
+        self._tools[spec.name] = spec
+
     def get(self, name: str) -> ToolSpec:
         if name not in self._tools:
             raise ConfigError(
@@ -124,9 +129,8 @@ class ToolRegistry:
     ) -> "ToolRegistry":
         """Create a role-scoped registry without copying handlers.
 
-        This is the enforcement point used by the two agent assemblers.  A
-        RetrieveAgent registry accepts read/utility tools while a StoreAgent
-        registry accepts write tools; prompts are not trusted for isolation.
+        Data transports can expose a scoped subset. Read-only requests accept
+        read/utility tools; prompts are not trusted for isolation.
         """
         selected = ToolRegistry()
         for spec in self._tools.values():

@@ -21,6 +21,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from .tables import normalize_columns
+
 
 DOCUMENT_EXTS = {
     ".txt", ".md", ".markdown", ".html", ".json", ".xml", ".py", ".java",
@@ -275,7 +277,7 @@ def extract_tabular(path: str | Path) -> list[tuple[str, list[str], list[dict[st
             values = list(csv.reader(handle, delimiter=delimiter))
         if not values:
             return []
-        columns = [cell.strip() or f"col_{index}" for index, cell in enumerate(values[0], 1)]
+        columns, _ = normalize_columns(values[0])
         rows = [dict(zip(columns, row + [""] * (len(columns) - len(row)))) for row in values[1:]]
         return [(source.stem, columns, rows)]
     if suffix in {".xlsx", ".xls"}:
@@ -291,8 +293,7 @@ def extract_tabular(path: str | Path) -> list[tuple[str, list[str], list[dict[st
             values = list(sheet.values)
             if not values:
                 continue
-            columns = [str(cell).strip() if cell is not None and str(cell).strip() else f"col_{index}"
-                       for index, cell in enumerate(values[0], 1)]
+            columns, _ = normalize_columns(values[0])
             rows = [dict(zip(columns, list(row) + [None] * (len(columns) - len(row)))) for row in values[1:]]
             output.append((sheet.title, columns, rows))
         return output

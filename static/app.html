@@ -137,7 +137,54 @@ main {
   background: var(--surface);
   border: 1px solid var(--border);
   border-bottom-left-radius: 3px;
+  white-space: normal;
 }
+.bubble.assistant p { margin: 0 0 10px; white-space: pre-wrap; }
+.bubble.assistant p:last-child { margin-bottom: 0; }
+.bubble.assistant h1,
+.bubble.assistant h2,
+.bubble.assistant h3,
+.bubble.assistant h4,
+.bubble.assistant h5,
+.bubble.assistant h6 { margin: 12px 0 8px; line-height: 1.3; }
+.bubble.assistant h1:first-child,
+.bubble.assistant h2:first-child,
+.bubble.assistant h3:first-child { margin-top: 0; }
+.bubble.assistant h1 { font-size: 1.45em; }
+.bubble.assistant h2 { font-size: 1.28em; }
+.bubble.assistant h3 { font-size: 1.14em; }
+.bubble.assistant ul,
+.bubble.assistant ol { margin: 6px 0 10px; padding-left: 24px; }
+.bubble.assistant li { margin: 3px 0; }
+.bubble.assistant code {
+  background: var(--surface3);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.bubble.assistant > pre {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  white-space: pre;
+}
+.bubble.assistant > pre code { padding: 0; background: transparent; }
+.bubble.assistant blockquote {
+  margin: 8px 0 10px;
+  padding: 4px 12px;
+  border-left: 3px solid var(--accent-light);
+  color: var(--text2);
+}
+.markdown-table { margin: 8px 0 12px; overflow-x: auto; }
+.markdown-table table { border-collapse: collapse; min-width: 100%; }
+.markdown-table th,
+.markdown-table td { padding: 7px 10px; border: 1px solid var(--border); text-align: left; }
+.markdown-table th { background: var(--surface2); font-weight: 650; }
+.markdown-table tr:nth-child(even) td { background: rgba(255,255,255,.018); }
 .bubble.assistant .caret {
   display: inline-block;
   width: 8px;
@@ -422,7 +469,7 @@ main {
 .action-btn:hover { border-color: var(--accent); background: var(--surface3); }
 .action-btn.small { padding: 3px 8px; font-size: 10.5px; }
 
-.memory-box input {
+.memory-box input, .memory-box select {
   width: 100%;
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -523,7 +570,7 @@ main {
 <body>
 
 <header>
-  <h1>DataMind <small>two-agent</small></h1>
+  <h1>DataMind <small>Codex</small></h1>
   <div class="header-status" id="headerStatus">
     <span class="pill warn" id="healthPill"><span class="dot"></span><span>Connecting…</span></span>
   </div>
@@ -534,7 +581,7 @@ main {
     <div class="messages" id="messages">
       <div class="welcome" id="welcome">
         <h3>👋 欢迎使用 DataMind</h3>
-        <p><strong>RetrieveAgent</strong> 只读地跨五个数据面取数；<strong>StoreAgent</strong> 负责写入，并返回可审计回执。</p>
+        <p><strong>Codex</strong> 负责入库与查询；DataMind 提供数据工具、来源证据和写入回执。</p>
         <p>输入问题后点「取数」，输入要保存的内容后点「存数」。</p>
         <div class="sample-prompts" id="samplePrompts"></div>
       </div>
@@ -579,6 +626,21 @@ main {
     </div>
 
     <div class="section">
+      <h2>Workspace 历史</h2>
+      <div class="memory-box">
+        <label for="retentionMode">历史保留方式</label>
+        <select id="retentionMode">
+          <option value="latest">只保留最新版（无法回滚历史）</option>
+          <option value="recent">保留最近 N 个版本</option>
+          <option value="all">保留全部历史</option>
+        </select>
+        <input id="retentionCount" type="number" min="1" value="10" aria-label="保留版本数量" />
+        <button class="action-btn small" id="saveRetentionBtn">保存保留方式</button>
+        <p id="retentionStatus" style="font-size:12px;margin-top:8px"></p>
+      </div>
+    </div>
+
+    <div class="section">
       <h2>工具 (<span id="toolCount">0</span>) <span class="section-action" id="refreshToolsBtn">刷新</span></h2>
       <div class="tool-list" id="toolList"></div>
     </div>
@@ -611,6 +673,7 @@ main {
   </aside>
 </main>
 
+<script src="/static/markdown.js"></script>
 <script>
 // ────────────────────────────────────────────────────────
 // State
@@ -654,21 +717,45 @@ function logLine(text) {
 // ────────────────────────────────────────────────────────
 // Sidebar loaders
 // ────────────────────────────────────────────────────────
+function retentionInputs() {
+  $('retentionCount').hidden = $('retentionMode').value !== 'recent';
+}
+async function loadRetention() {
+  try {
+    const data = await api('/api/workspace');
+    $('retentionMode').value = data.retention.mode;
+    $('retentionCount').value = data.retention.keep_last;
+    retentionInputs();
+    $('retentionStatus').textContent = '下次发布后按此策略清理。正在查询和手动保护的版本会保留。';
+  } catch (err) { $('retentionStatus').textContent = err.message; }
+}
+$('retentionMode').addEventListener('change', retentionInputs);
+$('saveRetentionBtn').addEventListener('click', async () => {
+  const button = $('saveRetentionBtn'); button.disabled = true;
+  try {
+    await api('/api/workspace/retention', {method:'POST', body:JSON.stringify({
+      mode:$('retentionMode').value, keep_last:Number($('retentionCount').value)})});
+    await loadRetention();
+    logLine('已保存 Workspace 历史保留方式');
+  } catch (err) { $('retentionStatus').textContent = err.message; }
+  finally { button.disabled = false; }
+});
+
 async function loadHealth() {
   try {
     state.health = await api('/api/health');
     const pill = $('healthPill');
     pill.classList.remove('warn', 'err');
-    pill.innerHTML = `<span class="dot"></span><span>就绪 · 取 ${state.health.retrieve_tools} / 存 ${state.health.store_tools}</span>`;
+    pill.innerHTML = `<span class="dot"></span><span>Codex 就绪 · ${state.health.tools} 个数据工具</span>`;
 
     const kv = $('configKV');
     kv.innerHTML = '';
     const rows = [
       ['profile', state.health.profile],
-      ['model', state.health.model],
+      ['model', state.health.model || 'Codex 默认配置'],
       ['embedding', state.health.embedding],
       ['db', state.health.db_dialect],
-      ['revision', state.health.revision],
+      ['revision', state.health.workspace_revision || state.health.revision],
     ];
     for (const [k, v] of rows) {
       kv.innerHTML += `<dt>${k}</dt><dd>${v}</dd>`;
@@ -775,7 +862,7 @@ function fillSamplePrompts() {
   const known = new Set(state.tools.map(t => t.name));
   const bag = [];
   if (known.has('kb_search')) bag.push({ text: 'Search platform 团队负责人是谁？', role: 'retrieve' });
-  if (known.has('db_query_nl')) bag.push({ text: '数据库里有多少个员工？', role: 'retrieve' });
+  if (known.has('db_query_sql')) bag.push({ text: '数据库里有多少个员工？', role: 'retrieve' });
   if (known.has('graph_traverse')) bag.push({ text: 'Ann 三跳能到达哪些实体？', role: 'retrieve' });
   if (known.has('skill_search')) bag.push({ text: '如何做代码审查？', role: 'retrieve' });
   if (known.has('memory_save')) bag.push({ text: '帮我记住：下周三会议调到周四', role: 'store' });
@@ -826,11 +913,8 @@ function appendText(bubble, text) {
 }
 
 function renderMarkdown(bubble) {
-  // Lightweight inline markdown: ` ` for inline code, **bold**, line breaks.
   const raw = bubble.dataset.raw || '';
-  const html = escapeHtml(raw)
-    .replace(/`([^`\n]+)`/g, '<code style="background: var(--surface3); padding: 1px 4px; border-radius: 3px; font-family: var(--mono); font-size: 12.5px;">$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  const html = DataMindMarkdown.renderMarkdown(raw);
   // Preserve the rendered tool-groups (already live DOM).
   const tools = bubble.querySelectorAll('details.tool-group');
   const marker = '<!--TOOLGROUP-->';
@@ -1039,6 +1123,10 @@ async function sendMessage() {
           if (last) last.classList.add('hook-denied');
           logLine(`hook denied: ${event.tool} — ${event.reason}`);
         } else if (event.type === 'done') {
+          if (typeof event.answer === 'string') {
+            aiBubble.dataset.raw = event.answer;
+            renderMarkdown(aiBubble);
+          }
           logLine(`done: ${event.iterations} iter · stop=${event.stop_reason}`);
         }
       }
@@ -1127,7 +1215,7 @@ $('sessionInput').addEventListener('change', () => {
 // Files dropped here are uploaded to /api/upload (server saves under
 // data/profiles/<profile>/uploads/) and then displayed in a small list
 // below the drop zone. Clicking "导入" sends the instruction to the
-// write-only StoreAgent endpoint; normal chat remains strictly read-only.
+// write-authorized Codex endpoint; normal chat remains strictly read-only.
 
 const DROP = $('dropZone');
 const FILE_INPUT = $('fileInput');
@@ -1164,7 +1252,7 @@ function suggestPromptForFile(filename, savedPath) {
 async function sendStoreInstruction(message) {
   addBubble('user').textContent = message;
   const aiBubble = addBubble('assistant');
-  aiBubble.textContent = 'StoreAgent 正在写入…';
+  aiBubble.textContent = 'Codex 正在处理入库…';
   try {
     const result = await api('/api/store', {
       method: 'POST',
@@ -1174,7 +1262,8 @@ async function sendStoreInstruction(message) {
       const statuses = (receipt.results || []).map(item => `${item.surface}:${item.status}`).join(', ');
       return `revision ${receipt.revision} · ${statuses} · ${receipt.receipt_id}`;
     });
-    aiBubble.textContent = [result.answer || '写入完成。', ...receiptLines].join('\n');
+    aiBubble.dataset.raw = [result.answer || '写入完成。', ...receiptLines].join('\n');
+    renderMarkdown(aiBubble);
     await loadHealth();
     logLine(`store revision -> ${state.health?.revision ?? '?'}`);
     await loadKb();
@@ -1219,7 +1308,7 @@ async function uploadOne(file) {
       return null;
     }
     const data = await res.json();
-    uploadStatus(`已上传 ${data.filename} (${formatBytes(data.bytes)})`, 'success');
+    uploadStatus(`${data.replaced ? '已覆盖' : '已上传'} ${data.filename} (${formatBytes(data.bytes)})`, 'success');
     return data;
   } catch (err) {
     uploadStatus(`上传出错: ${err.message}`, 'error');
@@ -1288,7 +1377,7 @@ DROP.addEventListener('drop', (e) => {
 // Bootstrap
 // ────────────────────────────────────────────────────────
 (async () => {
-  await Promise.all([loadHealth(), loadTools(), loadGraph(), loadKb()]);
+  await Promise.all([loadHealth(), loadTools(), loadGraph(), loadKb(), loadRetention()]);
   $('chatInput').focus();
 })();
 </script>

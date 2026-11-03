@@ -46,7 +46,8 @@ class BaseSQLDialect:
         We apply a few safe defaults: pool_pre_ping on (handles stale
         connections), future=True (2.0-style).
         """
-        opts = dict(pool_pre_ping=True, future=True, **kwargs)
+        opts = {"pool_pre_ping": True, "future": True}
+        opts.update(kwargs)
         try:
             return create_engine(dsn, **opts)
         except SQLAlchemyError as exc:
@@ -100,11 +101,20 @@ class BaseSQLDialect:
         engine: Engine,
         sql: str,
         *,
-        row_limit: int = 1000,
+        row_limit: int | None = 1000,
         timeout_s: float = 10.0,
     ) -> QueryResult:
+        self._validate_readonly_sql(sql, row_limit)
+        bounded = sql if row_limit is None else self._bound_query(sql, row_limit + 1)
+        return await self._execute_bounded_readonly(
+            engine, bounded, row_limit=row_limit, timeout_s=timeout_s,
+        )
+
+    def _validate_readonly_sql(self, sql: str, row_limit: int | None) -> None:
         if not sql or not sql.strip():
             raise CapabilityError("db", "Empty SQL")
+        if row_limit is not None and row_limit < 1:
+            raise CapabilityError("db", "row_limit must be at least 1")
         if contains_multiple_statements(sql):
             raise MultiStatementSQLError(
                 "multiple statements are not allowed (use a single SELECT)"
@@ -114,8 +124,12 @@ class BaseSQLDialect:
                 f"destructive SQL rejected (leading verb is write/DDL): {sql[:80]!r}"
             )
 
-        bounded = ensure_row_limit(sql, row_limit + 1)
+    def _bound_query(self, sql: str, row_limit: int | None) -> str:
+        return ensure_row_limit(sql, row_limit)
 
+    async def _execute_bounded_readonly(
+        self, engine: Engine, bounded: str, *, row_limit: int | None, timeout_s: float,
+    ) -> QueryResult:
         def _run() -> QueryResult:
             start = time.perf_counter()
             with engine.connect() as conn:
@@ -125,9 +139,11 @@ class BaseSQLDialect:
                 self._before_query(conn)
                 result = conn.execute(text(bounded))
                 columns = list(result.keys())
+                from .query_contract import validate_columns
+                validate_columns(columns)
                 # Fetch one extra row so we can detect truncation.
-                rows = [list(row) for row in result.fetchmany(row_limit + 1)]
-            truncated = len(rows) > row_limit
+                rows = [list(row) for row in (result.fetchall() if row_limit is None else result.fetchmany(row_limit + 1))]
+            truncated = row_limit is not None and len(rows) > row_limit
             if truncated:
                 rows = rows[:row_limit]
             elapsed = (time.perf_counter() - start) * 1000.0
@@ -154,3 +170,20 @@ class BaseSQLDialect:
     def _quote_ident(self, name: str) -> str:
         """Default identifier quoting; dialects override for back-ticks etc."""
         return '"' + name.replace('"', '""') + '"'
+
+    async def count_by_source(
+        self,
+        engine: Engine,
+        table: str,
+        *,
+        source_file: str,
+        source_column: str = "_source_file",
+    ) -> int:
+        q = self._quote_ident
+        sql = f"SELECT COUNT(*) FROM {q(table)} WHERE {q(source_column)} = :sf"
+
+        def _run() -> int:
+            with engine.connect() as conn:
+                return int(conn.execute(text(sql), {"sf": source_file}).scalar() or 0)
+
+        return await asyncio.to_thread(_run)

@@ -13,6 +13,11 @@ if [[ -z "${REPO_ROOT}" ]]; then
   REPO_ROOT="$(cd "${PLUGIN_DIR}/../.." && pwd -P)"
 fi
 
+# Settings loads the repository's .env/.env.datamind relative to the
+# process working directory. Codex launches plugin commands from the cached
+# plugin directory, so make the resolved DataMind checkout the working root.
+cd "${REPO_ROOT}"
+
 if [[ -n "${DATAMIND_PYTHON:-}" && -x "${DATAMIND_PYTHON}" ]]; then
   exec "${DATAMIND_PYTHON}" "${PLUGIN_DIR}/src/datamind_mcp.py"
 fi

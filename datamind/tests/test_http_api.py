@@ -53,6 +53,26 @@ class _FakeLoop:
         })
 
 
+class _FailingStreamLoop(_FakeLoop):
+    async def stream_turn(self, *, user_message: str, history=None, final_contract=None):
+        yield AgentEvent("text", {"delta": "partial"})
+        raise RuntimeError("provider unavailable")
+
+
+class _FakeCodexHost:
+    fail = False
+    async def query(self, message, **kwargs):
+        kwargs.pop('workspace_revision',None)
+        return await _FakeLoop('retrieve').run_turn(user_message=message, **kwargs)
+    async def ingest(self, message, **kwargs):
+        return await _FakeLoop('store').run_turn(user_message=message, **kwargs)
+    async def stream(self, message, **kwargs):
+        yield {'type':'text','delta':'partial' if self.fail else 'streamed answer'}
+        if self.fail:
+            raise RuntimeError('provider unavailable')
+        yield {'type':'done','answer':'streamed answer','iterations':1,'stop_reason':'end_turn','usage':{}}
+
+
 class _FakeKB:
     async def list_documents(self):
         return [{"source": "demo.md", "chunks": 1}]
@@ -100,27 +120,17 @@ def configured_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     settings.data.profile = "http_e2e"
     settings.ensure_dirs()
 
-    retrieve = SimpleNamespace(
-        loop=_FakeLoop("retrieve"),
-        tools=_registry("retrieve"),
-    )
-    store = SimpleNamespace(
-        loop=_FakeLoop("store"),
-        tools=_registry("store"),
-        revision=1,
-    )
-    system = SimpleNamespace(
-        retrieve=retrieve,
-        store=store,
-        services=SimpleNamespace(
-            kb=_FakeKB(),
-            memory=_FakeMemory(),
-            graph=_FakeGraph(),
-        ),
-    )
+    tools = _registry('retrieve')
+    tools.extend([_registry('store').get('kb_reindex')])
+    data = SimpleNamespace(tools=tools, revision=1,
+        services=SimpleNamespace(kb=_FakeKB(),memory=_FakeMemory(),graph=_FakeGraph()))
+    async def call(name):
+        return await tools.get(name).handler()
+    data.call=call
     state = AppState()
     state.settings = settings
-    state.system = system
+    state.data = data
+    state.host = _FakeCodexHost()
     monkeypatch.setattr(app.state, "datamind", state, raising=False)
     return app, settings
 
@@ -133,13 +143,13 @@ async def test_http_api_routes_round_trip(configured_app):
         health = await client.get("/api/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
-        assert health.json()["retrieve_tools"] == 1
-        assert health.json()["store_tools"] == 1
+        assert health.json()["backend"] == "codex"
+        assert health.json()["tools"] == 2
 
         tools = await client.get("/api/tools")
         assert tools.status_code == 200
         assert tools.json()["count"] == 2
-        assert {item["role"] for item in tools.json()["tools"]} == {"retrieve", "store"}
+        assert {item["role"] for item in tools.json()["tools"]} == {"read", "write"}
 
         ask = await client.post(
             "/api/ask",
@@ -173,15 +183,76 @@ async def test_http_api_routes_round_trip(configured_app):
         saved_to = Path(upload_body["saved_to"])
         assert saved_to == settings.data.data_dir / "uploads" / "note.md"
         assert saved_to.read_text(encoding="utf-8") == "hello from http"
+        assert upload_body["replaced"] is False
+
+        replacement = await client.post(
+            "/api/upload",
+            files={"file": ("note.md", b"corrected content", "text/markdown")},
+        )
+        assert replacement.status_code == 200
+        replacement_body = replacement.json()
+        assert Path(replacement_body["saved_to"]) == saved_to
+        assert replacement_body["filename"] == "note.md"
+        assert replacement_body["replaced"] is True
+        assert saved_to.read_text(encoding="utf-8") == "corrected content"
 
         docs = await client.get("/api/kb/documents")
         assert docs.json() == {"count": 1, "items": [{"source": "demo.md", "chunks": 1}]}
         reindex = await client.post("/api/kb/reindex")
         assert reindex.json()["ok"] is True
 
-        memory = await client.get("/api/memory/customer-a", params={"query": "demo"})
-        assert memory.json()["profile"] == "customer-a"
+        memory = await client.get("/api/memory/http_e2e", params={"query": "demo"})
+        assert memory.json()["profile"] == "http_e2e"
         assert memory.json()["results"][0]["content"] == "remembered"
 
         graph = await client.get("/api/graph/stats")
         assert graph.json() == {"nodes": 2, "edges": 1}
+
+
+@pytest.mark.asyncio
+async def test_chat_converts_stream_failure_to_sse_error(configured_app):
+    test_app, _settings = configured_app
+    test_app.state.datamind.host.fail = True
+    transport = httpx.ASGITransport(app=test_app, raise_app_exceptions=True)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/chat", json={"message": "stream this"})
+
+    assert response.status_code == 200
+    assert '"type": "text"' in response.text
+    assert '"type": "error"' in response.text
+    assert '"message": "stream failed: RuntimeError"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_workspace_policy_routes_validate_and_persist(configured_app):
+    test_app,settings=configured_app
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=test_app),base_url='http://test') as client:
+        status=await client.get('/api/workspace?usage=true')
+        assert status.json()['retention']['mode']=='latest'
+        assert 'storage' in status.json()
+        result=await client.post('/api/workspace/retention',json={'mode':'recent','keep_last':3})
+        assert result.json()=={'mode':'recent','keep_last':3}
+        assert (await client.get('/api/workspace')).json()['retention']['keep_last']==3
+        assert (await client.post('/api/workspace/retention',json={'mode':'none'})).status_code==422
+        assert (await client.post('/api/workspace/retention',json={'mode':'recent','keep_last':0})).status_code==422
+        preview=await client.post('/api/workspace/gc',json={})
+        assert preview.json()['dry_run'] is True
+        missing=await client.post('/api/workspace/rollback',json={'revision':'unknown'})
+        assert missing.status_code==409
+
+
+@pytest.mark.asyncio
+async def test_http_startup_with_private_workspace_dolt_needs_no_live_dsn(tmp_path,monkeypatch):
+    from datamind import server
+    cfg=Settings(_env_file=None,data={'base_dir':tmp_path},db={'dialect':'dolt'},
+                 workspace={'storage_mode':'incremental'})
+    class Host:
+        def __init__(self,settings):pass
+        async def aclose(self):pass
+    monkeypatch.setattr(server,'DataSettings',lambda:cfg)
+    monkeypatch.setattr(server,'CodexHost',Host)
+    async with server._lifespan(server.app):
+        state=server.app.state.datamind
+        assert state.data.services.db is None
+        assert 'workspace_publish' in state.data.tools

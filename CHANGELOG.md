@@ -1,10 +1,43 @@
 # Changelog
 
+## 2.1.0
+
+- Add opt-in incremental Workspace storage: shared immutable source objects,
+  source-scoped indexed SQLite graph assertions, LanceDB versions and Dolt commits.
+- Add latest/recent/all retention, protected revisions, durable operation leases,
+  preview/apply GC and native provider compaction. New workspaces default to latest;
+  existing histories default to all. Publication and historical reads stay consistent.
+- Add explicit frozen-evidence migration, CLI/HTTP/UI/MCP policy controls and
+  ingestion/retrieval Skill updates. Unchanged sources, embeddings and tables are reused.
+- Add real provider, failed-build, process-death, rollback ABA and cross-call lease tests.
+
+## 2.0.0 — Unified Codex host
+
+- CLI, HTTP and browser UI now use one official Codex SDK host for reads and writes.
+- Removed StoreAgent/RetrieveAgent classes, assembly, role prompts and Claude SDK/CCR adapter.
+- Data services assemble independently of all agent loops and conversation credentials.
+- Read requests bind profile/session, access mode and one published revision below the prompt boundary.
+- Request-scoped traces preserve actual MCP evidence and receipts under Codex code mode; cancellation closes active SDK turns.
+- Migrated examples/benchmarks, retained checkpoint and fault tests, and updated gateway/config migration guidance.
+
+
+## 1.2.0 — Direct Codex data layer
+
+- Local Codex plugin and optional official `openai-codex` SDK host share direct
+  KB/SQL/graph/Skills/Memory tools. No nested StoreAgent/RetrieveAgent on these paths.
+- Operation IDs persist Skill references and pin workspace versions across tool calls.
+- Codex extracts graph assertions; prepare/publish validates source hashes and
+  retains atomic publication, checkpoints and immutable readers.
+- Added graph vocabulary discovery and source-scoped replacement/retraction.
+- Updated ingestion/update/retrieval Skills, migration docs and required SDK/MCP CI.
+- Existing CLI, HTTP/UI and Python two-agent APIs remain compatibility entry points.
+
+
 All notable changes to DataMind are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] - 2026-09-14
 
 ### Added
 
@@ -70,6 +103,7 @@ All notable changes to DataMind are documented here. The format follows
 The previous preview release. Its release note is retained in git history; the
 v1.0.0 release note is now the canonical public release summary.
 
-[Unreleased]: https://github.com/OpenDCAI/DataMind/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/OpenDCAI/DataMind/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/OpenDCAI/DataMind/releases/tag/v1.1.0
 [1.0.0]: https://github.com/OpenDCAI/DataMind/releases/tag/v1.0.0
 [0.3.0]: https://github.com/OpenDCAI/DataMind/releases/tag/0.3.0

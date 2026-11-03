@@ -33,7 +33,6 @@ from .contracts import (
     Evidence,
     InferenceResult,
 )
-from .snapshots import ProfileSnapshot, SnapshotStore, SurfaceManifest
 
 __all__ = [
     # Errors
@@ -68,7 +67,4 @@ __all__ = [
     "IngestReceipt",
     "Evidence",
     "InferenceResult",
-    "SurfaceManifest",
-    "ProfileSnapshot",
-    "SnapshotStore",
 ]

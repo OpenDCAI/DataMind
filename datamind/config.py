@@ -20,10 +20,11 @@ Design choices:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AnyUrl, BaseModel, Field, SecretStr, field_validator
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root — one up from `datamind/`.
@@ -44,7 +45,7 @@ class LLMConfig(BaseModel):
     """
 
     api_base: AnyUrl = Field(default=AnyUrl("https://api.anthropic.com"))
-    api_key: SecretStr
+    api_key: SecretStr = SecretStr("")
     protocol: Literal["anthropic", "openai_chat_completions"] = "anthropic"
     model: str = "claude-sonnet-4-6"
     # Used for cheap background tasks (memory extraction, summarisation).
@@ -58,6 +59,22 @@ class LLMConfig(BaseModel):
     connect_timeout_s: float = 10.0
     max_retries: int = Field(default=3, ge=0)
     backoff_base_s: float = Field(default=0.5, gt=0)
+
+
+class CodexHostConfig(BaseModel):
+    """Host-level Codex integration, separate from data capability configuration."""
+    model: str | None = None
+    reasoning_effort: str | None = None
+    base_url: AnyUrl | None = None
+    api_key: SecretStr | None = None
+    workspace: Path | None = None
+    approval_mode: Literal['auto_review', 'deny_all'] = 'auto_review'
+    preapproved_tools: list[str] = Field(default_factory=list)
+    timeout_s: float = Field(default=600, gt=0)
+    max_concurrency: int = Field(default=4, ge=1)
+    managed_operations: bool = False
+    request_max_retries: int = Field(default=2, ge=0)
+    stream_idle_timeout_ms: int = Field(default=300000, ge=1000)
 
 
 class EmbeddingConfig(BaseModel):
@@ -88,6 +105,10 @@ class RetrievalConfig(BaseModel):
     chunk_overlap: int = 64
     rerank: bool = False
     rerank_model: str | None = None
+    # Opt-in read degradation; no source/metadata/validation errors are hidden.
+    vector_failure_fallback: Literal["error", "bm25"] = "error"
+    vector_retries: int = Field(default=0, ge=0, le=5)
+    vector_timeout_s: float | None = Field(default=None, gt=0)
 
     @field_validator("chunk_overlap")
     @classmethod
@@ -112,7 +133,7 @@ class DBConfig(BaseModel):
     dialect: str = "sqlite"  # sqlite | mysql | postgres | ...
     dsn: str | None = None   # e.g. mysql+pymysql://user:pw@host/db
     read_only: bool = True
-    row_limit: int = 1000
+    row_limit: int | None = Field(default=1000, ge=1)
     query_timeout_s: float = 10.0
 
 
@@ -128,9 +149,20 @@ class MemoryConfig(BaseModel):
 class DataConfig(BaseModel):
     """Profile-based data layout. Paths derive from `profile`."""
 
+    model_config = ConfigDict(validate_assignment=True)
+
     profile: str = "default"
     # Root resolved at import time; tests / benchmarks can override.
     base_dir: Path = _REPO_ROOT
+
+    @field_validator("profile")
+    @classmethod
+    def _profile_name(cls, value: str) -> str:
+        if value in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            raise ValueError(
+                "profile must contain only letters, numbers, '.', '_' or '-'"
+            )
+        return value
 
     @property
     def data_dir(self) -> Path:
@@ -173,44 +205,24 @@ class DataConfig(BaseModel):
 
     @property
     def profile_skills_dir(self) -> Path:
-        """Writable, profile-scoped skills owned by StoreAgent."""
+        """Writable, profile-scoped procedural Skills."""
         return self.data_dir / "skills"
 
 
 class LoggingConfig(BaseModel):
+    # Optional external root; None preserves existing storage layout.
+    directory: Path | None = None
+    # Opt-in durable MCP evidence for benchmark runners; ordinary runs unchanged.
+    event_trace: bool = False
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
 
 class AgentConfig(BaseModel):
-    """Agent loop backend selection.
-
-    Two implementations live side-by-side, picked during agent assembly:
-
-    - `native` (default): protocol-neutral tool-use loop over the explicit
-      `LLMConfig.protocol`. Talks Anthropic Messages or OpenAI Chat
-      Completions directly — no helper process required.
-
-    - `sdk`: uses `claude-agent-sdk` as the loop, which in turn spawns
-      the `claude` CLI and speaks Anthropic stdio to it. Best run behind
-      `claude-code-router` (CCR) when the real upstream only speaks
-      OpenAI `/v1/chat/completions` — CCR translates Anthropic↔OpenAI.
-      You get the SDK's Subagents and Compaction facilities.
-
-    Both backends expose the same role-scoped registries (read/utility for
-    RetrieveAgent, write for StoreAgent) and emit the same `AgentEvent`
-    stream, so the server / CLI / frontend don't need to know which is active.
+    """Budgets retained for deterministic baseline loops and workspace reads.
+    Product requests always use the Codex host configuration.
     """
+    backend: Literal['codex'] = 'codex'
 
-    backend: Literal["native", "sdk"] = "native"
-
-    # Used only when backend == "sdk". Points at a local CCR instance.
-    # Falls back to 127.0.0.1:13456 (our default bootstrap port). Auth is
-    # a nominal value — CCR doesn't check the incoming key, only the one
-    # it forwards to the upstream gateway (configured in CCR's config.json).
-    ccr_base_url: str = "http://127.0.0.1:13456"
-    ccr_api_key: SecretStr = SecretStr("dummy")
-
-    # Cap the tool-use loop. Hits for both backends.
     max_turns: int = 12
     max_tool_calls: int = Field(default=24, ge=0)
     max_input_tokens: int = Field(default=120_000, gt=0)
@@ -248,18 +260,74 @@ class HooksConfig(BaseModel):
     # data_dir and cwd. List of absolute paths (or `~`-prefixed).
     path_allowlist_extra: list[str] = Field(default_factory=list)
 
+class KBConfig(BaseModel):
+    ingest_mode: Literal["direct", "cocoindex"] = "direct"
+    vector_store: Literal["chroma", "lancedb"] = "chroma"
+    lancedb_uri: str = "./lancedb_data"
+    cocoindex_inbox: str = "./cocoindex_inbox"
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if self.ingest_mode == "cocoindex" and self.vector_store != "lancedb":
+            raise ValueError(
+                "ingest_mode='cocoindex' requires vector_store='lancedb' "
+                f"(got vector_store='{self.vector_store}')"
+            )
+        return self
 
 # ---------------------------------------------------------------------------
 # Root settings
 # ---------------------------------------------------------------------------
 
 
+class WorkspaceConfig(BaseModel):
+    """Storage layout and history retention are independent policies."""
+    storage_mode: Literal['auto', 'snapshot', 'incremental'] = 'auto'
+    input_policy: Literal['standard', 'dataspace'] = 'standard'
+    retention: Literal['auto', 'latest', 'recent', 'all'] = 'auto'
+    keep_last: int = Field(default=10, ge=1)
+    auto_gc: bool = True
+    lease_ttl_s: float = Field(default=1800, ge=10)
+    lock_timeout_s: float = Field(default=120, gt=0)
+
+
+class VideoConfig(BaseModel):
+    """Optional MP4 preprocessing. Models are loaded only for video inputs."""
+
+    vision: LLMConfig | None = None
+    asr_model_dir: Path | None = None
+    language_model_dir: Path | None = None
+    language: str | None = None
+    asr_threads: int = Field(default=4, ge=1, le=64)
+    ocr_concurrency: int = Field(default=4, ge=1, le=16)
+    # Extra attempts only for invalid layout output; transport retries belong to vision.
+    ocr_format_retries: int = Field(default=0, ge=0, le=3)
+    ocr_response_format: Literal["hiccup", "json_schema", "text"] = "hiccup"
+    ocr_enabled: bool = True
+    asr_enabled: bool = True
+    max_frames: int = Field(default=256, ge=1, le=2000)
+    max_duration_s: float = Field(default=3600, gt=0)
+    max_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
+    timeout_s: float = Field(default=600, gt=0)
+    # Periodic guard frames supplement packet-burst detection for hard cuts.
+    guard_interval_s: float = Field(default=15, gt=0)
+    spike_ratio: float = Field(default=6, gt=1)
+    merge_gap_s: float = Field(default=0.4, ge=0)
+    min_quiet_s: float = Field(default=1.5, ge=0)
+    settle_margin_s: float = Field(default=0.2, ge=0)
+    cache_revision: str = "1"
+
+
 class Settings(BaseSettings):
     """Top-level settings. Use `Settings()` to load from env/.env files."""
 
-    llm: LLMConfig
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    codex: CodexHostConfig = Field(default_factory=CodexHostConfig)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+    video: VideoConfig = Field(default_factory=VideoConfig)
     embedding: EmbeddingConfig = EmbeddingConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
+    kb: KBConfig = KBConfig()
     graph: GraphConfig = GraphConfig()
     db: DBConfig = DBConfig()
     memory: MemoryConfig = MemoryConfig()
@@ -272,12 +340,22 @@ class Settings(BaseSettings):
         # Two files tried in order; later entries take precedence.
         env_file=(".env", ".env.datamind"),
         env_nested_delimiter="__",
+        env_parse_none_str="null",
         env_prefix="DATAMIND__",
         extra="ignore",
         case_sensitive=False,
     )
 
     # ------------------------------------------------------------------ misc
+
+    @property
+    def log_dir(self) -> Path:
+        """Keep independent workspaces/revisions out of the same audit chain."""
+        if self.logging.directory is None:
+            return self.data.storage_dir
+        import hashlib
+        scope = hashlib.sha256(str(self.data.storage_dir.resolve()).encode()).hexdigest()[:16]
+        return self.logging.directory.expanduser().resolve() / self.data.profile / scope
 
     def ensure_dirs(self) -> None:
         """Create per-profile directories if missing. Idempotent."""
@@ -287,6 +365,9 @@ class Settings(BaseSettings):
 
 __all__ = [
     "Settings",
+    "DataSettings",
+    "CodexHostConfig",
+    "WorkspaceConfig",
     "LLMConfig",
     "EmbeddingConfig",
     "RetrievalConfig",
@@ -298,3 +379,7 @@ __all__ = [
     "AgentConfig",
     "HooksConfig",
 ]
+
+
+# Compatibility name for callers introduced with the direct data layer.
+DataSettings = Settings

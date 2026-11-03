@@ -15,6 +15,7 @@ import pytest
 from datamind.agent.loop_native import NativeAgentLoop
 from datamind.agent.base import AgentLoopConfig
 from datamind.core.errors import FinalAnswerContractError
+from datamind.core.protocols import ModelStreamEvent
 from datamind.core.tools import ToolRegistry, ToolSpec
 
 
@@ -60,6 +61,23 @@ class _FakeMessages:
 class _FakeClient:
     def __init__(self, script: list[_Message]) -> None:
         self.messages = _FakeMessages(script)
+
+
+class _HangingStreamClient:
+    protocol = "test"
+
+    def __init__(self) -> None:
+        self.cancelled = asyncio.Event()
+
+    async def complete(self, **kwargs: Any):
+        raise AssertionError("stream test should not call complete")
+
+    async def stream(self, **kwargs: Any):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.cancelled.set()
+        yield ModelStreamEvent(type="done")
 
 
 # ------------------------------------------------------- tiny tool ---
@@ -226,6 +244,28 @@ async def test_slow_tool_is_cut_off_to_preserve_contract_finalization_budget():
 
 
 @pytest.mark.asyncio
+async def test_stream_turn_enforces_model_wall_clock_deadline():
+    client = _HangingStreamClient()
+    loop = NativeAgentLoop(
+        client=client,
+        tools=ToolRegistry(),
+        config=AgentLoopConfig(model="m", wall_clock_timeout_s=0.1),
+    )
+
+    async def collect():
+        return [event async for event in loop.stream_turn(user_message="hello")]
+
+    try:
+        events = await asyncio.wait_for(collect(), timeout=0.5)
+    except asyncio.TimeoutError:
+        pytest.fail("stream_turn ignored the configured wall-clock deadline")
+
+    assert events[-1].type == "error"
+    assert "timed out" in events[-1].data["message"]
+    assert client.cancelled.is_set()
+
+
+@pytest.mark.asyncio
 async def test_tool_error_is_surfaced_as_tool_result():
     script = [
         _Message(
@@ -308,25 +348,7 @@ async def test_hooks_fire_around_tool_call():
     assert calls == [("start", "echo"), ("end", "echo")]
 
 
-def test_prompt_groups_tools_by_category():
-    from datamind.agent.prompts import build_system_prompt
-
-    reg = ToolRegistry()
-    reg.add(
-        ToolSpec(
-            name="kb_search", description="", input_schema={},
-            handler=lambda: None, metadata={"group": "kb"},  # type: ignore[arg-type]
-        )
-    )
-    reg.add(
-        ToolSpec(
-            name="db_query_sql", description="", input_schema={},
-            handler=lambda: None, metadata={"group": "db"},  # type: ignore[arg-type]
-        )
-    )
-    prompt = build_system_prompt([reg.get(n) for n in reg.names()])
-    assert "kb_search" in prompt
-    assert "db_query_sql" in prompt
-    # Chinese section labels present.
-    assert "知识库" in prompt
-    assert "数据库" in prompt
+def test_main_codex_instructions_delegate_only_data_execution():
+    from datamind.mcp import INSTRUCTIONS
+    assert 'main agent' in INSTRUCTIONS
+    assert 'DataMind only executes data tools' in INSTRUCTIONS
