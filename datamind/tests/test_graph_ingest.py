@@ -2,12 +2,35 @@ from pathlib import Path
 
 import pytest
 
-from datamind.capabilities.ingest.service import IngestService
+from datamind.capabilities.ingest import service as ingest_service
+from datamind.capabilities.ingest.formats import ExtractedDocument
+from datamind.capabilities.ingest.service import IngestService, _infer_table_name
 from datamind.core.errors import CapabilityError
+
+
+@pytest.mark.parametrize(
+    ("stem", "expected"),
+    [
+        ("03-customers-2026", "t_03_customers_2026"),
+        ("sales-pipeline-q2", "sales_pipeline_q2"),
+        ("", "table"),
+    ],
+)
+def test_infer_table_name_normalizes_filename_stems(stem: str, expected: str):
+    assert _infer_table_name(stem) == expected
 
 
 class _Model:
     async def generate_text(self, prompt: str, **kwargs) -> str:
+        return '[{"subject":"Alice","relation":"works_on","object":"Project X"}]'
+
+
+class _RecordingModel:
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    async def generate_text(self, prompt: str, **kwargs) -> str:
+        self.prompts.append(prompt)
         return '[{"subject":"Alice","relation":"works_on","object":"Project X"}]'
 
 
@@ -188,6 +211,115 @@ async def test_graph_add_path_rejects_unsupported_single_file(tmp_path: Path):
 
     with pytest.raises(CapabilityError, match="unsupported extension"):
         await service.graph_add_path(path=str(source))
+
+
+@pytest.mark.asyncio
+async def test_graph_add_path_extracts_docx_content(tmp_path: Path):
+    docx = pytest.importorskip("docx")
+    source = tmp_path / "report.docx"
+    document = docx.Document()
+    document.add_paragraph("Alice owns Project X")
+    document.save(source)
+
+    graph = _Graph()
+    service = IngestService(
+        kb=None,
+        db=None,
+        graph=graph,
+        llm_client=_Model(),
+        llm_model="test",
+        profile_data_dir=tmp_path / "profile",
+        chunk_size=512,
+        chunk_overlap=64,
+    )
+
+    result = await service.graph_add_path(path=str(source))
+
+    assert result["files_processed"] == 1
+    assert result["triples_added"] == 1
+    assert result["skipped_count"] == 0
+    assert graph.store.triples[0].source == str(source)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", [".pdf", ".pptx"])
+async def test_graph_add_path_accepts_extracted_document_formats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str,
+):
+    source = tmp_path / f"report{suffix}"
+    source.write_bytes(b"fixture")
+
+    def fake_extract(path: Path) -> ExtractedDocument:
+        return ExtractedDocument(
+            source=str(path), format=suffix[1:], text="Alice owns Project X",
+            blocks=[{"type": "text", "text": "Alice owns Project X"}],
+        )
+
+    monkeypatch.setattr(ingest_service, "extract_document", fake_extract)
+    graph = _Graph()
+    service = IngestService(
+        kb=None, db=None, graph=graph, llm_client=_Model(), llm_model="test",
+        profile_data_dir=tmp_path / "profile", chunk_size=512, chunk_overlap=64,
+    )
+
+    result = await service.graph_add_path(path=str(source))
+
+    assert result["files_processed"] == 1
+    assert result["triples_added"] == 1
+    assert result["skipped_count"] == 0
+    assert graph.store.triples[0].source == str(source)
+
+
+@pytest.mark.asyncio
+async def test_graph_add_path_skips_malformed_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "broken.docx"
+    source.write_bytes(b"not a zip archive")
+
+    def broken_extract(path: Path) -> ExtractedDocument:
+        raise ValueError("malformed Office package")
+
+    monkeypatch.setattr(ingest_service, "extract_document", broken_extract)
+    result = await _service(tmp_path).graph_add_path(path=str(source))
+
+    assert result["files_processed"] == 0
+    assert result["triples_added"] == 0
+    assert result["skipped_count"] == 1
+    assert "ValueError" in result["skipped"][0]
+
+
+@pytest.mark.asyncio
+async def test_graph_add_path_chunks_large_documents_and_keeps_part_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "large.docx"
+    source.write_bytes(b"fixture")
+    model = _RecordingModel()
+    graph = _Graph()
+    service = IngestService(
+        kb=None, db=None, graph=graph, llm_client=model, llm_model="test",
+        profile_data_dir=tmp_path / "profile", chunk_size=32, chunk_overlap=8,
+    )
+
+    def fake_extract(path: Path) -> ExtractedDocument:
+        return ExtractedDocument(
+            source=str(path), format="docx", text="\n\n".join(
+                ["Alice owns Project X", "Bob owns Project Y", "Carol owns Project Z"]
+            ),
+        )
+
+    monkeypatch.setattr(ingest_service, "extract_document", fake_extract)
+    result = await service.graph_add_path(path=str(source))
+
+    assert result["files_processed"] == 1
+    assert result["triples_added"] == 3
+    assert result["files"][0]["parts_processed"] == 3
+    assert len(model.prompts) == 3
+    assert all(len(prompt) <= 32 + 600 for prompt in model.prompts)
+    assert {triple.source for triple in graph.store.triples} == {
+        f"{source}#part=1", f"{source}#part=2", f"{source}#part=3",
+    }
 
 @pytest.mark.asyncio
 async def test_raw_file_read_is_paginated_and_hashed(tmp_path: Path):

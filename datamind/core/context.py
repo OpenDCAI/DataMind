@@ -30,9 +30,6 @@ class RequestContext:
     profile: str = "default"
     user_id: str | None = None
     trace_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
-    # Serving requests may pin themselves to an immutable profile snapshot.
-    snapshot_id: str | None = None
-    snapshot_revisions: dict[str, int] = field(default_factory=dict)
     # Ad-hoc request-scoped state. Prefer named fields for anything recurring;
     # this is the escape hatch.
     extra: dict[str, Any] = field(default_factory=dict)

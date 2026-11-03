@@ -51,7 +51,13 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
     async def _upsert(triples: list[dict]) -> dict:
         return await graph.upsert(triples)
 
+    async def _schema():
+        return graph.store.schema()
+
     return [
+        ToolSpec(name='graph_schema', description='Discover observed node types and relation names before graph search.',
+                 input_schema={'type': 'object', 'properties': {}}, handler=_schema,
+                 metadata={'surface': 'graph', 'access': 'read'}),
         ToolSpec(
             name="graph_search_entities",
             description=(
@@ -147,6 +153,15 @@ def build_graph_tools(graph: GraphService) -> list[ToolSpec]:
                                 "object_type": {"type": "string", "default": "entity"},
                                 "confidence": {"type": "number", "default": 1.0},
                                 "source": {"type": ["string", "null"]},
+                                "evidence": {"type": "array", "items": {
+                                    "type": "object", "properties": {
+                                        "source_id": {"type": "string"},
+                                        "source_version": {"type": "string"},
+                                        "locator": {"type": "object"},
+                                        "method": {"type": "string", "enum": ["explicit", "extracted", "inferred"]},
+                                        "pipeline_version": {"type": "string"},
+                                    }, "required": ["source_id", "source_version"],
+                                }},
                             },
                             "required": ["subject", "relation", "object"],
                         },

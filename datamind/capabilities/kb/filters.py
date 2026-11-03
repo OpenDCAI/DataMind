@@ -52,16 +52,26 @@ def matches_metadata(metadata: dict[str, Any], where: dict[str, Any] | None) -> 
             continue
         op, value = next(iter(expected.items()))
         try:
-            ok = {
-                "$eq": actual == value,
-                "$ne": actual != value,
-                "$in": actual in value,
-                "$nin": actual not in value,
-                "$gt": actual > value,
-                "$gte": actual >= value,
-                "$lt": actual < value,
-                "$lte": actual <= value,
-            }[op]
+            # Dispatch before evaluating the operation. Building a mapping of
+            # boolean results evaluates every comparator, so an unrelated
+            # ordering or membership operation can turn a valid match into a
+            # false negative (for example, 42 == 42 also evaluates 42 in 42).
+            if op == "$eq":
+                ok = actual == value
+            elif op == "$ne":
+                ok = actual != value
+            elif op == "$in":
+                ok = actual in value
+            elif op == "$nin":
+                ok = actual not in value
+            elif op == "$gt":
+                ok = actual > value
+            elif op == "$gte":
+                ok = actual >= value
+            elif op == "$lt":
+                ok = actual < value
+            else:
+                ok = actual <= value
         except (TypeError, KeyError):
             ok = False
         if not ok:

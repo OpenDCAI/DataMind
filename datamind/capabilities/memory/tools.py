@@ -82,6 +82,7 @@ def build_memory_tools(
             session_id=eff_session,
             top_k=top_k,
             kinds=kinds,
+            scope_filter=scope_filter,
         )
         return {"query": query, "count": len(hits), "results": hits}
 

@@ -37,6 +37,10 @@ _PATH_TOOLS = {
     "kb_add_file": "path",
     "kb_add_path": "path",
     "db_import_csv": "path",
+    "graph_replace_source": "path",
+    "graph_forget_source": "path",
+    "workspace_prepare": "path",
+    "workspace_publish": "path",
 }
 
 

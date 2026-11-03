@@ -100,19 +100,6 @@ class NativeAgentLoop:
         except Exception as exc:  # unknown tool
             return None, exc, None
 
-        # Providers currently expose a live view.  If publication advances
-        # after this request was pinned, fail closed instead of returning a
-        # mixed-snapshot result.  Historical adapters can satisfy this check
-        # by selecting the requested snapshot in the future.
-        ctx = current_context()
-        if ctx is not None and spec.access == ToolAccess.READ and spec.surface is not None:
-            snapshots = ctx.extra.get("snapshot_store")
-            if snapshots is not None:
-                try:
-                    snapshots.assert_readable(ctx.snapshot_id, spec.surface)
-                except Exception as exc:  # preserve normal tool-error semantics
-                    return None, exc, None
-
         effective_args = dict(tool_input)
         hook_outcome: dict[str, Any] | None = None
 
@@ -296,11 +283,6 @@ class NativeAgentLoop:
             "result_size_chars": len(self._safe_json(result)),
             "duplicate": duplicate,
         }
-        ctx = current_context()
-        if ctx is not None:
-            trace["snapshot_id"] = ctx.snapshot_id
-            if surface is not None:
-                trace["surface_revision"] = ctx.snapshot_revisions.get(str(surface))
         if error is not None:
             trace.update({
                 "error_type": type(error).__name__,
@@ -400,11 +382,6 @@ class NativeAgentLoop:
                 "content": result,
                 "score": None,
             })
-        if ctx is not None:
-            for item in evidence:
-                item["snapshot_id"] = ctx.snapshot_id
-                if surface is not None:
-                    item["surface_revision"] = ctx.snapshot_revisions.get(str(surface))
         return trace, evidence
 
     @staticmethod
@@ -838,6 +815,7 @@ class NativeAgentLoop:
         if contract_prompt:
             system_prompt = f"{system_prompt}\n\n{contract_prompt}".strip()
 
+        started = time.monotonic()
         for iteration in range(self._cfg.max_tool_turns):
             allow_tools = (
                 iteration < self._cfg.max_tool_turns - 1
@@ -845,19 +823,27 @@ class NativeAgentLoop:
                 and total_input < self._cfg.max_input_tokens
             )
             final: ModelResponse | None = None
-            async for model_event in self._model_client.stream(
-                model=self._cfg.model,
-                max_tokens=self._cfg.max_tokens,
-                temperature=self._cfg.temperature,
-                system=system_prompt or None,
-                tools=self._tools.as_anthropic_tools() if allow_tools and len(self._tools) else None,
-                tool_choice=None if allow_tools else "none",
-                messages=conv,
-            ):
-                if model_event.type == "text" and model_event.delta:
-                    yield AgentEvent(type="text", data={"delta": model_event.delta})
-                elif model_event.type == "done":
-                    final = model_event.response
+            remaining = max(
+                0.1, self._cfg.wall_clock_timeout_s - (time.monotonic() - started)
+            )
+            try:
+                async with asyncio.timeout(remaining):
+                    async for model_event in self._model_client.stream(
+                        model=self._cfg.model,
+                        max_tokens=self._cfg.max_tokens,
+                        temperature=self._cfg.temperature,
+                        system=system_prompt or None,
+                        tools=self._tools.as_anthropic_tools() if allow_tools and len(self._tools) else None,
+                        tool_choice=None if allow_tools else "none",
+                        messages=conv,
+                    ):
+                        if model_event.type == "text" and model_event.delta:
+                            yield AgentEvent(type="text", data={"delta": model_event.delta})
+                        elif model_event.type == "done":
+                            final = model_event.response
+            except TimeoutError:
+                yield AgentEvent(type="error", data={"message": "model stream timed out"})
+                return
             if final is None:
                 yield AgentEvent(type="error", data={"message": "model stream ended without a final response"})
                 return

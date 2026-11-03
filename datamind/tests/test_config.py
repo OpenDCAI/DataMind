@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from datamind.config import Settings
+from datamind.config import DBConfig, DataConfig, Settings
 
 
 def test_nested_env_hydrates_required_llm(monkeypatch, tmp_path):
@@ -30,12 +30,11 @@ def test_nested_env_hydrates_required_llm(monkeypatch, tmp_path):
     assert s.llm.model == "claude-opus-4-7"
 
 
-def test_missing_api_key_raises(monkeypatch, tmp_path):
+def test_data_settings_do_not_require_conversation_api_key(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     # Explicitly clear the key even if it leaked from the real env
     monkeypatch.delenv("DATAMIND__LLM__API_KEY", raising=False)
-    with pytest.raises(ValidationError):
-        Settings()
+    assert Settings().llm.api_key.get_secret_value() == ""
 
 
 def test_profile_paths_switch_in_lockstep(monkeypatch, tmp_path):
@@ -101,3 +100,23 @@ def test_ensure_dirs_is_idempotent(monkeypatch, tmp_path):
 
     assert (tmp_path / "data" / "profiles" / "tp").is_dir()
     assert (tmp_path / "storage" / "tp").is_dir()
+
+
+@pytest.mark.parametrize(
+    "profile",
+    ["../escape", r"..\escape", "nested/name", ".", "..", ""],
+)
+def test_profile_name_cannot_escape_profile_root(profile, tmp_path):
+    with pytest.raises(ValidationError):
+        DataConfig(base_dir=tmp_path, profile=profile)
+
+
+def test_profile_assignment_keeps_path_boundary(tmp_path):
+    config = DataConfig(base_dir=tmp_path)
+    with pytest.raises(ValidationError):
+        config.profile = "../escape"
+
+
+def test_db_config_rejects_nonpositive_row_limit():
+    with pytest.raises(ValidationError):
+        DBConfig(row_limit=0)

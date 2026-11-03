@@ -7,6 +7,7 @@ import pytest
 
 from datamind.capabilities.skills import (
     SkillManifest,
+    SkillsService,
     discover_skills,
     load_skill,
 )
@@ -60,6 +61,54 @@ def test_discover_skills_scans_subdirs(tmp_path: Path):
 
     ms = discover_skills(tmp_path)
     assert [m.name for m in ms] == ["a", "b"]
+
+
+class _SkillEmbedding:
+    dimension = 1
+
+    async def embed_texts(self, texts):
+        return [[float(index)] for index, _ in enumerate(texts)]
+
+
+class _SkillVectorStore:
+    def __init__(self):
+        self.items = {}
+
+    async def reset(self):
+        self.items.clear()
+
+    async def add(self, ids, texts, embeddings, metadatas):
+        self.items = {
+            item_id: (text, metadata)
+            for item_id, text, metadata in zip(ids, texts, metadatas)
+        }
+
+
+@pytest.mark.asyncio
+async def test_skill_reload_clears_index_when_all_manifests_are_removed(tmp_path: Path):
+    skill_dir = tmp_path / 'alpha'
+    skill_dir.mkdir()
+    manifest = skill_dir / 'SKILL.md'
+    manifest.write_text(
+        '---\nname: alpha\ndescription: Alpha\n---\n\nBody\n',
+        encoding='utf-8',
+    )
+    store = _SkillVectorStore()
+    service = SkillsService(
+        skills_dir=tmp_path,
+        profile_skills_dir=tmp_path / 'profile',
+        embedding=_SkillEmbedding(),
+        vector_store=store,
+    )
+
+    await service.load()
+    assert sorted(store.items) == ['alpha']
+
+    manifest.unlink()
+    stats = await service.load()
+
+    assert stats['manifests'] == 0
+    assert store.items == {}
 
 
 # ---------------------------------------------------------- code skills ---

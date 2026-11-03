@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datamind"
-description = "Two-agent inference-time data system over RAG, Graph, DB, Skills, and Memory"
+description = "Shared workspace data layer for Codex over RAG, Graph, DB, Skills, and Memory"
 requires-python = ">=3.11"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = [
     "AI", "agent", "RAG", "GraphRAG", "Text2SQL",
-    "knowledge-graph", "memory", "MCP", "data-agent", "claude",
+    "knowledge-graph", "memory", "MCP", "data-agent", "codex",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -37,6 +37,7 @@ dependencies = [
 
     # Config / validation / logging primitives
     "pydantic>=2.6",
+    "jsonschema>=4.0",
     "pydantic-settings>=2.2",
 
     # KB
@@ -61,6 +62,7 @@ dependencies = [
 
     # Async primitives
     "anyio>=4.2",
+    "filelock>=3.16",
 
     # Workspace document/table extraction
     "pypdf>=5.0",
@@ -76,13 +78,17 @@ Repository    = "https://github.com/OpenDCAI/DataMind"
 Issues        = "https://github.com/OpenDCAI/DataMind/issues"
 
 [project.optional-dependencies]
-# Legacy v0.1 stack — kept so the old main.py / server.py / modules/* keep
-# working side-by-side with the new datamind/ package.
+# Historical v0.1 capability modules only; main.py/server.py now delegate
+# to the shared Codex CLI/HTTP host. This extra does not select an agent backend.
 legacy = [
     "llama-index>=0.11",
 ]
 
 # Dialect / provider extras — installed on demand, no hard requirement
+codex = ["openai-codex>=0.163,<0.164"]
+versioning = ["lancedb>=0.40,<0.41", "pylance>=9,<10", "pyarrow>=19"]
+cocoindex = ["lancedb>=0.40,<0.41", "pylance>=9,<10", "pyarrow>=19", "cocoindex>=1.0"]
+dolt = ["pymysql>=1.1", "mysql-connector-python>=9"]
 mysql = ["pymysql>=1.1", "cryptography>=42"]
 postgres = ["psycopg[binary]>=3.1"]
 voyage = ["voyageai>=0.2"]

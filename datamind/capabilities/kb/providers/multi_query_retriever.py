@@ -74,6 +74,36 @@ class MultiQueryRetriever:
         )
         return merged[:top_k]
 
+    async def aretrieve_at_version(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        filters: dict[str, Any] | None = None,
+        version: int = None,
+    ) -> list[RetrievedChunk]:
+        subqueries = await self._rewrite(query)
+        subqueries = [query, *subqueries][: self._n + 1]
+
+        # Fan out: embed + query for each subquery in parallel.
+        vecs = await self._embed.embed_texts(subqueries)
+        results = await asyncio.gather(
+            *(
+                self._store.query(v, top_k=top_k, where=filters, version=version)
+                for v in vecs
+            )
+        )
+        merged = self._merge(results)
+        _log.info(
+            "retrieved",
+            extra={
+                "subqueries": subqueries,
+                "top_k": top_k,
+                "merged": len(merged),
+            },
+        )
+        return merged[:top_k]
+
     # -------------------------------------------------------------- private
 
     async def _rewrite(self, query: str) -> list[str]:

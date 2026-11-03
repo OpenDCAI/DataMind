@@ -5,6 +5,7 @@ Each submodule registers itself with `retriever_registry` (or
 """
 from __future__ import annotations
 
+from . import lancedb_store  # noqa: F401
 from . import chroma_store  # noqa: F401 — vector_store_registry
 from . import hybrid_retriever  # noqa: F401 — retriever_registry
 from . import multi_query_retriever  # noqa: F401
