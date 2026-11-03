@@ -42,7 +42,7 @@ def _build_hook_chain(settings: Settings) -> HookChain | None:
     if cfg.destructive_sql:
         chain_hooks.append(DestructiveSqlHook())
     if cfg.audit_log:
-        chain_hooks.append(AuditLogHook(audit_path=settings.data.storage_dir / "audit.jsonl"))
+        chain_hooks.append(AuditLogHook(audit_path=settings.log_dir / "audit.jsonl"))
     return HookChain(chain_hooks) if chain_hooks else None
 
 
@@ -99,6 +99,8 @@ async def assemble_data_plane(settings: Settings, *, enable: set[str] | None = N
     )
 
     catalogue = ToolRegistry()
+    from datamind.video_tools import video_tools
+    catalogue.extend(video_tools(settings))
     ingest_tools = build_ingest_tools(ingest) if ingest is not None else []
     catalogue.extend([t for t in ingest_tools if t.surface is None])
     if "kb" in active:

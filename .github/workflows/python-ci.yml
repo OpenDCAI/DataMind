@@ -26,7 +26,7 @@ jobs:
           cache: pip
 
       - name: Install package and test dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,dataspace]"
 
       - name: Compile package
         run: python -m compileall -q datamind
@@ -47,7 +47,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install optional versioning and ingest dependencies
-        run: python -m pip install -e ".[dev,cocoindex,dolt]"
+        run: python -m pip install -e ".[dev,cocoindex,dolt,dataspace]"
       - name: Run local versioning, publication and recovery contracts
         run: >-
           python scripts/ci_required_tests.py -q
@@ -57,6 +57,9 @@ jobs:
           datamind/tests/test_workspace_revisions.py
           datamind/tests/test_workspace_incremental.py
           datamind/tests/test_ingestion_skills.py
+          datamind/tests/test_dataspace_inputs.py
+          datamind/tests/test_native_sqlite.py
+          datamind/tests/test_video_workspace.py
 
   databases:
     name: MySQL and Dolt integration

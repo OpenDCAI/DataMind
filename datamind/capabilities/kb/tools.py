@@ -28,6 +28,16 @@ def build_kb_tools(kb: KBService) -> list[ToolSpec]:
     """Return the concrete ToolSpecs bound to this KBService instance."""
 
     async def _search_result(query, top_k, filters, version=None, historical=False):
+        # An empty live/pinned index is not a search of the input filesystem.
+        # Do not buy a query embedding when there is nothing to retrieve.
+        if not historical and await kb.count() == 0:
+            return {"query": query, "top_k": top_k, "results": [], "count": 0,
+                    "total_count": 0, "truncated": False, "next_cursor": None,
+                    "index_status": "empty", "indexed_chunks": 0,
+                    "hint": "No chunks are indexed in this KB. This does not establish that the input files lack the answer. "
+                            "Read relevant original files with raw_file_read, or select files for kb_add_path before kb_search. "
+                            "Workspace publication or full-dataset ingestion is not required.",
+                    "retrieval": recovery_summary([])}
         parent = current_context()
         ctx = replace(parent, extra={**parent.extra, "recovery_events": []}) if parent else RequestContext.new()
         with bind_context(ctx):

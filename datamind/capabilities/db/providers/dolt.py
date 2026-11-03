@@ -94,6 +94,7 @@ class DoltDialect(BaseSQLDialect):
         except ImportError as exc:
             raise ConfigError("Dolt requires pip install datamind[dolt]") from exc
         storage_dir = kwargs.pop("storage_dir", None)
+        log_dir = kwargs.pop("log_dir", None) or storage_dir
         server_config = kwargs.pop("server_config", None)
         if not storage_dir:
             raise ValueError("Dolt needs either a data dir.")
@@ -139,7 +140,8 @@ class DoltDialect(BaseSQLDialect):
                 return s.connect_ex((host, port)) == 0
 
         if not _listening():
-            log_path = os.path.join(storage_dir, "dolt_server.log")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "dolt_server.log")
             log_file = open(log_path, "w")
             self._server_log_path = log_path
             self._server = subprocess.Popen(
@@ -392,7 +394,7 @@ class DoltDialect(BaseSQLDialect):
 
         return await asyncio.to_thread(_run)
 
-    def _bound_query(self, sql: str, row_limit: int) -> str:
+    def _bound_query(self, sql: str, row_limit: int | None) -> str:
         # Dolt 2.5 can return an OK packet instead of rows for a derived-table
         # wrapper that projects _source_file. Bound the original SELECT AST,
         # preserving smaller LIMITs and OFFSET, rather than nesting it.
@@ -452,7 +454,7 @@ class DoltDialect(BaseSQLDialect):
         engine: Engine,
         sql: str,
         *,
-        row_limit: int = 1000,
+        row_limit: int | None = 1000,
         timeout_s: float = 10.0,
         version: str | None = None,
     ) -> None:
@@ -465,7 +467,7 @@ class DoltDialect(BaseSQLDialect):
         """
         version = self.validate_version(version)
         self._validate_readonly_sql(sql, row_limit)
-        bounded = self._bound_query(sql, row_limit + 1)
+        bounded = sql if row_limit is None else self._bound_query(sql, row_limit + 1)
         bounded = self._inject_as_of(bounded, version)
         return await self._execute_bounded_readonly(
             engine, bounded, row_limit=row_limit, timeout_s=timeout_s,

@@ -32,6 +32,10 @@ parameter is reserved for custom capability pipelines and benchmark fixtures.
 
 ## Codex hosting
 
+SQL tools in the MCP agent interface require query intent and use request-scoped
+final-answer column definitions. See [query contracts](QUERY_CONTRACTS.md) for
+the tool workflow, Python compatibility, and final-file validation API.
+
 ```python
 from datamind.config import DataSettings
 from datamind.host import CodexHost
@@ -53,6 +57,12 @@ Completion includes `answer`, `receipts`, `evidence`, `tool_trace`,
 `surfaces_used`, `iterations`, `stop_reason`, `usage`, `request_id`,
 `workspace_revision` and `recovery`. The iteration count represents observed
 data/tool calls, not internal model reasoning iterations.
+
+`final_contract` is checked locally before session completion. An optional
+read-only `final_validator(value, *, request_id, workspace_revision)` performs
+artifact checks, including through the reusable `ManagedAnswerExportValidator`.
+Validation failures trigger bounded continuation in the same SDK session and
+original deadline; details are in [query contracts](QUERY_CONTRACTS.md).
 
 Actual MCP operations supply request-scoped traces and receipts, including
 when SDK Code Mode wraps calls inside a generic execution event. Evidence is

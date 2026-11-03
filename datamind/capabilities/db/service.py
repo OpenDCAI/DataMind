@@ -34,6 +34,9 @@ class DBService:
         db_cfg: DBConfig,
         llm_client: TextModelClient | None = None,
         llm_model: str | None = None,
+        metadata_path: Path | None = None,
+        result_dir: Path | None = None,
+        native_reference: bool = False,
     ) -> None:
         self.dialect = dialect
         self.engine = engine
@@ -41,6 +44,10 @@ class DBService:
         self._llm = llm_client
         self._model = llm_model
         self._schema_cache: dict[str, TableSchema] = {}
+        self.metadata_path = metadata_path
+        self.result_dir = result_dir
+        self.native_reference = native_reference
+        self.native_registry_path = metadata_path.with_name("sqlite_databases.json") if metadata_path else None
 
     # --------------------------------------------------------------- public
 
@@ -50,7 +57,22 @@ class DBService:
     async def describe(self, table: str) -> TableSchema:
         if table not in self._schema_cache:
             self._schema_cache[table] = await self.dialect.describe(self.engine, table)
-        return self._schema_cache[table]
+        result = self._schema_cache[table]
+        if self.metadata_path and self.metadata_path.is_file():
+            import json
+            result = result.model_copy(update={'source_metadata': json.loads(self.metadata_path.read_text()).get(table)})
+        return result
+
+    def record_table_metadata(self, table, value):
+        if self.metadata_path is not None:
+            import json
+            from filelock import FileLock
+            from datamind.workspace import _atomic_json
+            self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            with FileLock(str(self.metadata_path) + '.lock'):
+                data = json.loads(self.metadata_path.read_text()) if self.metadata_path.exists() else {}
+                data[table] = value
+                _atomic_json(self.metadata_path, data)
 
     async def describe_all(self) -> list[TableSchema]:
         names = await self.list_tables()
@@ -79,6 +101,10 @@ class DBService:
             row_limit=self.db_cfg.row_limit,
             timeout_s=self.db_cfg.query_timeout_s,
         )
+
+    async def export_sql(self, sql: str) -> dict:
+        from .results import export_csv
+        return await export_csv(self.dialect, self.engine, self.db_cfg, self.result_dir, sql)
 
     async def query_nl(
         self,
@@ -226,7 +252,8 @@ def build_db_service(
     dialect = db_registry.create(dialect_name)
 
     if settings.db.dialect == "dolt":
-        engine = dialect.build_engine(settings.db.dsn, storage_dir=str(settings.data.storage_dir))
+        engine = dialect.build_engine(settings.db.dsn, storage_dir=str(settings.data.storage_dir),
+                                      log_dir=str(settings.log_dir))
     elif settings.db.dialect == "sqlite" and not settings.db.dsn:
         # Default to a per-profile demo.db under storage/
         default_path = settings.data.storage_dir / "demo.db"
@@ -238,6 +265,9 @@ def build_db_service(
         dialect=dialect,
         engine=engine,
         db_cfg=settings.db,
+        metadata_path=settings.data.storage_dir / "table_metadata.json",
+        result_dir=settings.data.storage_dir / "query_results",
+        native_reference=settings.workspace.input_policy == "dataspace",
         llm_client=llm_client,
         llm_model=settings.llm.model if llm_client else None,
     )

@@ -53,12 +53,17 @@ async def test_direct_graph_sql_skills_memory_no_model(settings):
     edges = await call(token, 'graph_neighbors', entity='Policy')
     assert edges['result']['count'] == 1
     await call(token, 'db_import_records', table='sales', records=[{'amount': 42}])
-    rows = await call(token, 'db_query_sql', sql='SELECT amount FROM sales')
+    with pytest.raises(ValidationError, match='intent'):
+        await call(token, 'db_query_sql', sql='SELECT amount FROM sales')
+    definition = (await call(token, 'db_answer_schema', question='Return the sales amount.',
+        columns=[{'name':'amount','requirement':'The requested sales amount'}],row_shape='records'))['result']
+    rows = await call(token, 'db_query_sql', sql='SELECT amount FROM sales',
+        intent={'purpose':'answer','question':'Return the sales amount.','return_columns':['amount'],'schema_id':definition['schema_id']})
     assert str(rows['result']['rows'][0][0]) == '42'
     await call(token, 'memory_save', content='Reports are in Chinese')
     recalled = await call(token, 'memory_recall', query='Chinese')
     assert 'Chinese' in json.dumps(recalled)
-    audit = settings.data.storage_dir / 'audit.jsonl'
+    audit = settings.log_dir / 'audit.jsonl'
     assert 'graph_upsert_triples' in audit.read_text()
 
 
@@ -204,7 +209,7 @@ async def test_direct_publication_pins_kb_sql_graph_and_raw_across_calls(setting
         assert all(r['status'] == 'stored' for r in result['result']['results']), result
         manifest = result['result']['results'][0]['details']
         assert manifest['metrics']['graph_extraction_calls'] == 0
-        assert manifest['applied_skills'][0]['version'] == '1.3.0'
+        assert manifest['applied_skills'][0]['version'] == '1.4.0'
         return manifest['workspace_revision']
     first = await publish('OldOwner')
     reader = await begin('read')
@@ -215,7 +220,8 @@ async def test_direct_publication_pins_kb_sql_graph_and_raw_across_calls(setting
     for token,owner,amount in [(reader,'OldOwner','10'),(await begin('read'),'NewOwner','20')]:
         kb = await call(token,'kb_search',query='Project owner')
         graph = await call(token,'graph_search_entities',query=owner)
-        sql = await call(token,'db_query_sql',sql=f'SELECT amount FROM "{tables[0]}"')
+        sql = await call(token,'db_query_sql',sql=f'SELECT amount FROM "{tables[0]}"',
+            intent={'purpose':'verify','question':'Verify the pinned amount.','return_columns':['amount']})
         raw = await call(token,'raw_file_read',path=str(doc))
         assert owner in json.dumps(kb['result'])
         assert graph['result']['entities'][0]['id'] == owner

@@ -88,6 +88,7 @@ class WorkspaceCatalog:
             "shared",
             "revisions",
             "checkpoints",
+            "kb_media",
         ):
             sizes[name] = sum(
                 p.stat().st_size for p in (self.root / name).rglob("*") if p.is_file()
@@ -278,8 +279,11 @@ class WorkspaceCatalog:
                         if path.is_file():
                             retained.append(json.loads(path.read_text()))
                     referenced = set()
+                    media_refs = set()
                     for manifest in retained:
                         for item in manifest["sources"]:
+                            if item.get('video_bundle'):
+                                media_refs.add(item['video_bundle'])
                             if manifest.get("format_version") == 2:
                                 referenced.add(item["snapshot"])
                                 referenced.add(item["artifact"])
@@ -290,10 +294,14 @@ class WorkspaceCatalog:
                                         c["vector_ref"] for c in value.get("chunks", [])
                                     )
                                     referenced.update(
-                                        t["path"] for t in value.get("tables", [])
+                                        t["path"] for t in value.get("tables", []) if "path" in t
                                     )
                             elif item.get("checkpoint"):
                                 referenced.add(item["checkpoint"])
+                                checkpoint = self.root / item['checkpoint']
+                                if checkpoint.exists():
+                                    value = json.loads(checkpoint.read_text())
+                                    referenced.update(t['path'] for t in value.get('tables', []) if isinstance(t, dict) and 'path' in t)
                     files = [
                         p
                         for prefix in (".source-", ".table-", ".migrate-table-")
@@ -315,6 +323,18 @@ class WorkspaceCatalog:
                         )
                     size = sum(p.stat().st_size for p in files)
                     directories = [self.root / "revisions" / r for r in candidates]
+                    # Prepared evidence gets a 24-hour grace period before its
+                    # first publication. Published/leased references never age out.
+                    media_dirs = [p for p in (self.root / 'kb_media').glob('*')
+                                  if p.is_dir() and not p.name.startswith('.')
+                                  and p.name not in media_refs and p.stat().st_mtime < now - 86400]
+                    retired_media = {p.name for p in media_dirs}
+                    for path in (self.root / 'checkpoints').glob('*.json'):
+                        if path.relative_to(self.root).as_posix() not in referenced and path not in files:
+                            if json.loads(path.read_text()).get('video_bundle') in retired_media:
+                                files.append(path)
+                                size += path.stat().st_size
+                    directories.extend(media_dirs)
                     size += sum(
                         p.stat().st_size
                         for d in directories

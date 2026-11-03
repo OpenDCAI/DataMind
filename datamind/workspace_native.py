@@ -155,6 +155,7 @@ class DoltRepository:
                     dialect.build_engine,
                     dsn,
                     storage_dir=str(self.path),
+                    log_dir=str(self.workspace.settings.log_dir / "workspace_dolt") if self.workspace.settings.logging.directory else str(self.path),
                     server_config=config,
                 )
                 if revision:
@@ -200,56 +201,13 @@ class DoltRepository:
                     )
 
                 def apply():
-                    from itertools import islice
-
+                    from datamind.capabilities.ingest.tables import materialize
                     with engine.begin() as conn:
                         for name in old.keys() - tables.keys():
-                            conn.execute(
-                                text("DROP TABLE " + dialect._quote_ident(name))
-                            )
-                        for name, item in tables.items():
-                            if old.get(name) == item["hash"]:
-                                continue
-                            q = dialect._quote_ident
-                            if name in old:
-                                conn.execute(text("DROP TABLE " + q(name)))
-                            cols = item["columns"]
-                            conn.execute(
-                                text(
-                                    "CREATE TABLE "
-                                    + q(name)
-                                    + " ("
-                                    + ", ".join(q(c) + " TEXT" for c in cols)
-                                    + ")"
-                                )
-                            )
-                            statement = text(
-                                "INSERT INTO "
-                                + q(name)
-                                + " ("
-                                + ",".join(q(c) for c in cols)
-                                + ") VALUES ("
-                                + ",".join(":" + c for c in cols)
-                                + ")"
-                            )
-                            with (self.workspace.root / item["path"]).open(
-                                newline="", encoding="utf-8"
-                            ) as handle:
-                                reader = csv.reader(handle)
-                                next(reader, None)
-                                while batch := list(islice(reader, 1000)):
-                                    # Canonical JSON cells preserve NULL vs empty
-                                    # strings without interpreting user values.
-                                    conn.execute(
-                                        statement,
-                                        [
-                                            {
-                                                c: json.loads(v)
-                                                for c, v in zip(cols, row)
-                                            }
-                                            for row in batch
-                                        ],
-                                    )
+                            conn.execute(text('DROP TABLE ' + dialect._quote_ident(name)))
+                    for name, item in tables.items():
+                        if old.get(name) != item['hash']:
+                            materialize(engine, dialect, item, self.workspace.root)
 
                 await blocking(apply)
                 commit = await completed(
@@ -294,6 +252,7 @@ class PinnedDB:
         self.repository = DoltRepository(workspace)
         self.binding = binding
         self.db_cfg = workspace.settings.db
+        self.result_dir = workspace.settings.data.storage_dir / "query_results"
         self.dialect = DoltDialect()
 
     def _validate(self, sql):
@@ -359,6 +318,12 @@ class PinnedDB:
                 row_limit=self.db_cfg.row_limit,
                 timeout_s=self.db_cfg.query_timeout_s,
             )
+
+    async def export_sql(self, sql):
+        from datamind.capabilities.db.results import export_csv
+        self._validate(sql)
+        async with self.repository.session(self.binding['version']) as (dialect, engine):
+            return await export_csv(dialect, engine, self.db_cfg, self.result_dir, sql)
 
     def _check_version(self, version):
         if version != self.binding["version"]:

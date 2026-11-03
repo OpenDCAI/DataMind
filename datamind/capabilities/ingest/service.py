@@ -52,10 +52,14 @@ from datamind.core.logging import get_logger
 from datamind.core.protocols import GraphEvidence, GraphTriple, TextModelClient
 
 from .formats import DOCUMENT_EXTS, TABLE_EXTS, extract_document, extract_tabular
+from .tables import SQLITE_EXTS, normalize_columns
 
 _log = get_logger("ingest")
 
 _WORKSPACE_SURFACE_EXTS: dict[str, tuple[str, ...]] = {
+    ".mp4": ("kb", "graph_text"),
+    ".sqlite": ("db", "graph_schema"),
+    ".sqlite3": ("db", "graph_schema"),
     ".txt": ("kb", "graph_text"),
     ".md": ("kb", "graph_text"),
     ".markdown": ("kb", "graph_text"),
@@ -1157,36 +1161,15 @@ class IngestService:
 
     # ------------------------------------------------------------- DB
     def _read_from_csv(self, resolved: Path, delimiter: str = ","):
-        text = resolved.read_text(encoding="utf-8", errors="replace")
+        text = resolved.read_text(encoding="utf-8-sig", errors="replace")
         reader = csv.reader(io.StringIO(text), delimiter=delimiter)
         try:
             header = next(reader)
         except StopIteration:
             raise CapabilityError("ingest", f"CSV is empty")
 
-        # Sanitise column names: same rule as table names.
-        safe_cols: list[str] = []
-        used_cols: set[str] = set()
-
-        for index, raw in enumerate(header, start=1):
-            col = raw.strip()
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", col) or col.casefold() == "_source_file":
-                # Fall back to col_<idx> if header is unusable.
-                col = f"col_{index}"
-            if col.casefold() in used_cols:
-                # SQL tables cannot contain duplicate column names. Keep the
-                # first header unchanged and give later occurrences a stable
-                # fallback name without losing their values in the row dict.
-                base = f"col_{index}"
-                col = base
-                suffix = 2
-                while col.casefold() in used_cols:
-                    suffix_text = f"_{suffix}"
-                    col = f"{base[:64 - len(suffix_text)]}{suffix_text}"
-                    suffix += 1
-
-            safe_cols.append(col)
-            used_cols.add(col.casefold())
+        safe_cols, _ = normalize_columns(header)
+        used_cols = {c.casefold() for c in safe_cols}
 
         file_col = "_source_file"
         if file_col.casefold() in used_cols:
@@ -1265,10 +1248,10 @@ class IngestService:
             if rows:
                 insert_cols = list(safe_cols)
                 quoted_columns = ", ".join(q(c) for c in insert_cols)
-                placeholders = ", ".join(f":{c}" for c in insert_cols)
+                placeholders = ", ".join(f":p{i}" for i in range(len(insert_cols)))
                 conn.execute(
                     sql_text(f'INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})'),
-                    rows,
+                    [{f'p{i}': row.get(c) for i, c in enumerate(insert_cols)} for row in rows],
                 )
 
         commit_hash = None
@@ -1318,6 +1301,10 @@ class IngestService:
             "file": str(resolved), "table": table,
             "rows": len(rows), "cols": len(safe_cols),
         })
+        if hasattr(self._db, 'record_table_metadata'):
+            with resolved.open(encoding='utf-8-sig', newline='') as handle:
+                _, mapping = normalize_columns(next(csv.reader(handle, delimiter=delimiter), []))
+            self._db.record_table_metadata(table, {'source': str(resolved), 'column_mapping': mapping})
         self._db.invalidate_schema_cache()
         return {
             "table": table,
@@ -1337,21 +1324,8 @@ class IngestService:
                     original_cols.append(normalized_key)
         if not original_cols:
             raise CapabilityError("ingest", "records must contain at least one field")
-        safe_cols: list[str] = []
-        used: set[str] = set()
-        for index, raw in enumerate(original_cols, 1):
-            col = raw.strip()
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", col) or col.casefold() in used or col.casefold() == "_source_file":
-                base = f"col_{index}"
-                col = base
-                suffix = 2
-                while col.casefold() in used:
-                    suffix_text = f"_{suffix}"
-                    col = f"{base[:64 - len(suffix_text)]}{suffix_text}"
-                    suffix += 1
-
-            safe_cols.append(col)
-            used.add(col.casefold())
+        safe_cols, _ = normalize_columns(original_cols)
+        used = {c.casefold() for c in safe_cols}
 
         file_col = "_source_file"
         if file_col.casefold() in used:
@@ -1415,6 +1389,10 @@ class IngestService:
             if_exists=if_exists, source_file=source_file,
         )
 
+        if hasattr(self._db, 'record_table_metadata'):
+            original = list(dict.fromkeys(str(k) for row in records for k in row))
+            _, mapping = normalize_columns(original)
+            self._db.record_table_metadata(table, {'source': source_file, 'column_mapping': mapping})
         self._db.invalidate_schema_cache()
         return {
             "table": table,
@@ -1433,13 +1411,27 @@ class IngestService:
         if_exists: str = "append",
         delimiter: str = ",",
     ) -> dict[str, Any]:
-        """Import CSV/TSV or every sheet in an XLSX workbook into DB tables."""
+        """Import tabular files or register a native SQLite snapshot in DB."""
         if self._db is None:
             raise CapabilityError("ingest", "DB surface is disabled")
         resolved = self._locate_file(path)
         if not resolved.is_file():
             raise CapabilityError("ingest", f"not a file: {resolved}")
+        from datamind.workspace_native import blocking
         suffix = resolved.suffix.lower()
+        if suffix in SQLITE_EXTS:
+            from datamind.capabilities.db.native_sqlite import register_import
+            if table_prefix is not None:
+                raise CapabilityError('ingest', 'Native SQLite keeps original names; table_prefix is not supported')
+            if if_exists not in {'append', 'replace', 'fail'}:
+                raise CapabilityError('ingest', 'Invalid SQLite import mode')
+            return await blocking(register_import, self._db, resolved, if_exists=if_exists)
+        if suffix == '.json':
+            from datamind.capabilities.ingest.tables import import_json_table
+            result = await blocking(import_json_table, self._db, resolved,
+                table=table_prefix or _infer_table_name(resolved.stem), if_exists=if_exists)
+            self._db.invalidate_schema_cache()
+            return {"source_file": str(resolved), "tables": [result], "tables_processed": 1}
         if suffix in {".csv", ".tsv"}:
             result = await self.db_import_csv(
                 path=str(resolved),
@@ -1449,7 +1441,7 @@ class IngestService:
             )
             return {"source_file": str(resolved), "tables": [result], "tables_processed": 1}
         if suffix not in TABLE_EXTS:
-            raise CapabilityError("ingest", "db_import_path supports .csv, .tsv, .xlsx and .xls")
+            raise CapabilityError("ingest", "db_import_path supports table .json, .csv, .tsv, .xlsx, .sqlite and .sqlite3; convert .xls to .xlsx")
         try:
             sheets = extract_tabular(resolved)
         except Exception as exc:
@@ -1706,6 +1698,14 @@ class IngestService:
         if resolved.is_dir():
             raise CapabilityError("ingest", f"Cannot delete a directory: {resolved}")
 
+        if resolved.suffix.lower() in SQLITE_EXTS:
+            from datamind.capabilities.db.native_sqlite import unregister_import
+            removed = await asyncio.to_thread(unregister_import, self._db, resolved)
+            if removed is not None:
+                return removed
+            if getattr(self._db, 'native_reference', False):
+                raise CapabilityError('ingest', 'DataSpace inputs are immutable; no native registration exists to remove')
+
         # Remove the file first.
         if resolved.is_file():
             resolved.unlink()
@@ -1795,14 +1795,14 @@ class IngestService:
         if "db" in selected and self._db is not None:
             tables: list[dict[str, Any]] = []
             for item in inventory["files"]:
-                if item.get("extension") not in TABLE_EXTS or item.get("status") != "supported":
+                if item.get("extension") not in TABLE_EXTS | SQLITE_EXTS or item.get("status") != "supported":
                     continue
                 try:
                     relative = item["relative_path"]
                     stem = re.sub(r"[^A-Za-z0-9_]+", "_", Path(relative).stem).strip("_") or "table"
                     prefix = f"ws_{stem[:28]}_{_hash(relative, inventory['path'])[:8]}"
                     tables.append(await self.db_import_path(
-                        path=item["path"], table_prefix=prefix, if_exists="replace",
+                        path=item["path"], table_prefix=None if item['extension'] in SQLITE_EXTS else prefix, if_exists="replace",
                     ))
                 except (CapabilityError, OSError, ValueError) as exc:
                     tables.append({"source_file": item["path"], "error": str(exc)})

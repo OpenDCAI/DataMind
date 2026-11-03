@@ -205,6 +205,7 @@ def _openai_messages(
         # requires one role=tool message per call.
         emitted = False
         text_parts: list[str] = []
+        image_parts: list[dict[str, Any]] = []
         for block in content:
             if not isinstance(block, dict):
                 text_parts.append(str(block))
@@ -217,8 +218,16 @@ def _openai_messages(
                 emitted = True
             elif block.get("type") == "text":
                 text_parts.append(str(block.get("text", "")))
+                image_parts.append({"type": "text", "text": str(block.get("text", ""))})
+            elif block.get("type") == "image":
+                source = block.get("source") or {}
+                if source.get("type") != "base64" or not source.get("media_type", "").startswith("image/"):
+                    raise ValueError("Image input requires base64 image data")
+                image_parts.append({"type": "image_url", "image_url": {
+                    "url": f"data:{source['media_type']};base64,{source['data']}"}})
         if text_parts or not emitted:
-            out.append({"role": role, "content": "".join(text_parts)})
+            multimodal = any(part["type"] == "image_url" for part in image_parts)
+            out.append({"role": role, "content": image_parts if multimodal else "".join(text_parts)})
     return out
 
 
@@ -286,6 +295,8 @@ class OpenAIChatCompletionsModelClient:
             "temperature": kwargs.get("temperature", 1.0),
         }
         tools = _openai_tools(kwargs.get("tools"))
+        if kwargs.get("response_format") is not None:
+            payload["response_format"] = kwargs["response_format"]
         if tools and kwargs.get("tool_choice") != "none":
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

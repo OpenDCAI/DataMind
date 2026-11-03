@@ -2,34 +2,59 @@
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import replace
+from .query_contract import INTENT_SCHEMA, ANSWER_SCHEMA, AnswerSchemas, query_guard, validate_columns, validate_final_rows
 
 from datamind.core.tools import ToolSpec, tool_provider_registry
 
 from .service import DBService
+from .native_sqlite import databases, database_target
 
 
 def build_db_tools(db: DBService) -> list[ToolSpec]:
-    async def _list_tables() -> dict:
-        return {"tables": await db.list_tables()}
+    async def _answer_schema(question, columns, row_shape, revision_reason=None):
+        return AnswerSchemas(db.result_dir).define(question, columns, row_shape, revision_reason)
+
+    async def _list_databases() -> dict:
+        return {"databases": [
+            {k: v for k, v in entry.items() if k not in {"path", "schema_objects", "tables"}}
+            | {"tables": [t['native_table'] for t in entry['tables']]}
+            for entry in databases(db).values()], "default_database": "managed"}
+
+    async def _list_tables(database_id: str | None = None) -> dict:
+        async with database_target(db, database_id) as target:
+            return {"tables": await target.list_tables(), "database_id": database_id}
 
     async def _list_tables_at_version(version: str) -> dict:
         return {"tables": await db.list_tables_at_version(version=version)}
 
-    async def _describe(table: str) -> dict:
-        schema = await db.describe(table)
-        return schema.model_dump()
+    async def _describe(table: str, database_id: str | None = None) -> dict:
+        async with database_target(db, database_id) as target:
+            schema = await target.describe(table)
+            value = schema.model_dump()
+            if database_id is not None:
+                entry = databases(db)[database_id]
+                value['source_metadata'] = next((t for t in entry['tables'] if t['native_table'] == table), None)
+                value['schema_objects'] = [obj for obj in entry['schema_objects'] if obj['table'] == table]
+                value['database_id'] = database_id
+            return value
 
     async def _describe_at_version(table: str, version: str) -> dict:
         schema = await db.describe_at_version(table, version=version)
         return schema.model_dump()
 
-    async def _query_sql(sql: str) -> dict:
-        result = await db.query_sql(sql)
+    async def _query_sql(sql: str, database_id: str | None = None, database_ids: list[str] | None = None) -> dict:
+        async with database_target(db, database_id, database_ids) as target:
+            result = await target.query_sql(sql)
         payload = result.model_dump()
         payload["returned_count"] = len(result.rows)
         payload["total_count"] = None
         payload["next_cursor"] = None
         return payload
+
+    async def _export_sql(sql: str, database_id: str | None = None, database_ids: list[str] | None = None) -> dict:
+        async with database_target(db, database_id, database_ids) as target:
+            return await target.export_sql(sql)
 
     async def _query_sql_at_version(sql: str, version: str) -> dict:
         result = await db.query_sql_at_version(sql, version=version)
@@ -39,8 +64,9 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
         payload["next_cursor"] = None
         return payload
 
-    async def _query_nl(question: str, tables: list[str] | None = None) -> dict:
-        return await db.query_nl(question, tables=tables)
+    async def _query_nl(question: str, tables: list[str] | None = None, database_id: str | None = None) -> dict:
+        async with database_target(db, database_id) as target:
+            return await target.query_nl(question, tables=tables)
 
     async def _query_nl_at_version(question: str, version: str, tables: list[str] | None = None) -> dict:
         return await db.query_nl_at_version(question, tables=tables, version=version)
@@ -52,6 +78,18 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
         return await db.rollback(version=version)
 
     tools = [
+        ToolSpec(name='db_answer_schema',
+                 description='Before final-answer SQL, declare only the outputs requested by the user. Each column must explain its requirement; filters, IDs and evidence are not automatically outputs. Keep exploratory columns separate. Returns a request-bound schema_id; changes require an explicit revision_reason and invalidate old final exports. This is not an assessment of semantic correctness.',
+                 input_schema=ANSWER_SCHEMA, handler=_answer_schema,
+                 metadata={'group': 'db', 'surface': 'db', 'access': 'read'}),
+        ToolSpec(name='db_list_databases',
+                 description='List registered native SQLite databases, their IDs, source versions, storage mode and original table names. Omit database_id on other DB tools to query the managed CSV/JSON database.',
+                 input_schema={'type': 'object', 'properties': {}}, handler=_list_databases,
+                 metadata={'group': 'db', 'surface': 'db', 'access': 'read'}),
+        ToolSpec(name='db_export_sql',
+                 description='Execute read-only SQL and stream its rows to a managed CSV. Returns a small preview, full row count, file hash and revision. Check complete/truncated before using the file as an answer. The configured row limit still applies.',
+                 input_schema={'type': 'object', 'properties': {'sql': {'type': 'string'}}, 'required': ['sql']},
+                 handler=_export_sql, metadata={'group': 'db', 'surface': 'db', 'access': 'read'}),
         ToolSpec(
             name="db_list_tables",
             description="List the tables available in the active SQL database.",
@@ -81,7 +119,7 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
             name="db_query_sql",
             description=(
                 "Execute a single read-only SELECT against the database. "
-                "The runtime enforces a row limit and rejects anything that looks like DML/DDL. "
+                "The runtime applies the configured row limit, when enabled, and rejects DML/DDL. "
                 "Prefer this when you already know the SQL you want. For numeric-looking TEXT, "
                 "cast explicitly before ordering or arithmetic. Treat Unicode-whitespace-only "
                 "text as empty, preserve stored percentage scale unless conversion is requested, "
@@ -121,6 +159,15 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
             metadata={"group": "db", "surface": "db", "access": "read"},
         ),
     ]
+
+    for spec in tools:
+        if spec.name in {'db_list_tables', 'db_describe_table', 'db_query_sql', 'db_export_sql', 'db_query_nl'}:
+            spec.input_schema['properties']['database_id'] = {
+                'type': 'string', 'description': 'Optional native SQLite ID from db_list_databases. Uses original table names; omit for managed tables.'}
+            if spec.name in {'db_query_sql', 'db_export_sql'}:
+                spec.input_schema['properties']['database_ids'] = {
+                    'type': 'array', 'items': {'type': 'string'},
+                    'description': 'Additional registered SQLite IDs for cross-file joins. Reference each as "database_id"."original_table". Omit database_id to join these with managed CSV/JSON tables. No arbitrary paths or ATTACH statements.'}
 
     if db is not None and hasattr(db, "dialect") and db.dialect.name == "dolt":
         # Versioned DB Tools
@@ -263,6 +310,26 @@ def build_db_tools(db: DBService) -> list[ToolSpec]:
             ),
         ])
 
+    guarded_names = {'db_query_sql', 'db_export_sql', 'db_query_nl', 'db_query_sql_at_version', 'db_query_nl_at_version'}
+    for index, spec in enumerate(tools):
+        if spec.name not in guarded_names:
+            continue
+        async def guarded(intent=None, _handler=spec.handler, **arguments):
+            dialect = 'sqlite' if arguments.get('database_id') or arguments.get('database_ids') else db.dialect.name
+            with query_guard(db, intent, sql=arguments.get('sql'), dialect_name=dialect):
+                result = await _handler(**arguments)
+                validate_columns(result['columns'])
+                validate_final_rows(result.get('row_count', len(result.get('rows', []))), result.get('truncated', False))
+                if intent is not None:
+                    result['query_intent'] = intent
+                return result
+        schema = {**spec.input_schema, 'properties': {**spec.input_schema['properties'], 'intent': INTENT_SCHEMA}}
+        # Python data-plane compatibility is retained. MCP makes this required,
+        # and query_guard also enforces it for contexts bound by an agent host.
+        tools[index] = replace(spec, input_schema=schema, handler=guarded,
+            description=spec.description + ' Declare intent (purpose, question, exact ordered return_columns) before querying. '
+            'Computed expressions need AS aliases. purpose=answer also needs the schema_id from db_answer_schema; '
+            'return only that schema, without filter/evidence columns. Metadata discovery tools need no intent.')
     return tools
 
 @tool_provider_registry.register("db")

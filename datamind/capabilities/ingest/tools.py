@@ -249,7 +249,7 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
             name="surface_ingest_path",
             description=(
                 "Inspect and route a workspace into selected DataMind surfaces: documents to KB, "
-                "CSV/TSV/Excel to DB, and deterministic file lineage to Graph."
+                "CSV/TSV/Excel/SQLite to DB, and deterministic file lineage to Graph."
             ),
             input_schema={"type": "object", "properties": {
                 "path": {"type": "string"},
@@ -460,8 +460,8 @@ def build_ingest_tools(svc: IngestService) -> list[ToolSpec]:
         ToolSpec(
             name="db_import_path",
             description=(
-                "Import a CSV/TSV file or every sheet in an XLSX workbook into the SQL surface. "
-                "Each workbook sheet becomes a separate table with source metadata."
+                "Import CSV/TSV, XLSX or table JSON ({table, records}) with original cell types, or register a native SQLite (.sqlite/.sqlite3) snapshot in DB. "
+                "SQLite preserves original schema objects and names; omit table_prefix and query using the returned database_id. Use replace to update an existing SQLite registration."
             ),
             input_schema={
                 "type": "object",

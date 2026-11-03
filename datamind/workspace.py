@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from datamind.capabilities.ingest.formats import DOCUMENT_EXTS, TABLE_EXTS, extract_document, extract_tabular
+from datamind.capabilities.ingest.video import VIDEO_EXTS
+from datamind.capabilities.ingest.tables import (SQLITE_EXTS, TABLE_PIPELINE, is_structured, table_records, table_graph, table_catalog, materialize)
 from datamind.capabilities.kb.indexer import _hash, _split_text
 from datamind.core.context import RequestContext
 from datamind.core.errors import CapabilityError, ConfigError, ExternalServiceError
@@ -125,7 +127,8 @@ class Workspace(WorkspaceCatalog):
         from datamind.workspace_migration import migrate
         return await migrate(self)
 
-    def _inventory(self, source: Path) -> list[dict[str, str]]:
+    def _inventory(self, source: Path, *, fingerprint=True) -> list[dict[str, str]]:
+        """Discover allowed inputs; immutable test runs can check coverage without hashing."""
         if not source.is_dir():
             raise CapabilityError('workspace', 'workspace path must be a directory')
         inventory = []
@@ -133,15 +136,24 @@ class Workspace(WorkspaceCatalog):
             relative = path.relative_to(source)
             if path.is_relative_to(self.root) or any(part.startswith('.') for part in relative.parts):
                 continue
-            if not path.is_file() or path.suffix.lower() not in DOCUMENT_EXTS | TABLE_EXTS:
+            if not path.is_file() or path.suffix.lower() not in DOCUMENT_EXTS | TABLE_EXTS | VIDEO_EXTS | SQLITE_EXTS:
                 continue
             if not path.resolve().is_relative_to(source):
                 raise CapabilityError('workspace', f'symlink escapes workspace: {relative}')
-            sha = hashlib.sha256()
-            with path.open('rb') as handle:
-                for block in iter(lambda: handle.read(1024 * 1024), b''): sha.update(block)
+            if path.suffix.lower() in VIDEO_EXTS and path.stat().st_size > self.settings.video.max_bytes:
+                raise CapabilityError('video', f'MP4 exceeds video.max_bytes: {relative}')
+            version = None
+            if fingerprint and path.suffix.lower() in SQLITE_EXTS:
+                from datamind.capabilities.db.native_sqlite import source_version
+                version = source_version(path, reference=self.settings.workspace.input_policy == 'dataspace')
+            elif fingerprint:
+                sha = hashlib.sha256()
+                with path.open('rb') as handle:
+                    for block in iter(lambda: handle.read(1024 * 1024), b''): sha.update(block)
+                version = 'sha256:' + sha.hexdigest()
             inventory.append({'relative_path': relative.as_posix(), 'uri': str(path.resolve()),
-                              'version': 'sha256:' + sha.hexdigest()})
+                              **({'version': version} if fingerprint else {}),
+                              **({'structured_table': True} if is_structured(path, self.settings.workspace.input_policy) else {})})
         return inventory
 
     async def update(self, path: str, *, surfaces=('kb', 'graph', 'db'), relation_types=None, max_triples_per_file=200, graph_sources=None) -> dict[str, Any]:
@@ -220,7 +232,7 @@ class Workspace(WorkspaceCatalog):
         if graph_sources is not None:
             external = {}
             expected = {item['uri']: item for item in inventory
-                        if Path(item['uri']).suffix.lower() in DOCUMENT_EXTS - TABLE_EXTS}
+                        if Path(item['uri']).suffix.lower() in (DOCUMENT_EXTS - TABLE_EXTS) | VIDEO_EXTS | SQLITE_EXTS}
             for entry in graph_sources:
                 uri = entry['uri']
                 if uri not in expected or uri in external or entry['version'] != expected[uri]['version']:
@@ -237,15 +249,20 @@ class Workspace(WorkspaceCatalog):
                         locator={'uri': uri}, method='extracted', pipeline_version='codex-explicit-v1')]
                 external[uri] = {'triples': [t.model_dump(mode='json') for t in triples],
                                  'truncated': bool(entry.get('truncated', False))}
-            if set(external) != set(expected):
+            if not {uri for uri, item in expected.items() if not item.get('structured_table')} <= set(external):
                 raise ConfigError('Supply triples (including explicit empty lists) for every document source')
-        pipeline = {'version': 'workspace-v1', 'surfaces': sorted(selected),
+        pipeline = {'version': 'workspace-v1-native-sqlite-v1', 'tables': TABLE_PIPELINE, 'input_policy': self.settings.workspace.input_policy, 'surfaces': sorted(selected),
                     'embedding': self.settings.embedding.model_dump(mode='json', exclude={'api_key'}),
                     'model': self.settings.llm.fallback_model or self.settings.llm.model,
                     'chunk_size': self.settings.retrieval.chunk_size,
                     'chunk_overlap': self.settings.retrieval.chunk_overlap,
                     'relation_types': relation_types, 'max_triples_per_file': max_triples_per_file}
         pipeline['graph_extraction'] = 'codex-explicit-v1' if external is not None else 'legacy-model'
+        if any(Path(item['uri']).suffix.lower() in VIDEO_EXTS for item in inventory):
+            from datamind.capabilities.ingest.video.bundle import recipe
+            pipeline['video'] = recipe(self.settings.video)
+            if 'graph' in selected and external is None:
+                raise ConfigError('MP4 Graph requires video_prepare followed by Codex-prepared graph_sources')
         context = current_context()
         applied_skills = list(context.extra.get('applied_skills', {}).values()) if context else []
         pipeline['applied_skills'] = applied_skills
@@ -269,37 +286,73 @@ class Workspace(WorkspaceCatalog):
             ingest = system.services.ingest
             (settings.data.data_dir / 'uploads').mkdir(parents=True, exist_ok=True)
             graph_triples = []
+            all_tables = []
+            native_databases = {}
             for item in inventory:
                 stage_started = time.monotonic()
                 original = Path(item['uri'])
                 snapshot = settings.data.data_dir / 'uploads' / item['relative_path']
                 snapshot.parent.mkdir(parents=True, exist_ok=True)
-                raw = await asyncio.to_thread(original.read_bytes)
-                if 'sha256:' + _digest(raw) != item['version']:
-                    raise CapabilityError('workspace', 'source changed during build; retry')
-                snapshot.write_bytes(raw)
+                native = original.suffix.lower() in SQLITE_EXTS
+                reference = native and self.settings.workspace.input_policy == 'dataspace'
+                if native:
+                    from datamind.capabilities.db.native_sqlite import prepare_source
+                    from datamind.workspace_native import blocking
+                    snapshot = await blocking(prepare_source, original, snapshot, item, reference=reference)
+                elif original.suffix.lower() in VIDEO_EXTS or item.get('structured_table'):
+                    import shutil
+                    from datamind.capabilities.ingest.video.bundle import sha_file
+                    from datamind.workspace_native import blocking
+                    await blocking(shutil.copyfile, original, snapshot)
+                    if self.settings.workspace.input_policy != 'dataspace' and 'sha256:' + await blocking(sha_file, snapshot) != item['version']:
+                        raise CapabilityError('workspace', 'source changed during build; retry')
+                else:
+                    raw = await asyncio.to_thread(original.read_bytes)
+                    if self.settings.workspace.input_policy != 'dataspace' and 'sha256:' + _digest(raw) != item['version']:
+                        raise CapabilityError('workspace', 'source changed during build; retry')
+                    snapshot.write_bytes(raw)
                 metrics['source_copy_ms'] += (time.monotonic() - stage_started) * 1000
                 source_id = 'file:' + _digest(item['uri'].encode())
                 cache_key = _digest(json.dumps([source_id, item['version'], pipeline_hash,
                     external.get(item['uri']) if external is not None else None], sort_keys=True).encode())
                 cache_path = self.root / 'checkpoints' / (cache_key + '.json')
                 stage_started = time.monotonic()
-                if cache_path.is_file():
-                    prepared = json.loads(cache_path.read_text())
+                cached = json.loads(cache_path.read_text()) if cache_path.is_file() else None
+                if cached is not None and all(t.get('native_sqlite') or (self.root / t['path']).is_file() for t in cached.get('tables', [])):
+                    prepared = cached
                     reused += 1
                     metrics['sources_reused'] += 1
                     metrics['checkpoint_read_ms'] += (time.monotonic() - stage_started) * 1000
                 else:
                     prepared = {'chunks': [], 'vectors': [], 'triples': [], 'tables': [], 'truncated': False}
-                    is_table = original.suffix.lower() in TABLE_EXTS
-                    text = (await asyncio.to_thread(extract_document, snapshot)).text if original.suffix.lower() in DOCUMENT_EXTS else ''
+                    structured = item.get('structured_table', False)
+                    is_table = original.suffix.lower() in TABLE_EXTS or structured
+                    text = (await asyncio.to_thread(extract_document, snapshot)).text if original.suffix.lower() in DOCUMENT_EXTS and not structured and selected & {'kb', 'graph'} else ''
+                    video = None
+                    records = None
+                    if is_table and ('db' in selected or structured and selected & {'kb', 'graph'}):
+                        from datamind.workspace_incremental import canonical_tables
+                        prepared['tables'] = await asyncio.to_thread(canonical_tables, self, item, snapshot, include_text='kb' in selected)
+                        metrics['parsed_table_files'] += 1
+                        if structured:
+                            records = table_records(item, prepared['tables'])
+                            text = '\n'.join(r['text'] for r in records)
+                    if original.suffix.lower() in VIDEO_EXTS and selected & {'kb', 'graph'}:
+                        from datamind.capabilities.ingest.video.bundle import prepare_video, text_records
+                        video = await prepare_video(self.root, snapshot, item, self.settings.video,
+                                                    verify_source=self.settings.workspace.input_policy != 'dataspace')
+                        prepared['video_bundle'] = video['bundle_id']
+                        records = text_records(video, settings.retrieval)
+                        text = '\n'.join(r['text'] for r in records)
                     if 'kb' in selected and text:
-                        parts = _split_text(text, chunk_size=settings.retrieval.chunk_size,
-                                            chunk_overlap=settings.retrieval.chunk_overlap)
+                        parts = ([r['text'] for r in records] if records is not None else
+                                 _split_text(text, chunk_size=settings.retrieval.chunk_size,
+                                             chunk_overlap=settings.retrieval.chunk_overlap))
                         prepared['chunks'] = [
                             {'id': _hash(part, item['uri'], ordinal=i), 'text': part,
                              'metadata': {'source': item['uri'], 'source_id': source_id,
-                                          'source_version': item['version'], '_chunk_ordinal': i}}
+                                          'source_version': item['version'], '_chunk_ordinal': i,
+                                          **(records[i]['metadata'] if records is not None else {})}}
                             for i, part in enumerate(parts)
                         ]
                         if parts:
@@ -308,6 +361,9 @@ class Workspace(WorkspaceCatalog):
                             prepared['vectors'] = await system.services.kb.embedding.embed_texts(parts)
                     if 'graph' in selected and external is not None:
                         prepared.update(external.get(item['uri'], {'triples': [], 'truncated': False}))
+                        if video is not None:
+                            from datamind.capabilities.ingest.video.bundle import graph_records
+                            prepared['triples'] = graph_records(video, prepared['triples'])
                     if 'graph' in selected and external is None and text and not is_table:
                         parts = _split_text(text, chunk_size=settings.retrieval.chunk_size, chunk_overlap=0)
                         for i, part in enumerate(parts, 1):
@@ -324,9 +380,8 @@ class Workspace(WorkspaceCatalog):
                             prepared['triples'].extend(t.model_dump(mode='json') for t in triples)
                             if len(triples) >= min(30, remaining):
                                 prepared['truncated'] = True
-                    if 'db' in selected and is_table:
-                        metrics['parsed_table_files'] += 1
-                        prepared['tables'] = await asyncio.to_thread(extract_tabular, snapshot)
+                    if 'graph' in selected and structured:
+                        prepared['triples'].extend(table_graph(item, prepared['tables']))
                     metrics['source_compute_ms'] += (time.monotonic() - stage_started) * 1000
                     metrics['sources_computed'] += 1
                     stage_started = time.monotonic()
@@ -334,6 +389,10 @@ class Workspace(WorkspaceCatalog):
                     prepared = json.loads(cache_path.read_text())
                     metrics['checkpoint_write_ms'] += (time.monotonic() - stage_started) * 1000
                 stage_started = time.monotonic()
+                if prepared.get('video_bundle'):
+                    from datamind.capabilities.ingest.video.bundle import load_bundle
+                    await asyncio.to_thread(load_bundle, self.root, prepared['video_bundle'],
+                                            verify_integrity=self.settings.workspace.input_policy != 'dataspace')
                 if prepared.get('truncated'):
                     truncated_sources.append(item['uri'])
                 if prepared['chunks']:
@@ -342,16 +401,21 @@ class Workspace(WorkspaceCatalog):
                         ids=[c['id'] for c in chunks], texts=[c['text'] for c in chunks],
                         embeddings=prepared['vectors'], metadatas=[c['metadata'] for c in chunks])
                 graph_triples.extend(GraphTriple(**t) for t in prepared['triples'])
-                for sheet, columns, rows in prepared['tables']:
-                    if not rows:
-                        continue
-                    table = 'ws_' + _digest((source_id + sheet).encode())[:24]
-                    safe_cols, safe_rows = ingest._read_from_records(rows, source_file=item['uri'])
-                    await ingest._ingest_rows(table=table, rows=safe_rows, safe_cols=safe_cols,
-                                              if_exists='replace', source_file=item['uri'])
+                all_tables.extend(prepared['tables'])
+                if 'db' in selected:
+                    for table in prepared['tables']:
+                        if table.get('native_sqlite'):
+                            continue
+                        await asyncio.to_thread(materialize, system.services.db.engine, system.services.db.dialect, table, self.root)
+                if native:
+                    from datamind.capabilities.db.native_sqlite import registration
+                    entry = await asyncio.to_thread(registration, snapshot, item, reference=reference, revision=revision)
+                    native_databases[entry['database_id']] = entry
                 manifest_sources.append({**item, 'source_id': source_id,
-                    'snapshot': str(snapshot.relative_to(settings.data.base_dir)),
-                    'checkpoint': str(cache_path.relative_to(self.root))})
+                    'snapshot': str(snapshot) if reference else str(snapshot.relative_to(settings.data.base_dir)),
+                    **({'storage': 'reference', 'database_id': entry['database_id']} if reference else {}),
+                    'checkpoint': str(cache_path.relative_to(self.root)),
+                    **({'video_bundle': prepared['video_bundle']} if prepared.get('video_bundle') else {})})
                 metrics['sources_completed'] += 1
                 metrics['materialization_ms'] += (time.monotonic() - stage_started) * 1000
             stage_started = time.monotonic()
@@ -377,10 +441,12 @@ class Workspace(WorkspaceCatalog):
             system = None
             metrics['materialization_ms'] += (time.monotonic() - stage_started) * 1000
             stage_started = time.monotonic()
-            if await asyncio.to_thread(self._inventory, source) != inventory:
+            if self.settings.workspace.input_policy != 'dataspace' and await asyncio.to_thread(self._inventory, source) != inventory:
                 raise CapabilityError('workspace', 'workspace changed during build; retry')
             manifest = {'workspace_revision': revision, 'parent_revision': parent, 'source_root': str(source), 'parent_epoch': parent_epoch,
                         'surfaces': sorted(selected), 'pipeline_hash': pipeline_hash,
+                        'input_policy': self.settings.workspace.input_policy, 'tables': table_catalog(all_tables),
+                        'databases': native_databases,
                         'sources': manifest_sources, 'reused_sources': reused,
                         'snapshots': bindings, 'truncated_sources': truncated_sources,
                         'applied_skills': applied_skills}
@@ -427,9 +493,14 @@ class Workspace(WorkspaceCatalog):
                     settings.db.dialect=manifest['snapshots']['db']['provider'];settings.db.dsn=None
                 settings.graph.backend='networkx'
                 system=await self._system(settings,selected)
+                if system.services.db is not None:
+                    system.services.db.result_dir = self.settings.data.storage_dir / 'query_results'
                 root=settings.data.base_dir
+            if system.services.db is not None:
+                system.services.db.native_databases = manifest.get('databases', {})
+                system.services.db.native_reference = manifest.get('input_policy') == 'dataspace'
             reader=WorkspaceReader(system,manifest,root,read_retries=read_retries,
-                timeout_s=settings.agent.wall_clock_timeout_s)
+                timeout_s=settings.agent.wall_clock_timeout_s, workspace_root=self.root)
             reader._system_settings=self.settings
             reader._lease=(self,token)
             yield reader
@@ -449,7 +520,7 @@ class Workspace(WorkspaceCatalog):
 class WorkspaceReader:
     """Read-only facade fixed to a retained generation, including raw evidence."""
 
-    def __init__(self, system, manifest, root, *, read_retries=1, timeout_s=300.):
+    def __init__(self, system, manifest, root, *, read_retries=1, timeout_s=300., workspace_root=None):
         if not 0 <= read_retries <= 5:
             raise ValueError("read_retries must be between 0 and 5")
         self._system = system
@@ -460,6 +531,26 @@ class WorkspaceReader:
         tools = system.read_tools
         system.tools = tools
         self.tools = tools
+        if workspace_root is not None:
+            from datamind.video_tools import video_tools
+            media = {s['video_bundle'] for s in manifest['sources'] if s.get('video_bundle')}
+            for spec in video_tools(None, root=workspace_root, allowed_bundles=media,
+                                    verify_integrity=manifest.get('input_policy') != 'dataspace'):
+                if spec.name != 'video_prepare':
+                    tools.replace(spec)
+        if 'db_describe_table' in tools and manifest.get('tables'):
+            describe = tools.get('db_describe_table')
+            original_describe = describe.handler
+            async def describe_source(table, database_id=None):
+                if database_id is not None:
+                    return await original_describe(table=table, database_id=database_id)
+                result = await original_describe(table=table)
+                metadata = manifest['tables'].get(table)
+                if metadata:
+                    keys = {m['name'] for m in metadata.get('column_mapping', []) if m['original_name'] in metadata.get('primary_key', [])}
+                    result['columns'] = [{**c, 'primary_key': c['name'] in keys} for c in result['columns']]
+                return {**result, 'source_metadata': metadata}
+            tools.replace(replace(describe, handler=describe_source))
         raw = tools.get('raw_file_read')
         original = raw.handler
 
@@ -480,7 +571,7 @@ class WorkspaceReader:
 
         async def inspect_snapshot(path: str, **kwargs):
             candidate = Path(path).expanduser().resolve()
-            if manifest.get('format_version')==2:
+            if manifest.get('format_version')==2 or manifest.get('databases'):
                 if candidate!=source_root and not candidate.is_relative_to(source_root):
                     raise CapabilityError('workspace','inspection must belong to the pinned revision')
                 items=[{'path':s['uri'],'relative_path':s['relative_path'],'sha256':s['version'].removeprefix('sha256:')}

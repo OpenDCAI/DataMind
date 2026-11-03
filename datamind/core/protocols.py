@@ -181,6 +181,7 @@ class TableSchema(BaseModel):
     name: str
     columns: list[ColumnSchema]
     row_count_estimate: int | None = None
+    source_metadata: dict[str, Any] | None = None
 
 
 class QueryResult(BaseModel):
@@ -349,7 +350,7 @@ class DatabaseDialect(Protocol):
         engine: Any,
         sql: str,
         *,
-        row_limit: int = 1000,
+        row_limit: int | None = 1000,
         timeout_s: float = 10.0,
     ) -> QueryResult: ...
 

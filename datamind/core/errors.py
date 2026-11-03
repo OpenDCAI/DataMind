@@ -24,9 +24,11 @@ class ConfigError(DataMindError):
 class CapabilityError(DataMindError):
     """An internal capability failed."""
 
-    def __init__(self, capability: str, message: str, *, cause: Exception | None = None) -> None:
+    def __init__(self, capability: str, message: str, *, cause: Exception | None = None,
+                 details: dict | None = None) -> None:
         super().__init__(f"[{capability}] {message}")
         self.capability = capability
+        self.details = details
         self.__cause__ = cause
 
 
@@ -52,9 +54,8 @@ class FinalAnswerContractError(DataMindError):
     """The model could not produce a caller-compliant final answer.
 
     The raw provider output is intentionally omitted from the exception so a
-    tool-result dump cannot leak through an error path.  Callers may retry the
-    whole turn once because contract failures and exhausted finalization time
-    can be stochastic.
+    tool-result dump cannot leak through an error path. The host can return a
+    bounded validation failure to the same session within the original deadline.
     """
 
     retryable = True

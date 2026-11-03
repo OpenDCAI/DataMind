@@ -72,6 +72,7 @@ class CodexHostConfig(BaseModel):
     preapproved_tools: list[str] = Field(default_factory=list)
     timeout_s: float = Field(default=600, gt=0)
     max_concurrency: int = Field(default=4, ge=1)
+    managed_operations: bool = False
     request_max_retries: int = Field(default=2, ge=0)
     stream_idle_timeout_ms: int = Field(default=300000, ge=1000)
 
@@ -132,7 +133,7 @@ class DBConfig(BaseModel):
     dialect: str = "sqlite"  # sqlite | mysql | postgres | ...
     dsn: str | None = None   # e.g. mysql+pymysql://user:pw@host/db
     read_only: bool = True
-    row_limit: int = Field(default=1000, ge=1)
+    row_limit: int | None = Field(default=1000, ge=1)
     query_timeout_s: float = 10.0
 
 
@@ -209,6 +210,10 @@ class DataConfig(BaseModel):
 
 
 class LoggingConfig(BaseModel):
+    # Optional external root; None preserves existing storage layout.
+    directory: Path | None = None
+    # Opt-in durable MCP evidence for benchmark runners; ordinary runs unchanged.
+    event_trace: bool = False
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
 
@@ -278,11 +283,39 @@ class KBConfig(BaseModel):
 class WorkspaceConfig(BaseModel):
     """Storage layout and history retention are independent policies."""
     storage_mode: Literal['auto', 'snapshot', 'incremental'] = 'auto'
+    input_policy: Literal['standard', 'dataspace'] = 'standard'
     retention: Literal['auto', 'latest', 'recent', 'all'] = 'auto'
     keep_last: int = Field(default=10, ge=1)
     auto_gc: bool = True
     lease_ttl_s: float = Field(default=1800, ge=10)
     lock_timeout_s: float = Field(default=120, gt=0)
+
+
+class VideoConfig(BaseModel):
+    """Optional MP4 preprocessing. Models are loaded only for video inputs."""
+
+    vision: LLMConfig | None = None
+    asr_model_dir: Path | None = None
+    language_model_dir: Path | None = None
+    language: str | None = None
+    asr_threads: int = Field(default=4, ge=1, le=64)
+    ocr_concurrency: int = Field(default=4, ge=1, le=16)
+    # Extra attempts only for invalid layout output; transport retries belong to vision.
+    ocr_format_retries: int = Field(default=0, ge=0, le=3)
+    ocr_response_format: Literal["hiccup", "json_schema", "text"] = "hiccup"
+    ocr_enabled: bool = True
+    asr_enabled: bool = True
+    max_frames: int = Field(default=256, ge=1, le=2000)
+    max_duration_s: float = Field(default=3600, gt=0)
+    max_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
+    timeout_s: float = Field(default=600, gt=0)
+    # Periodic guard frames supplement packet-burst detection for hard cuts.
+    guard_interval_s: float = Field(default=15, gt=0)
+    spike_ratio: float = Field(default=6, gt=1)
+    merge_gap_s: float = Field(default=0.4, ge=0)
+    min_quiet_s: float = Field(default=1.5, ge=0)
+    settle_margin_s: float = Field(default=0.2, ge=0)
+    cache_revision: str = "1"
 
 
 class Settings(BaseSettings):
@@ -291,6 +324,7 @@ class Settings(BaseSettings):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     codex: CodexHostConfig = Field(default_factory=CodexHostConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+    video: VideoConfig = Field(default_factory=VideoConfig)
     embedding: EmbeddingConfig = EmbeddingConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
     kb: KBConfig = KBConfig()
@@ -306,12 +340,22 @@ class Settings(BaseSettings):
         # Two files tried in order; later entries take precedence.
         env_file=(".env", ".env.datamind"),
         env_nested_delimiter="__",
+        env_parse_none_str="null",
         env_prefix="DATAMIND__",
         extra="ignore",
         case_sensitive=False,
     )
 
     # ------------------------------------------------------------------ misc
+
+    @property
+    def log_dir(self) -> Path:
+        """Keep independent workspaces/revisions out of the same audit chain."""
+        if self.logging.directory is None:
+            return self.data.storage_dir
+        import hashlib
+        scope = hashlib.sha256(str(self.data.storage_dir.resolve()).encode()).hexdigest()[:16]
+        return self.logging.directory.expanduser().resolve() / self.data.profile / scope
 
     def ensure_dirs(self) -> None:
         """Create per-profile directories if missing. Idempotent."""

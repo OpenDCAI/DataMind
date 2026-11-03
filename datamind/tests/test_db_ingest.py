@@ -241,13 +241,13 @@ def test_read_from_csv_ragged_rows(service, tmp_path):
 
 
 def test_read_from_csv_sanitizes_headers(service, tmp_path):
-    """Bad / duplicate / reserved headers get stable fallbacks."""
+    """Quoted identifiers survive; duplicate and reserved headers remain unique."""
     p = tmp_path / "bad.csv"
     p.write_text("1bad,good name,id,id,_source_file\nx,y,z,w,v\n",
                  encoding="utf-8")
     cols, _ = service._read_from_csv(p)
     assert len(set(cols)) == len(cols)                    # no duplicates
-    assert cols[0] == "col_1" and cols[1] == "col_2"      # invalid → fallback
+    assert cols[:2] == ["1bad", "good name"]             # valid when quoted
     assert any(c.startswith("_source_file") for c in cols)
 
 

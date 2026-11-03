@@ -3,8 +3,8 @@
 Three lines of defence:
 1. Syntactic check — reject statements whose leading verb implies write.
 2. Multiple-statement rejection — SQLAlchemy's `text()` can chain; we don't.
-3. Row limit — always append / wrap a LIMIT so a runaway SELECT can't
-   drag back millions of rows.
+3. Row limit — wrap a LIMIT when enabled; the explicit benchmark policy
+   may disable the result cap while retaining read-only checks.
 
 Per-dialect quirks (e.g. T-SQL `TOP`, SQLite `ATTACH`, MySQL `KILL`) can be
 overridden in the dialect subclass.
@@ -34,7 +34,15 @@ _STATEMENT_SEP_RE = re.compile(r";\s*\S")
 
 
 def strip_comments(sql: str) -> str:
-    return _COMMENT_RE.sub("", sql)
+    # Quoted identifiers may contain punctuation that resembles comments.
+    tokens = re.compile(r"('(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[[^\]]*\])|(/\*.*?\*/|--[^\n]*)", re.DOTALL)
+    def replace(match):
+        if match.group(1) is not None:
+            return match.group(1)
+        left = sql[match.start() - 1:match.start()] if match.start() else ''
+        right = sql[match.end():match.end() + 1]
+        return ' ' if left and right and not left.isspace() and not right.isspace() else ''
+    return tokens.sub(replace, sql)
 
 
 def leading_verb(sql: str) -> str:
@@ -70,6 +78,7 @@ def contains_multiple_statements(sql: str) -> bool:
     # Replace single- and double-quoted runs (handling doubled-quote escapes).
     masked = re.sub(r"'(?:''|[^'])*'", "''", cleaned)
     masked = re.sub(r'"(?:""|[^"])*"', '""', masked)
+    masked = re.sub(r"`(?:``|[^`])*`|\[[^\]]*\]", '""', masked)
     masked = masked.strip().rstrip(";")
     return bool(_STATEMENT_SEP_RE.search(masked))
 

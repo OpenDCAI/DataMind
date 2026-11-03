@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+import time
 from filelock import FileLock
 
 from datamind.core.context import RequestContext
@@ -26,6 +27,10 @@ class OperationStore:
                 CREATE TABLE IF NOT EXISTS request_events (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS request_events_id ON request_events(request_id);
+                CREATE TABLE IF NOT EXISTS tool_jobs (
+                    request_id TEXT NOT NULL, call_id TEXT NOT NULL, name TEXT NOT NULL,
+                    status TEXT NOT NULL, updated REAL NOT NULL, result TEXT,
+                    PRIMARY KEY(request_id, call_id));
                 CREATE TABLE IF NOT EXISTS skills (
                     operation TEXT NOT NULL, name TEXT NOT NULL, reference TEXT NOT NULL,
                     PRIMARY KEY(operation, name));
@@ -88,6 +93,15 @@ class OperationStore:
         """Optional request-scoped transport trace; the host deletes it after delivery."""
         if request_id is None:
             return
+        if self.settings.logging.event_trace:
+            # Keep complete evidence even when the host consumes/deletes request_events.
+            log_dir = self.settings.log_dir
+            log_dir.mkdir(parents=True, exist_ok=True)
+            record = json.dumps({'request_id': request_id, **payload}, ensure_ascii=False, default=str) + '\n'
+            path = log_dir / 'tool-events.jsonl'
+            with FileLock(str(path) + '.lock'), path.open('a', encoding='utf-8') as handle:
+                handle.write(record)
+                handle.flush()
         with self.connect() as db:
             db.execute('INSERT INTO request_events(request_id,payload) VALUES (?,?)',
                        (request_id,json.dumps(payload,ensure_ascii=False,default=str)))
@@ -98,3 +112,26 @@ class OperationStore:
             rows=db.execute('SELECT payload FROM request_events WHERE request_id=? ORDER BY seq', (request_id,)).fetchall()
             db.execute('DELETE FROM request_events WHERE request_id=?',(request_id,))
         return [json.loads(row[0]) for row in rows]
+
+
+    def set_job(self, request_id, call_id, name, status, result=None):
+        if not request_id:
+            return
+        if status not in {'queued', 'running', 'completed', 'failed', 'cancelled'}:
+            raise ValueError('Invalid tool job status')
+        with self.connect() as db:
+            db.execute('INSERT INTO tool_jobs VALUES (?,?,?,?,?,?) ON CONFLICT(request_id,call_id) '
+                       'DO UPDATE SET status=excluded.status,updated=excluded.updated,result=excluded.result',
+                       (request_id, str(call_id), name, status, time.time(),
+                        json.dumps(result, ensure_ascii=False, default=str) if result is not None else None))
+
+    def jobs(self, request_id):
+        if not request_id:
+            return []
+        with self.connect() as db:
+            rows = db.execute('SELECT call_id,name,status,updated,result FROM tool_jobs WHERE request_id=? ORDER BY updated,call_id', (request_id,)).fetchall()
+        return [dict(call_id=i,name=n,status=s,updated=t,result=json.loads(v) if v else None) for i,n,s,t,v in rows]
+
+    def cancel_pending(self, request_id):
+        with self.connect() as db:
+            db.execute("UPDATE tool_jobs SET status='cancelled',updated=? WHERE request_id=? AND status IN ('queued','running')", (time.time(),request_id))

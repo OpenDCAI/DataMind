@@ -55,7 +55,7 @@ async def test_data_runtime_exposes_direct_reads_and_receipt_wrapped_writes(tmp_
 
 def test_bundled_ingestion_skills_match_checkout_catalog():
     root=Path(__file__).resolve().parents[2]
-    for name in ('workspace-ingest','source-update'):
+    for name in ('workspace-ingest','workspace-retrieve','source-update'):
         assert (root/'.claude'/'skills'/name/'SKILL.md').read_text() == (root/'datamind'/'skills'/name/'SKILL.md').read_text()
 
 

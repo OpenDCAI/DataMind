@@ -13,7 +13,7 @@ from datamind.core.tools import ToolSpec
 DIRECT_NAMES = frozenset('''
 raw_file_read workspace_inspect build_start build_status build_freeze build_verify build_export
 kb_search kb_count kb_list_documents kb_add_text kb_add_file kb_add_path kb_delete_file
- db_list_tables db_describe_table db_query_sql db_import_path db_import_records db_update_path db_delete_path
+ db_answer_schema db_list_databases db_list_tables db_describe_table db_query_sql db_export_sql db_import_path db_import_records db_update_path db_delete_path
  graph_schema graph_search_entities graph_neighbors graph_traverse graph_upsert_triples graph_build_lineage
  skill_list skill_get skill_search skill_upsert memory_save memory_recall memory_forget
 '''.split())
@@ -25,14 +25,20 @@ def catalogue():
     specs = (build_db_tools(None) + build_graph_tools(None) + build_kb_tools(stub)
              + build_ingest_tools(stub) + build_memory_tools(None)
              + build_skills_tools(stub) + build_skills_store_tools(None))
+    from datamind.video_tools import video_tools
     return {**{s.name: s for s in specs if s.name in DIRECT_NAMES},
+            **{s.name: s for s in video_tools(None)},
             **{s.name: s for s in graph_source_tools(None)}}
 
 
 def workspace_tools(settings, active=None):
     from datamind.data_plane import build_data_plane
     from datamind.workspace import Workspace
+    from datamind.capabilities.ingest.formats import TABLE_EXTS
+    from datamind.core.protocols import GraphTriple
     enabled = {'kb', 'db', 'graph'} if active is None else set(active) & {'kb', 'db', 'graph'}
+    triple_schema = GraphTriple.model_json_schema()
+    triple_definitions = triple_schema.pop('$defs', {})
 
     async def prepare(path):
         # Use the same policy as direct file tools before revealing inventory.
@@ -44,6 +50,11 @@ def workspace_tools(settings, active=None):
         import asyncio
         from datamind.workspace_incremental import incremental_enabled
         sources = await asyncio.to_thread(workspace._inventory, source)
+        # Describe the existing publication contract without changing input routing.
+        for item in sources:
+            item['graph_assertions_required'] = (
+                Path(item['uri']).suffix.lower() not in TABLE_EXTS
+                and not item.get('structured_table', False))
         lease, revision = workspace.acquire_lease()
         try:
             previous = workspace.manifest(revision) if revision else None
@@ -52,14 +63,14 @@ def workspace_tools(settings, active=None):
                 current, epoch = db.execute('SELECT revision,epoch FROM head WHERE singleton=1').fetchone()
             if current != revision:
                 raise ValueError('Workspace changed during preparation; prepare again')
-            return {'path': str(source), 'sources': sources, 'current_revision': revision,
+            return {'path': str(source), 'sources': sources, 'current_revision': revision, 'input_policy': settings.workspace.input_policy,
                     'current_epoch': epoch, 'retention': workspace.retention,
                     'storage_mode': 'incremental' if incremental_enabled(workspace, enabled) else 'snapshot',
                     'changes': {'new': [s['uri'] for s in sources if s['uri'] not in prior],
                         'modified': [s['uri'] for s in sources if s['uri'] in prior and s['version'] != prior[s['uri']]],
                         'deleted': sorted(set(prior) - {s['uri'] for s in sources}),
                         'unchanged': [s['uri'] for s in sources if s['version'] == prior.get(s['uri'])]},
-                    'instructions': 'In incremental mode extract graph assertions for new/changed documents only. Snapshot mode requires all documents. Use inventory SHA-256 versions; include explicit empty triples where none were found.'}
+                    'instructions': 'Submit graph_sources for sources with graph_assertions_required=true only. In incremental mode extract assertions for new/changed documents only; snapshot mode requires every such document. Copy each inventory uri and SHA-256 version verbatim; include explicit empty triples where none were found. CSV/TSV/XLS/XLSX are imported as tables and must not be included in graph_sources. Sources marked structured_table have automatic schema/foreign-key Graph evidence and do not require model-extracted triples. Every triple must contain subject, relation and object (not predicate). For MP4 call video_prepare, page through kb_video_read, and inspect kb_video_frame images. Video semantic triples require properties.video_bundle equal to the prepared bundle ID and properties.video_evidence containing frame_id or segment_id locators.'}
         finally:
             workspace.release_lease(lease)
 
@@ -118,14 +129,16 @@ def workspace_tools(settings, active=None):
                  {'type': 'object', 'properties': {'path': {'type': 'string'}}, 'required': ['path']},
                  prepare, {'access': 'read'}),
         ToolSpec('workspace_publish', 'Validate Codex assertions and atomically publish a consistent KB/Graph/DB revision. Does not mutate direct live stores.',
-                 {'type': 'object', 'properties': {
+                 {'type': 'object', '$defs': triple_definitions, 'properties': {
                      'path': {'type': 'string'},
                      'surfaces': {'type': 'array', 'minItems': 1, 'uniqueItems': True,
                                   'items': {'enum': ['kb', 'graph', 'db']}},
                      'relation_types': {'type': 'array', 'items': {'type': 'string'}},
-                     'graph_sources': {'type': 'array', 'items': {'type': 'object',
+                     'graph_sources': {'type': 'array',
+                         'description': 'Assertions for inventory sources with graph_assertions_required=true; copy uri and version verbatim. Exclude CSV/TSV/XLS/XLSX.',
+                         'items': {'type': 'object',
                          'properties': {'uri': {'type': 'string'}, 'version': {'type': 'string'},
-                                        'triples': {'type': 'array', 'items': {'type': 'object'}},
+                                        'triples': {'type': 'array', 'items': triple_schema},
                                         'truncated': {'type': 'boolean'}},
                          'required': ['uri', 'version', 'triples'], 'additionalProperties': False}},
                  }, 'required': ['path']}, publish, {'access': 'write', 'surface': 'graph', 'multi_surface': True}),

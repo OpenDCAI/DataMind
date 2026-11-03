@@ -41,6 +41,7 @@ _PATH_TOOLS = {
     "graph_forget_source": "path",
     "workspace_prepare": "path",
     "workspace_publish": "path",
+    "video_prepare": "path",
 }
 
 

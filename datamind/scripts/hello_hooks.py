@@ -54,7 +54,7 @@ async def _main() -> int:
     settings.ensure_dirs()
 
     # Clean previous audit log so the demo is reproducible.
-    audit_path = settings.data.storage_dir / "audit.jsonl"
+    audit_path = settings.log_dir / "audit.jsonl"
     if audit_path.exists():
         audit_path.unlink()
 

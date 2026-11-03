@@ -22,6 +22,8 @@ from datamind.capabilities.ingest.formats import (
     extract_document,
 )
 from datamind.capabilities.kb.indexer import _hash, _split_text
+from datamind.capabilities.ingest.video import VIDEO_EXTS
+from datamind.capabilities.ingest.tables import SQLITE_EXTS, TABLE_PIPELINE, table_records, table_graph, table_catalog
 from datamind.workspace_native import blocking, completed
 
 
@@ -72,101 +74,73 @@ def save_artifact(root, key, value):
     return path.relative_to(root).as_posix()
 
 
-def canonical_tables(workspace, item, snapshot):
-    """Stream CSV/TSV and XLSX rows into immutable typed-cell table objects."""
-    source = Path(item["uri"])
-    streams = []
-    closers = []
-    if source.suffix.lower() in {".csv", ".tsv"}:
-        handle = snapshot.open(newline="", encoding="utf-8", errors="replace")
-        closers.append(handle)
-        rows = iter(
-            csv.reader(
-                handle, delimiter="\t" if source.suffix.lower() == ".tsv" else ","
-            )
-        )
-        header = next(rows, None)
-        if header is not None:
-            streams.append((source.stem, header, rows))
-    elif source.suffix.lower() == ".xlsx":
-        import openpyxl
-
-        book = openpyxl.load_workbook(snapshot, read_only=True, data_only=True)
-        closers.append(book)
-        for sheet in book.worksheets:
-            rows = iter(sheet.values)
-            header = next(rows, None)
-            if header is not None:
-                streams.append((sheet.title, header, rows))
-    else:
-        raise ConfigError(
-            "Incremental DB supports CSV, TSV and XLSX; convert legacy XLS first"
-        )
+def canonical_tables(workspace, item, snapshot, *, include_text=False):
+    """Stream tables to immutable cells, retaining schema and source column mappings."""
+    from datamind.capabilities.ingest.tables import source_tables, normalize_columns, encode_cell, table_name, _kind
+    if Path(item['uri']).suffix.lower() in SQLITE_EXTS:
+        from datamind.capabilities.db.native_sqlite import inspect_database
+        return inspect_database(snapshot, item, reference=workspace.settings.workspace.input_policy == 'dataspace')['tables']
     output = []
-    try:
-        for sheet, header, rows in streams:
-            used = set()
-            cols = []
-            for i, cell in enumerate(header, 1):
-                value = str(cell).strip() if cell is not None else ""
-                if (
-                    not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value)
-                    or value.casefold() in used
-                    or value.casefold() == "_source_file"
-                ):
-                    value = "col_" + str(i)
-                base = value
-                n = 2
-                while value.casefold() in used:
-                    value = base[:58] + "_" + str(n)
-                    n += 1
-                cols.append(value)
-                used.add(value.casefold())
-            cols.append("_source_file")
-            fd, temp = tempfile.mkstemp(dir=workspace.root, prefix=".table-")
-            count = 0
-            sha = hashlib.sha256()
+    with source_tables(snapshot, policy=workspace.settings.workspace.input_policy) as inputs:
+        for table in inputs:
+            cols, mapping = normalize_columns(table.header)
+            if not cols and Path(item['uri']).suffix.lower() != '.json':
+                raise CapabilityError('ingest', 'Table has no discoverable columns')
+            if Path(item['uri']).suffix.lower() in {'.csv', '.tsv'}:
+                table.name = Path(item['uri']).stem
+            name = table_name(item['uri'], table.name)
+            row_column = None
+            if Path(item['uri']).suffix.lower() == '.json':
+                row_column = '_source_row'
+                while row_column.casefold() in {c.casefold() for c in cols}:
+                    row_column += '_'
+                cols.append(row_column)
+            cols.append('_source_file')
+            fd, temp = tempfile.mkstemp(dir=workspace.root, prefix='.table-')
+            count, records = 0, []
+            observed = [set() for _ in table.header]
             try:
-                with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                with os.fdopen(fd, 'w', encoding='utf-8', newline='') as handle:
                     writer = csv.writer(handle)
                     writer.writerow(cols)
-                    for row in rows:
-                        values = list(row[: len(header)])
-                        values += [""] * (len(header) - len(values))
-                        # Preserve existing TEXT import semantics, including NULL.
-                        values = [None if x is None else str(x) for x in values] + [
-                            item["uri"]
-                        ]
-                        writer.writerow(
-                            [json.dumps(x, ensure_ascii=False) for x in values]
-                        )
+                    for row in table.rows:
+                        values = list(row[:len(table.header)])
+                        values += [None if table.typed else ''] * (len(table.header) - len(values))
+                        if not table.typed:
+                            values = [None if x is None else str(x) for x in values]
+                        for i, value in enumerate(values):
+                            kind = _kind(value)
+                            if kind:
+                                observed[i].add(kind)
+                            if include_text and Path(item['uri']).suffix.lower() == '.json' and isinstance(value, str) and len(value) >= 160:
+                                for part in _split_text(value, chunk_size=workspace.settings.retrieval.chunk_size, chunk_overlap=workspace.settings.retrieval.chunk_overlap):
+                                    records.append({'text': f'Table {table.name}, row {count + 1}, {table.header[i]}: {part}',
+                                        'metadata': {'kind': 'table_text', 'table': name, 'original_table': table.name,
+                                                     'row_ordinal': count + 1, 'row_locator_column': row_column or '', 'column': cols[i]}})
+                        writer.writerow([json.dumps(encode_cell(x), ensure_ascii=False) for x in values + ([count + 1] if row_column else []) + [item['uri']]])
                         count += 1
                     handle.flush()
                     os.fsync(handle.fileno())
-                with open(temp, "rb") as handle:
-                    for block in iter(lambda: handle.read(1024 * 1024), b""):
+                sha = hashlib.sha256()
+                with open(temp, 'rb') as handle:
+                    for block in iter(lambda: handle.read(1024 * 1024), b''):
                         sha.update(block)
                 key = sha.hexdigest()
-                target = workspace.root / "tables" / key[:2] / (key + ".csv")
+                target = workspace.root / 'tables' / key[:2] / (key + '.csv')
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if not target.exists():
                     os.replace(temp, target)
-                source_id = "file:" + digest(item["uri"].encode())
-                output.append(
-                    {
-                        "name": "ws_" + digest((source_id + sheet).encode())[:24],
-                        "sheet": sheet,
-                        "columns": cols,
-                        "rows": count,
-                        "hash": key,
-                        "path": target.relative_to(workspace.root).as_posix(),
-                    }
-                )
+                schema = {'name': name, 'sheet': table.name, 'columns': cols,
+                          'types': table.types + (['INTEGER'] if row_column else []) + ['TEXT'], 'column_mapping': mapping,
+                          'row_locator_column': row_column, 'typed': table.typed,
+                          'declared_types': table.declared_types, 'primary_key': table.primary_key,
+                          'foreign_keys': table.foreign_keys, 'source': item['uri'], 'source_version': item['version'],
+                          'mixed_types': any(kinds and not kinds <= ({'INTEGER','REAL'} if typ in {'REAL','NUMERIC'} else {typ})
+                                             for kinds, typ in zip(observed, table.types))}
+                output.append({**schema, 'rows': count, 'hash': digest(encoded([key, schema])),
+                               'path': target.relative_to(workspace.root).as_posix(), 'text_records': records})
             finally:
                 Path(temp).unlink(missing_ok=True)
-    finally:
-        for closer in closers:
-            closer.close()
     return output
 
 
@@ -254,7 +228,7 @@ async def update_incremental(
     docs = {
         s["uri"]: s
         for s in inventory
-        if Path(s["uri"]).suffix.lower() in DOCUMENT_EXTS - TABLE_EXTS
+        if Path(s["uri"]).suffix.lower() in (DOCUMENT_EXTS - TABLE_EXTS) | VIDEO_EXTS | SQLITE_EXTS
     }
     for entry in graph_sources or []:
         uri = entry["uri"]
@@ -265,12 +239,15 @@ async def update_incremental(
         ):
             raise ConfigError("Graph source must match inventory and content hash")
         triples = [GraphTriple(**v) for v in entry["triples"]]
-        if len(triples) > max_triples_per_file:
+        migrating_source = uri in getattr(workspace, '_migration_prepared', {})
+        if len(triples) > max_triples_per_file and not migrating_source:
             raise ConfigError("Too many graph triples for source")
         for triple in triples:
             if relation_types is not None and triple.relation not in relation_types:
                 raise ConfigError("Graph relation is outside vocabulary")
             triple.source = uri
+            if migrating_source:
+                continue  # Preserve frozen table/frame/speech locators during migration.
             triple.evidence = [
                 GraphEvidence(
                     source_id="file:" + digest(uri.encode()),
@@ -286,7 +263,7 @@ async def update_incremental(
         }
     if "graph" in selected:
         for uri, item in docs.items():
-            if uri not in assertions:
+            if uri not in assertions and not item.get('structured_table'):
                 before = prior.get(uri)
                 if (
                     before is None
@@ -300,7 +277,8 @@ async def update_incremental(
     context = current_context()
     skills = list(context.extra.get("applied_skills", {}).values()) if context else []
     recipe = {
-        "version": "workspace-v2",
+        "version": "workspace-v2-native-sqlite-v1",
+        "tables": TABLE_PIPELINE, "input_policy": cfg.workspace.input_policy,
         "surfaces": sorted(selected),
         "embedding": cfg.embedding.model_dump(mode="json", exclude={"api_key"}),
         "chunk_size": cfg.retrieval.chunk_size,
@@ -309,6 +287,9 @@ async def update_incremental(
         "max_triples_per_file": max_triples_per_file,
         "applied_skills": skills,
     }
+    if any(Path(s['uri']).suffix.lower() in VIDEO_EXTS for s in inventory):
+        from datamind.capabilities.ingest.video.bundle import recipe as video_recipe
+        recipe['video'] = video_recipe(cfg.video)
     pipeline = digest(encoded(recipe))
     revision = "revision-" + uuid.uuid4().hex
     metrics["workspace_revision"] = revision
@@ -332,6 +313,7 @@ async def update_incremental(
         bindings = {}
         all_chunks = {}
         tables = {}
+        native_databases = {}
         try:
             if "kb" in selected:
                 from datamind import runtime
@@ -351,21 +333,37 @@ async def update_incremental(
                     / item["version"][7:9]
                     / (item["version"][7:] + suffix)
                 )
-                if blob.exists():
+                native = suffix in SQLITE_EXTS
+                reference = native and cfg.workspace.input_policy == 'dataspace'
+                if native:
+                    from datamind.capabilities.db.native_sqlite import prepare_source, validate_entry
+                    frozen = getattr(workspace, '_migration_databases', {}).get(item['uri'])
+                    prepare_item = item
+                    if frozen is not None:
+                        if cfg.workspace.input_policy != 'dataspace':
+                            await blocking(validate_entry, frozen)
+                        reference = frozen['storage'] == 'reference'
+                        prepare_item = {**item, 'version': 'sha256:' + frozen['sha256']}
+                    blob = await blocking(prepare_source, original, blob, prepare_item, reference=reference)
+                    blob_ref = str(blob) if reference else blob.relative_to(workspace.root).as_posix()
+                    if not reference:
+                        metrics['object_bytes_written'] += blob.stat().st_size
+                elif blob.exists():
                     blob_ref = blob.relative_to(workspace.root).as_posix()
                     metrics["objects_reused"] += 1
                 else:
                     # Stream the original into immutable object storage.
                     fd, temp = tempfile.mkstemp(dir=workspace.root, prefix=".source-")
-                    sha = hashlib.sha256()
+                    sha = hashlib.sha256() if cfg.workspace.input_policy != 'dataspace' else None
                     try:
                         with os.fdopen(fd, "wb") as out, original.open("rb") as inp:
                             for block in iter(lambda: inp.read(1024 * 1024), b""):
                                 out.write(block)
-                                sha.update(block)
+                                if sha is not None:
+                                    sha.update(block)
                             out.flush()
                             os.fsync(out.fileno())
-                        if "sha256:" + sha.hexdigest() != item["version"]:
+                        if sha is not None and "sha256:" + sha.hexdigest() != item["version"]:
                             raise CapabilityError(
                                 "workspace", "source changed during build; retry"
                             )
@@ -428,13 +426,29 @@ async def update_incremental(
                             "graph_artifact": None,
                             "truncated": False,
                         }
-                        if "kb" in selected and suffix in DOCUMENT_EXTS:
-                            text_value = (await blocking(extract_document, blob)).text
-                            parts = _split_text(
-                                text_value,
-                                chunk_size=cfg.retrieval.chunk_size,
-                                chunk_overlap=cfg.retrieval.chunk_overlap,
-                            )
+                        video = None
+                        records = None
+                        structured = item.get('structured_table', False)
+                        if (suffix in TABLE_EXTS or structured) and ('db' in selected or structured and selected & {'kb', 'graph'}):
+                            prepared['tables'] = await blocking(canonical_tables, workspace, item, blob, include_text='kb' in selected)
+                            metrics['parsed_table_files'] += 1
+                            if structured:
+                                records = table_records(item, prepared['tables'])
+                        if suffix in VIDEO_EXTS and selected & {'kb', 'graph'}:
+                            from datamind.capabilities.ingest.video.bundle import prepare_video, text_records
+                            if 'graph' in selected and assertion is None and old['pipeline_hash'] != pipeline:
+                                raise ConfigError('Video pipeline changed; prepare fresh video graph assertions')
+                            video = await prepare_video(workspace.root, blob, item, cfg.video,
+                                                        verify_source=cfg.workspace.input_policy != 'dataspace')
+                            prepared['video_bundle'] = video['bundle_id']
+                            records = text_records(video, cfg.retrieval)
+                        if "kb" in selected and (suffix in DOCUMENT_EXTS | VIDEO_EXTS or structured):
+                            if records is None:
+                                text_value = (await blocking(extract_document, blob)).text
+                                records = [{'text': part, 'metadata': {}} for part in _split_text(
+                                    text_value, chunk_size=cfg.retrieval.chunk_size,
+                                    chunk_overlap=cfg.retrieval.chunk_overlap)]
+                            parts = [r['text'] for r in records]
                             vector_recipe = cfg.embedding.model_dump(
                                 mode="json", exclude={"api_key"}
                             )
@@ -496,27 +510,29 @@ async def update_incremental(
                                         + digest(item["uri"].encode()),
                                         "source_version": item["version"],
                                         "_chunk_ordinal": i,
+                                        **records[i]['metadata'],
                                     },
                                 }
                                 for i, part in enumerate(parts)
                             ]
                         if "graph" in selected:
                             if assertion is not None:
+                                triples = assertion['triples']
+                                if video is not None:
+                                    from datamind.capabilities.ingest.video.bundle import graph_records
+                                    triples = graph_records(video, triples)
                                 prepared["graph_artifact"] = put_graph(
-                                    workspace.root, assertion["triples"]
+                                    workspace.root, triples
                                 )
                                 prepared["truncated"] = assertion["truncated"]
                             elif graph_ref:
                                 prepared["graph_artifact"] = graph_ref
                             else:
-                                prepared["graph_artifact"] = put_graph(
-                                    workspace.root, []
-                                )
-                        if "db" in selected and suffix in TABLE_EXTS:
-                            prepared["tables"] = await blocking(
-                                canonical_tables, workspace, item, blob
-                            )
-                            metrics["parsed_table_files"] += 1
+                                prepared["graph_artifact"] = put_graph(workspace.root, [])
+                            if structured:
+                                # Structural evidence is deterministic and rebuilt from the source schema.
+                                triples = (assertion['triples'] if assertion else []) + table_graph(item, prepared['tables'])
+                                prepared['graph_artifact'] = put_graph(workspace.root, triples)
                         artifact = workspace.root / save_artifact(
                             workspace.root, key, prepared
                         )
@@ -524,14 +540,24 @@ async def update_incremental(
                         metrics["source_compute_ms"] += (
                             time.monotonic() - start
                         ) * 1000
+                if native:
+                    from datamind.capabilities.db.native_sqlite import registration
+                    entry = await blocking(registration, blob, item, reference=reference, revision=revision)
+                    native_databases[entry['database_id']] = entry
                 source_entry = {
                     **item,
                     "source_id": "file:" + digest(item["uri"].encode()),
                     "snapshot": blob_ref,
+                    **({"storage": "reference", "database_id": entry["database_id"]} if reference else {}),
                     "artifact": artifact.relative_to(workspace.root).as_posix(),
                     "graph_artifact": prepared["graph_artifact"],
                     "truncated": prepared["truncated"],
                 }
+                if prepared.get('video_bundle'):
+                    from datamind.capabilities.ingest.video.bundle import load_bundle
+                    await blocking(load_bundle, workspace.root, prepared['video_bundle'],
+                                   verify_integrity=cfg.workspace.input_policy != 'dataspace')
+                    source_entry['video_bundle'] = prepared['video_bundle']
                 sources.append(source_entry)
                 all_chunks.update((c["id"], c) for c in prepared["chunks"])
                 tables.update((t["name"], t) for t in prepared["tables"])
@@ -623,12 +649,13 @@ async def update_incremental(
                     if old and old.get("format_version") == 2
                     else None
                 )
-                hashes = {n: t["hash"] for n, t in tables.items()}
+                managed_tables = {n: t for n, t in tables.items() if not t.get("native_sqlite")}
+                hashes = {n: t["hash"] for n, t in managed_tables.items()}
                 if base and base["tables"] == hashes:
                     bindings["db"] = base
                 else:
                     bindings["db"] = await DoltRepository(workspace).build(
-                        base, tables, revision
+                        base, managed_tables, revision
                     )
                 before = base.get("tables", {}) if base else {}
                 metrics["db_tables_reused"] = sum(
@@ -645,7 +672,7 @@ async def update_incremental(
                     "path": "graph.sqlite3",
                 }
             metrics["materialization_ms"] += (time.monotonic() - start) * 1000
-            if await blocking(workspace._inventory, source) != inventory:
+            if cfg.workspace.input_policy != 'dataspace' and await blocking(workspace._inventory, source) != inventory:
                 raise CapabilityError(
                     "workspace", "workspace changed during build; retry"
                 )
@@ -657,6 +684,8 @@ async def update_incremental(
                 "source_root": str(source),
                 "surfaces": sorted(selected),
                 "pipeline_hash": pipeline,
+                "input_policy": cfg.workspace.input_policy, "tables": table_catalog(tables.values()),
+                "databases": native_databases,
                 "sources": sources,
                 "snapshots": bindings,
                 "reused_sources": metrics["sources_reused"],

@@ -78,6 +78,9 @@ Repository    = "https://github.com/OpenDCAI/DataMind"
 Issues        = "https://github.com/OpenDCAI/DataMind/issues"
 
 [project.optional-dependencies]
+dataspace = ["ijson>=3.2,<4"]
+# faster-whisper still passes metadata_errors, removed by PyAV 19.
+video = ["av>=14,<19", "faster-whisper>=1.1,<2", "Pillow>=10", "opencc-python-reimplemented>=0.1.7"]
 # Historical v0.1 capability modules only; main.py/server.py now delegate
 # to the shared Codex CLI/HTTP host. This extra does not select an agent backend.
 legacy = [

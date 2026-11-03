@@ -16,6 +16,8 @@ from pathlib import Path
 from datamind.core.errors import ConfigError, CapabilityError
 from datamind.core.protocols import GraphTriple
 from datamind.capabilities.ingest.formats import DOCUMENT_EXTS, TABLE_EXTS
+from datamind.capabilities.ingest.video import VIDEO_EXTS
+from datamind.capabilities.ingest.tables import SQLITE_EXTS, encode_cell
 from datamind.workspace_incremental import digest, encoded
 
 
@@ -67,6 +69,14 @@ async def _migrate(workspace):
             }
             for s in old["sources"]
         }
+        for item in old['sources']:
+            if item.get('video_bundle'):
+                prepared[item['uri']]['video_bundle'] = item['video_bundle']
+            if ('db' not in selected or any(e['source_uri'] == item['uri'] for e in old.get('databases', {}).values())) and item.get('checkpoint'):
+                checkpoint = workspace.root / item['checkpoint']
+                if checkpoint.is_file():
+                    tables = json.loads(checkpoint.read_text()).get('tables', [])
+                    prepared[item['uri']]['tables'] = [t for t in tables if isinstance(t, dict)]
         snapshots = {
             s["uri"]: workspace._settings_for(revision).data.base_dir / s["snapshot"]
             for s in old["sources"]
@@ -78,7 +88,8 @@ async def _migrate(workspace):
             with path.open("rb") as handle:
                 for block in iter(lambda: handle.read(1024 * 1024), b""):
                     sha.update(block)
-            expected = next(s["version"] for s in old["sources"] if s["uri"] == uri)
+            native = next((e for e in old.get("databases", {}).values() if e["source_uri"] == uri), None)
+            expected = "sha256:" + native["sha256"] if native else next(s["version"] for s in old["sources"] if s["uri"] == uri)
             if "sha256:" + sha.hexdigest() != expected:
                 raise CapabilityError("workspace", "legacy evidence checksum mismatch")
         graph = {uri: [] for uri in prepared}
@@ -172,9 +183,10 @@ async def _migrate(workspace):
                         if "_source_file" not in columns:
                             raise ConfigError("Legacy table has no source identity")
                         first = cursor.fetchone()
+                        metadata = old.get('tables', {}).get(name, {})
                         if first is None:
-                            candidates = []
-                            for source in old["sources"]:
+                            candidates = [metadata['source']] if metadata.get('source') else []
+                            for source in ([] if candidates else old["sources"]):
                                 checkpoint = source.get("checkpoint")
                                 if (
                                     checkpoint
@@ -185,7 +197,7 @@ async def _migrate(workspace):
                                     )
                                     if any(
                                         "ws_"
-                                        + digest((source["source_id"] + t[0]).encode())[
+                                        + digest((source["source_id"] + (t['sheet'] if isinstance(t, dict) else t[0])).encode())[
                                             :24
                                         ]
                                         == name
@@ -222,7 +234,7 @@ async def _migrate(workspace):
                                             )
                                         writer.writerow(
                                             [
-                                                json.dumps(v, ensure_ascii=False)
+                                                json.dumps(encode_cell(v), ensure_ascii=False)
                                                 for v in row
                                             ]
                                         )
@@ -241,12 +253,13 @@ async def _migrate(workspace):
                                 os.replace(temp, dest)
                             prepared[uri]["tables"].append(
                                 {
+                                    **metadata,
                                     "name": name,
-                                    "hash": key,
+                                    "hash": digest((key + json.dumps(metadata, sort_keys=True)).encode()),
                                     "path": dest.relative_to(workspace.root).as_posix(),
                                     "columns": columns,
                                     "rows": count,
-                                    "sheet": name,
+                                    "sheet": metadata.get("sheet", name),
                                 }
                             )
                         finally:
@@ -259,11 +272,12 @@ async def _migrate(workspace):
         worker._writer_held = True
         worker._expected_parent = expected_parent
         inventory = [
-            {k: s[k] for k in ("uri", "relative_path", "version")}
+            {k: s[k] for k in ("uri", "relative_path", "version", "structured_table") if k in s}
             for s in old["sources"]
         ]
         worker._inventory = lambda path: list(inventory)
         worker._migration_sources = snapshots
+        worker._migration_databases = {e["source_uri"]: e for e in old.get("databases", {}).values()}
         worker._migration_prepared = prepared
         assertions = [
             {
@@ -273,7 +287,7 @@ async def _migrate(workspace):
                 "truncated": prepared[s["uri"]]["truncated"],
             }
             for s in old["sources"]
-            if Path(s["uri"]).suffix.lower() in (DOCUMENT_EXTS - TABLE_EXTS)
+            if Path(s["uri"]).suffix.lower() in (DOCUMENT_EXTS - TABLE_EXTS) | VIDEO_EXTS | SQLITE_EXTS
         ]
         result = await worker.update(
             old["source_root"], surfaces=selected, graph_sources=assertions

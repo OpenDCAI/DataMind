@@ -112,14 +112,19 @@ async def test_successful_empty_vector_result_is_not_a_fault():
 
 @pytest.mark.asyncio
 async def test_empty_fallback_is_observable_in_tool_result():
-    retriever = HybridRetriever(vector_store=Store(), embedding=Embedding(TimeoutError()),
+    store = Store()
+    retriever = HybridRetriever(vector_store=store, embedding=Embedding(TimeoutError()),
                                 vector_failure_fallback="bm25")
 
     async def search(query, **kwargs):
         return [h.model_dump() for h in await retriever.aretrieve(query, **kwargs)]
 
+    async def count():
+        # The index has documents, even though this query's fallback has no hits.
+        return len(await store.get_all_texts())
+
     tool = next(t for t in build_kb_tools(SimpleNamespace(
-        search=search, data_dir=".", vector_store=SimpleNamespace(name="test"),
+        search=search, count=count, data_dir=".", vector_store=SimpleNamespace(name="test"),
     )) if t.name == "kb_search")
     result = await tool.handler(query="no_matching_term")
     assert result["results"] == []

@@ -6,7 +6,16 @@ import sys
 from pathlib import Path
 
 from datamind.config import DataConfig
-from datamind.mcp import INSTRUCTIONS, definitions
+from datamind.mcp import instructions, definitions
+
+
+TOOL_DISCOVERY_GUIDANCE = (
+    '\nDataMind tools can be deferred and absent from the initial tool list. '
+    'Discover their registered names before use. When functions.exec is available, '
+    'filter ALL_TOOLS for datamind and the specific tool you need, and inspect only '
+    'matching entries. Do not conclude that DataMind tools are unavailable without '
+    'attempting tool discovery. Invoke only exact tool names returned by the runtime.'
+)
 
 
 def sdk_config(*, workspace: str, data_root: str, profile: str = 'default',
@@ -31,7 +40,7 @@ def sdk_config(*, workspace: str, data_root: str, profile: str = 'default',
     }
     if env is not None:
         result['env'] = dict(env)
-        context_keys={'DATAMIND_SESSION_ID','DATAMIND_REQUEST_ID','DATAMIND_ACCESS_MODE',
+        context_keys={'DATAMIND_SESSION_ID','DATAMIND_REQUEST_ID','DATAMIND_ACCESS_MODE','DATAMIND_OPERATION_ID',
                       'DATAMIND_WORKSPACE_REVISION','DATAMIND_READ_SCOPE','DATAMIND_ENABLED_SURFACES',
                       'DATAMIND_WORKSPACE_READ_RETRIES','DATAMIND_TEST_READ_FAULT'}
         forwarded=sorted(key for key in env if key in context_keys or key.startswith('DATAMIND__'))
@@ -72,7 +81,7 @@ class CodexSession:
         self.client = AsyncCodex(CodexConfig(**self.config))
         await self.client.__aenter__()
         try:
-            kwargs = {'cwd': self.config['cwd'], 'developer_instructions': INSTRUCTIONS,
+            kwargs = {'cwd': self.config['cwd'], 'developer_instructions': instructions(bool(self.config.get('env', {}).get('DATAMIND_OPERATION_ID'))) + TOOL_DISCOVERY_GUIDANCE,
                       'approval_mode': ApprovalMode(self.approval_mode)}
             if self.sandbox is not None:
                 kwargs['sandbox'] = Sandbox(self.sandbox)
