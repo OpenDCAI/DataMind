@@ -58,7 +58,7 @@ async def test_transient_failure_falls_back_after_bounded_retries(stage):
         hits = await retriever.aretrieve("needle", filters={"tenant": "a"})
     assert [h.id for h in hits] == ["new"]
     assert hits[0].metadata["degraded"] is True
-    assert embed.calls == 2
+    assert embed.calls == (2 if stage == "embedding" else 1)
     summary = recovery_summary(ctx.extra["recovery_events"])
     assert summary["retries"] == 1 and summary["fallbacks"] == 1
     assert summary["events"][0]["component"] == f"kb.{'embedding' if stage == 'embedding' else 'vector_query'}"
