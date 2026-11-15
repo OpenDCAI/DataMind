@@ -145,16 +145,20 @@ class HybridRetriever:
             bm25, ids, texts, metas = await self._ensure_lexical_at_version(version)
         k_inner = top_k * self._cm
         stage = "kb.embedding"
+        # Reuse a completed embedding across vector-search retries within this
+        # retrieval only. Failed embedding attempts leave the cache empty.
+        query_vector: list[float] | None = None
 
         async def vector_search():
-            nonlocal stage
-            stage = "kb.embedding"
-            vec = await self._embed.embed_query(query)
+            nonlocal stage, query_vector
+            if query_vector is None:
+                stage = "kb.embedding"
+                query_vector = await self._embed.embed_query(query)
             stage = "kb.vector_query"
             kwargs = {"top_k": k_inner, "where": filters}
             if version is not None:
                 kwargs["version"] = version
-            return await self._store.query(vec, **kwargs)
+            return await self._store.query(query_vector, **kwargs)
 
         def rank_lexical():
             if bm25 is not None and ids:

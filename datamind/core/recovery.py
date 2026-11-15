@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, TypeVar
 
 import httpx
+from sqlalchemy.exc import DBAPIError, TimeoutError as SQLAlchemyTimeoutError
 
+from .db_errors import classify_db_error
 from .errors import CapabilityError, ConfigError, ExternalServiceError
 from .logging import current_context, get_logger
 
@@ -19,7 +21,11 @@ _log = get_logger("read_recovery")
 def is_transient(exc: Exception) -> bool:
     """Do not mask auth, invalid responses, bad filters, or local path errors."""
     seen: set[int] = set()
-    while id(exc) not in seen:
+    pending = [exc]
+    while pending:
+        exc = pending.pop()
+        if id(exc) in seen:
+            continue
         seen.add(id(exc))
         if isinstance(exc, (ConfigError, ValueError, PermissionError, FileNotFoundError)):
             return False
@@ -27,14 +33,21 @@ def is_transient(exc: Exception) -> bool:
             return exc.response.status_code in {408, 429} or exc.response.status_code >= 500
         if isinstance(exc, ExternalServiceError) and exc.status_code is not None:
             return exc.status_code in {408, 429} or exc.status_code >= 500
-        if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError)):
+        db_decision = classify_db_error(exc)
+        if db_decision is not None:
+            return db_decision
+        if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError, SQLAlchemyTimeoutError)):
             return True
         if isinstance(exc, OSError) and not isinstance(exc, (CapabilityError, ExternalServiceError)):
             return True
         cause = exc.__cause__
-        if not isinstance(cause, Exception):
-            return False
-        exc = cause
+        if isinstance(cause, Exception):
+            pending.append(cause)
+        # SQLAlchemy's original driver error may exist only in .orig. Inspect
+        # it before the generic cause: explicit database codes take precedence
+        # over incidental network/OS exceptions deeper in the chain.
+        if isinstance(exc, DBAPIError) and isinstance(exc.orig, Exception):
+            pending.append(exc.orig)
     return False
 
 
