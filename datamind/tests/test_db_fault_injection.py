@@ -212,7 +212,7 @@ async def test_target_cannot_be_its_own_fault_state(service, tmp_path):
 @pytest.mark.asyncio
 async def test_non_sqlite_backend_is_rejected_instead_of_spoofed(tmp_path):
     with faults.db_faults(plan(tmp_path)):
-        with pytest.raises(faults.ExperimentFaultError, match="SQLite only"):
+        with pytest.raises(faults.ExperimentFaultError, match="requires sqlite"):
             await faults.before_db_read(SimpleNamespace(dialect=SimpleNamespace(name="mysql")))
     assert not Path(plan(tmp_path)["state"]).exists()
 

@@ -29,6 +29,7 @@ from datamind.core.context import RequestContext
 from datamind.core.logging import bind_context
 from datamind.core.recovery import recovery_summary
 from datamind.experiment_faults import ExperimentFaultError, db_counts, db_faults
+from datamind.experiment_db_errors import DB_FAULTS, build_db_fault
 from datamind.workspace import Workspace
 
 REPO = Path(__file__).resolve().parents[1]
@@ -239,8 +240,11 @@ async def query_experiment(args, output, source, tasks):
     if args.fixture and args.execution == "agent":
         raise ValueError("Fixture mode cannot evaluate LLM answers; use retrieval or sql")
     settings = settings_for(output / "runtime", args.fixture, args)
-    if args.component == "db" and settings.db.dialect != "sqlite":
-        raise ValueError("DB fault injection currently supports SQLite only")
+    if args.component == "db":
+        backend = {"dolt": "mysql", "postgres": "postgresql"}.get(settings.db.dialect, settings.db.dialect)
+        if backend != DB_FAULTS[args.db_error].backend:
+            raise ValueError("--db-error must match the configured database backend")
+        build_db_fault(args.db_error)  # fail before building if the optional driver is absent
     workspace = workspace_for(settings)
     built = await workspace.update(str(source), surfaces=args.surfaces.split(","), graph_sources=prepared_graph(args))
     manifest = provenance(args, source)
@@ -467,7 +471,7 @@ def parser():
             p.add_argument("--seed", type=int, default=0)
             p.add_argument("--execution", choices=["retrieval", "sql", "agent"], default="retrieval")
             p.add_argument("--component", choices=["embedding", "vector", "db"], default="embedding")
-            p.add_argument("--db-error", choices=["sqlite_busy", "sqlite_locked", "sqlite_error"], default="sqlite_busy")
+            p.add_argument("--db-error", choices=sorted(DB_FAULTS), default="sqlite_busy")
             p.add_argument("--failure-probabilities", type=float, nargs="+", default=[0., .1, .5, 1.])
             p.add_argument("--outage-ms", type=float, default=0.)
             p.add_argument("--fault-delay-ms", type=float, default=0.)

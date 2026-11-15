@@ -15,10 +15,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy.exc import OperationalError
-
 from datamind.core.errors import ConfigError
 from datamind.core.logging import current_context
+from datamind.experiment_db_errors import DB_FAULTS, FaultDriverUnavailable, build_db_fault
 
 
 def install(kb):
@@ -63,13 +62,6 @@ class ExperimentFaultError(ConfigError):
     """Invalid experiment setup or state failure; never a retryable DB outage."""
 
 
-_SQLITE_ERRORS = {
-    "sqlite_busy": (sqlite3.SQLITE_BUSY, "SQLITE_BUSY"),
-    "sqlite_locked": (sqlite3.SQLITE_LOCKED, "SQLITE_LOCKED"),
-    "sqlite_error": (sqlite3.SQLITE_ERROR, "SQLITE_ERROR"),
-}
-
-
 @dataclass(frozen=True)
 class _DBPlan:
     state: Path
@@ -89,8 +81,8 @@ def _parse_db_plan(plan):
         if plan.get("component") != "db":
             raise ValueError("component must be db")
         error = plan.get("error", "sqlite_busy")
-        if error not in _SQLITE_ERRORS:
-            raise ValueError("unsupported DB fault; expected sqlite_busy, sqlite_locked or sqlite_error")
+        if error not in DB_FAULTS:
+            raise ValueError("unsupported DB fault")
         probability = float(plan["probability"])
         outage = float(plan.get("outage_ms", 0))
         delay = float(plan.get("delay_ms", 0))
@@ -176,20 +168,19 @@ async def before_db_read(engine):
     plan = _db_plan()
     if plan is None:
         return None
-    if engine.dialect.name != "sqlite":
-        raise ExperimentFaultError("DB fault injection currently supports SQLite only")
-    database = engine.url.database
+    backend = DB_FAULTS[plan.error].backend
+    if engine.dialect.name != backend:
+        raise ExperimentFaultError(f"{plan.error} requires {backend} target")
+    database = engine.url.database if backend == "sqlite" else None
     if database and database != ":memory:" and Path(database).resolve() == plan.state:
         raise ExperimentFaultError("Fault state must be separate from the target database")
     fail = await asyncio.to_thread(_db_attempt, plan)
     if fail:
         await asyncio.sleep(plan.delay_ms / 1000)
-        code, name = _SQLITE_ERRORS[plan.error]
-        original = sqlite3.OperationalError("injected experiment DB fault")
-        original.sqlite_errorcode = code
-        original.sqlite_errorname = name
-        error = OperationalError(None, None, original)
-        error.datamind_fault_injected = True
+        try:
+            error = build_db_fault(plan.error)
+        except FaultDriverUnavailable as exc:
+            raise ExperimentFaultError("Selected DB fault driver is unavailable") from exc
         raise error
     return plan.state
 

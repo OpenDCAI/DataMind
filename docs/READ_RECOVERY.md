@@ -130,7 +130,7 @@ to a prior experiment and does not automatically make API-priced claims.
 
 ## Database query fault injection
 
-SQLite query faults use the same probability, initial outage window, and failed
+Database query faults use the same probability, initial outage window, and failed
 attempt delay as KB faults. There is no fail-first-N mode. The condition is
 `elapsed < outage_ms OR random < probability`: after the window ends, probabilistic
 failures continue. A probability of 1 therefore never recovers on its own.
@@ -162,14 +162,28 @@ otherwise supply explicit published table names. Agent mode accepts natural
 language `question` tasks as before and passes the plan to child MCP processes.
 It requires a configured Codex host; fixture mode cannot evaluate agent answers.
 
-Available errors are `sqlite_busy` (code 5, retryable), `sqlite_locked` (code 6,
-conservatively non-retryable), and `sqlite_error` (code 1, non-retryable). Faults
-are constructed `sqlite3.OperationalError` objects wrapped in SQLAlchemy
-`OperationalError`, exercising `.orig` classification. They do not acquire real
-database locks. Rows label this as `fault_origin: simulated_exception`; real lock
-contention is covered separately by the SQLite recovery integration tests.
-MySQL/PostgreSQL query injection is not implemented; non-SQLite targets are
-rejected rather than assigned SQLite errors.
+Faults include `sqlite_busy` (code 5, retryable), `sqlite_locked` (code 6,
+conservatively non-retryable), and `sqlite_error` (code 1, non-retryable), plus
+extended SQLite BUSY, permission, corruption and constraint cases. MySQL faults
+include `mysql_deadlock`, `mysql_lock_timeout`, disconnections, authentication,
+syntax and schema errors. See `--help` or `datamind.experiment_db_errors.DB_FAULTS`
+for all 33 named errors and their expected decisions.
+
+Faults use actual driver exception classes mapped by SQLAlchemy, exercising
+`.orig` classification. These constructed errors do not acquire real database
+locks. Rows label them `fault_origin: simulated_exception`; real lock contention
+is checked separately by the batch script and integration tests. Errors must
+match the target engine's backend: SQLite faults cannot be injected into MySQL.
+MySQL/Dolt injection requires the mysql extra. PostgreSQL exception construction
+and the common executor support PostgreSQL dialects with the postgres extra,
+but this change does not add a registered PostgreSQL service adapter.
+
+For a serverless batch of all error types, raw/wrapped exceptions and native
+SQLite errors, see [SQL error experiments](SQL_ERROR_EXPERIMENTS.md):
+
+```bash
+python -m benchmark.sql_errors --output /absolute/new-sql-error-report
+```
 
 Trusted experiment hosts can also supply `DATAMIND_TEST_READ_FAULT`:
 
