@@ -19,6 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from datamind.core.errors import CapabilityError
 from datamind.core.protocols import ColumnSchema, QueryResult, TableSchema
+from datamind.experiment_faults import before_db_read, record_db_execution
 
 from .safeguard import (
     DestructiveSQLError,
@@ -130,13 +131,14 @@ class BaseSQLDialect:
     async def _execute_bounded_readonly(
         self, engine: Engine, bounded: str, *, row_limit: int, timeout_s: float,
     ) -> QueryResult:
-        def _run() -> QueryResult:
+        def _run(fault_state) -> QueryResult:
             start = time.perf_counter()
             with engine.connect() as conn:
                 # Per-connection read-only hint where supported. Base class
                 # is conservative — dialects can strengthen (SET TRANSACTION
                 # READ ONLY etc.).
                 self._before_query(conn)
+                record_db_execution(fault_state)
                 result = conn.execute(text(bounded))
                 columns = list(result.keys())
                 # Fetch one extra row so we can detect truncation.
@@ -152,7 +154,11 @@ class BaseSQLDialect:
                 elapsed_ms=round(elapsed, 2),
             )
 
-        return await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout_s)
+        async def _attempt():
+            fault_state = await before_db_read(engine)
+            return await asyncio.to_thread(_run, fault_state)
+
+        return await asyncio.wait_for(_attempt(), timeout=timeout_s)
 
     # ------------------------------------------------------------ safeguard
 
