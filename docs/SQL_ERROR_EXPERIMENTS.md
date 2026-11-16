@@ -23,17 +23,29 @@ Without these extras, corresponding rows are explicitly `skipped`, never passed.
 
 ## Coverage
 
-The default matrix has 416 checks when both optional drivers are installed:
+The default matrix has 440 checks when both optional drivers are installed:
 
-- 33 error types, raw and SQLAlchemy-wrapped exceptions, no-retry and retry
-  policies, and probabilities 0, 0.3 and 1: 396 simulated-error checks.
+- 35 error types, raw and SQLAlchemy-wrapped exceptions, no-retry and retry
+  policies, and probabilities 0, 0.3 and 1: 420 simulated-error checks.
 - Five native SQLite scenarios, raw/wrapped errors and both policies: 20 checks.
 
 | Backend | Error types |
 |---|---|
 | SQLite | BUSY, BUSY_SNAPSHOT, LOCKED, SQL error, read-only, interrupt, corruption, cannot-open, constraint, authorization |
 | MySQL | Lock timeout, deadlock, server gone, connection lost, authentication, unknown database, permission, syntax, missing table, missing column, duplicate key |
-| PostgreSQL | Connection failure, serialization failure, deadlock, startup, authentication, permission, syntax, missing table, missing column, duplicate key, cancellation, protocol violation |
+| PostgreSQL | Connection failure, serialization failure, deadlock, startup, administrator termination, lock not available, authentication, permission, syntax, missing table, missing column, duplicate key, cancellation, protocol violation |
+
+`postgres_admin_shutdown` (57P01) and `postgres_lock_not_available` (55P03)
+cover omissions discovered against real PostgreSQL. Their labels currently
+expect no retry, matching the existing recovery allowlist. A passed check for
+these cases documents current behavior, not successful recovery or resolution of
+the policy gap. This coverage change does not modify that allowlist.
+
+```bash
+python -m benchmark.sql_errors --backend postgresql \
+  --errors postgres_admin_shutdown postgres_lock_not_available \
+  --require-drivers --output /tmp/new-postgres-gap-checks
+```
 
 SQLite simulated cases inject errors at DataMind's common read executor, then
 execute real local SELECTs when the attempt is allowed through. MySQL/PostgreSQL

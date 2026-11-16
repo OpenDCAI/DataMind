@@ -167,7 +167,10 @@ conservatively non-retryable), and `sqlite_error` (code 1, non-retryable), plus
 extended SQLite BUSY, permission, corruption and constraint cases. MySQL faults
 include `mysql_deadlock`, `mysql_lock_timeout`, disconnections, authentication,
 syntax and schema errors. See `--help` or `datamind.experiment_db_errors.DB_FAULTS`
-for all 33 named errors and their expected decisions.
+for all 35 named errors and their expected decisions. The real-server omissions
+`postgres_admin_shutdown` (57P01) and `postgres_lock_not_available` (55P03) are
+included as currently non-retryable cases; adding injection coverage does not
+change the recovery allowlist.
 
 Faults use actual driver exception classes mapped by SQLAlchemy, exercising
 `.orig` classification. These constructed errors do not acquire real database

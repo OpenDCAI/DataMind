@@ -51,6 +51,10 @@ DB_FAULTS = {
     "postgres_serialization": DBFault("postgresql", "40001", True),
     "postgres_deadlock": DBFault("postgresql", "40P01", True),
     "postgres_startup": DBFault("postgresql", "57P03", True),
+    # Known gaps found against real servers: record current classification until
+    # a separate recovery-policy change permits these independent-read retries.
+    "postgres_admin_shutdown": DBFault("postgresql", "57P01", False),
+    "postgres_lock_not_available": DBFault("postgresql", "55P03", False),
     "postgres_auth": DBFault("postgresql", "28P01", False),
     "postgres_permission": DBFault("postgresql", "42501", False),
     "postgres_syntax": DBFault("postgresql", "42601", False),

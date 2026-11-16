@@ -67,6 +67,8 @@ def test_sqlite_script_writes_all_reports_and_runs_real_errors(tmp_path):
 @pytest.mark.parametrize("backend,name,driver", [
     ("mysql", "mysql_deadlock", "pymysql"),
     ("postgresql", "postgres_serialization", "psycopg"),
+    ("postgresql", "postgres_admin_shutdown", "psycopg"),
+    ("postgresql", "postgres_lock_not_available", "psycopg"),
 ])
 def test_serverless_driver_checks_do_not_claim_sql_execution(tmp_path, backend, name, driver):
     pytest.importorskip(driver)
@@ -77,6 +79,14 @@ def test_serverless_driver_checks_do_not_claim_sql_execution(tmp_path, backend, 
     assert len(rows) == 8 and all(row["check_passed"] for row in rows)
     assert all(row["execution_kind"] == "driver_contract_simulation"
                and row["sql_executions"] is None and row["result_match"] is None for row in rows)
+    if name in {"postgres_admin_shutdown", "postgres_lock_not_available"}:
+        for row in rows:
+            assert row["classified_retryable"] is False
+            if row["probability"] == 1:
+                assert row["observed_codes"] == [DB_FAULTS[name].code]
+                assert row["attempts"] == 1
+                assert row["recovery"]["retries"] == 0
+                assert not row["operation_succeeded"]
 
 
 @pytest.mark.parametrize("required,exit_code", [(False, 0), (True, 1)])
