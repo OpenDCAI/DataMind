@@ -21,9 +21,15 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from datamind.config import Settings
+from datamind.core.context import RequestContext
+from datamind.core.logging import bind_context
+from datamind.core.recovery import recovery_summary
+from datamind.experiment_faults import ExperimentFaultError, db_counts, db_faults
+from datamind.experiment_db_errors import DB_FAULTS, build_db_fault
 from datamind.workspace import Workspace
 
 REPO = Path(__file__).resolve().parents[1]
@@ -160,9 +166,16 @@ def source_and_tasks(args, output):
     if args.questions:
         tasks = [json.loads(line) for line in Path(args.questions).read_text().splitlines() if line.strip()]
         for i, task in enumerate(tasks):
-            if not isinstance(task.get("question"), str):
-                raise ValueError(f"task {i} needs a question")
+            field = "sql" if getattr(args, "execution", None) == "sql" else "question"
+            if not isinstance(task.get(field), str):
+                raise ValueError(f"task {i} needs {field}")
             task.setdefault("task_id", str(i))
+    elif args.fixture and getattr(args, "execution", None) == "sql":
+        tasks = [
+            {"task_id": "0", "sql": 'SELECT SUM(CAST(amount AS INTEGER)) FROM "{table}"',
+             "expected_rows": [[36]]},
+            {"task_id": "1", "sql": 'SELECT COUNT(*) FROM "{table}"', "expected_rows": [[2]]},
+        ]
     elif args.fixture:
         tasks = [{"task_id": "0", "question": "nebula", "expected_sources": ["doc0.md"]},
                  {"task_id": "1", "question": "orchid", "expected_sources": ["doc1.md"]}]
@@ -173,6 +186,9 @@ def source_and_tasks(args, output):
 
 def score(task, result, execution):
     """No LLM judge or heuristic pretending to be official benchmark accuracy."""
+    if execution == "sql":
+        return {"source_hit": None, "exact_answer_match": None,
+                "result_match": result.get("rows") == task["expected_rows"] if "expected_rows" in task else None}
     expected = task.get("expected_sources")
     observed = [r.get("source") for r in result.get("results", [])] if execution == "retrieval" else [
         e.get("locator", {}).get("source") or e.get("source_id") for e in result.get("evidence", [])]
@@ -221,9 +237,14 @@ def install_fault(reader, faults, component):
 async def query_experiment(args, output, source, tasks):
     if not tasks:
         raise ValueError("Query experiments require --questions (or --fixture)")
-    if args.fixture and args.execution != "retrieval":
-        raise ValueError("Fixture mode cannot evaluate LLM answers; use --execution retrieval")
+    if args.fixture and args.execution == "agent":
+        raise ValueError("Fixture mode cannot evaluate LLM answers; use retrieval or sql")
     settings = settings_for(output / "runtime", args.fixture, args)
+    if args.component == "db":
+        backend = {"dolt": "mysql", "postgres": "postgresql"}.get(settings.db.dialect, settings.db.dialect)
+        if backend != DB_FAULTS[args.db_error].backend:
+            raise ValueError("--db-error must match the configured database backend")
+        build_db_fault(args.db_error)  # fail before building if the optional driver is absent
     workspace = workspace_for(settings)
     built = await workspace.update(str(source), surfaces=args.surfaces.split(","), graph_sources=prepared_graph(args))
     manifest = provenance(args, source)
@@ -235,8 +256,9 @@ async def query_experiment(args, output, source, tasks):
     write_json(output / "build.json", built)
     rows = []
     # Seeded task/policy ordering limits systematic cold/warm and order effects.
+    policies = ("none", "retry") if args.component == "db" else ("none", "retry", "fallback")
     jobs = [(repeat, task, policy, p) for repeat in range(args.repeats) for task in tasks
-            for policy in ("none", "retry", "fallback") for p in args.failure_probabilities]
+            for policy in policies for p in args.failure_probabilities]
     random.Random(args.seed).shuffle(jobs)
     for repeat, task, policy, probability in jobs:
         workspace.settings.retrieval.vector_failure_fallback = "bm25" if policy == "fallback" else "error"
@@ -246,6 +268,9 @@ async def query_experiment(args, output, source, tasks):
                "workspace_revision": built["workspace_revision"], "fixture": args.fixture,
                "source_hit": False if task.get("expected_sources") else None,
                "exact_answer_match": False if task.get("reference_answer") is not None and args.execution == "agent" else None}
+        if args.component == "db":
+            row.update(fault_origin="simulated_exception", db_error=args.db_error,
+                       result_match=False if "expected_rows" in task else None)
         try:
             async with workspace.reader(built["workspace_revision"], read_retries=0 if policy == "none" else args.retries) as reader:
                 row["reader_setup_ms"] = (time.monotonic() - reader_started) * 1000
@@ -253,44 +278,66 @@ async def query_experiment(args, output, source, tasks):
                                 args.outage_ms, args.fault_delay_ms)
                 runtime_env=None
                 state=None
-                if args.execution=='retrieval':
+                if args.execution == 'retrieval':
                     install_fault(reader, faults, args.component)
                 else:
                     state=output/'fault-states'/(digest([repeat,task['task_id'],policy,probability])+'.sqlite3')
                     plan={'state':str(state),'seed':args.seed+repeat,'task':str(task['task_id']),
                           'component':args.component,'probability':probability,
                           'outage_ms':args.outage_ms,'delay_ms':args.fault_delay_ms}
+                    if args.component == 'db':
+                        plan['error'] = args.db_error
                     runtime_env={'DATAMIND_TEST_READ_FAULT':json.dumps(plan),
                                  'DATAMIND_WORKSPACE_READ_RETRIES':str(0 if policy=='none' else args.retries)}
                 started = time.monotonic()
+                context = RequestContext.new()
+                context.extra['recovery_events'] = []
                 try:
-                    async with asyncio.timeout(args.deadline_s):
-                        result = await (reader.call("kb_search", query=task["question"], filters=task.get("filters"))
-                                        if args.execution == "retrieval" else reader.query(task["question"],runtime_env=runtime_env))
+                    with bind_context(context), db_faults(plan) if args.execution == 'sql' else nullcontext():
+                        async with asyncio.timeout(args.deadline_s):
+                            if args.execution == "sql":
+                                sql = task['sql']
+                                if '{table}' in sql:
+                                    tables = await reader._system.services.db.list_tables()
+                                    if len(tables) != 1:
+                                        raise ValueError("{table} requires exactly one published table")
+                                    sql = sql.replace('{table}', tables[0].replace('"', '""'))
+                                result = await reader.call("db_query_sql", sql=sql)
+                            elif args.execution == "retrieval":
+                                result = await reader.call("kb_search", query=task["question"], filters=task.get("filters"))
+                            else:
+                                result = await reader.query(task["question"], runtime_env=runtime_env)
                     row.update(outcome="ok", result=result, **score(task, result, args.execution))
                 except Exception as exc:
                     row.update(outcome="error", error_type=type(exc).__name__, recovery=getattr(exc, "datamind_recovery", {}), source_hit=False if task.get("expected_sources") else None,
                                exact_answer_match=False if task.get("reference_answer") is not None and args.execution == "agent" else None)
+                    if isinstance(exc, ExperimentFaultError):
+                        row['outcome'] = 'experiment_error'
+                if args.execution == 'sql':
+                    row['recovery'] = recovery_summary(context.extra['recovery_events'])
                 if state is not None:
                     from datamind.experiment_faults import counts
-                    actual=counts(state)
+                    actual = db_counts(state) if args.component == 'db' else counts(state)
                     faults.attempts,faults.injected=actual['attempts'],actual['injected']
+                    if args.component == 'db':
+                        row['sql_executions'] = actual['executed']
                 row.update(latency_ms=(time.monotonic() - started) * 1000,
                            injected_faults=faults.injected, component_attempts=faults.attempts)
         except Exception as exc:
-            row.update(outcome="reader_error", error_type=type(exc).__name__)
+            row.update(outcome="experiment_error" if isinstance(exc, ExperimentFaultError) else "reader_error",
+                       error_type=type(exc).__name__)
         rows.append(row)
         append_row(output / "rows.jsonl", row)
     groups = []
     for probability in args.failure_probabilities:
-        for policy in ("none", "retry", "fallback"):
+        for policy in policies:
             batch = [r for r in rows if r["policy"] == policy and r["failure_probability"] == probability]
             latencies = sorted(r["latency_ms"] for r in batch if "latency_ms" in r)
             groups.append({"policy": policy, "failure_probability": probability, "tasks": len(batch),
                            "completion_rate": sum(r["outcome"] == "ok" for r in batch) / len(batch),
                            "p95_latency_ms": latencies[math.ceil(.95 * len(latencies)) - 1] if latencies else None,
                            **{key + "_rate": (sum(r.get(key) is True for r in batch) / sum(r.get(key) is not None for r in batch))
-                              if any(r.get(key) is not None for r in batch) else None for key in ("source_hit", "exact_answer_match")}})
+                              if any(r.get(key) is not None for r in batch) else None for key in ("source_hit", "exact_answer_match", "result_match")}})
     write_json(output / "summary.json", {"fixture": args.fixture, "groups": groups})
 
 
@@ -422,8 +469,9 @@ def parser():
             p.add_argument("--worker-timeout-s", type=float, default=300.)
         if command == "query":
             p.add_argument("--seed", type=int, default=0)
-            p.add_argument("--execution", choices=["retrieval", "agent"], default="retrieval")
-            p.add_argument("--component", choices=["embedding", "vector"], default="embedding")
+            p.add_argument("--execution", choices=["retrieval", "sql", "agent"], default="retrieval")
+            p.add_argument("--component", choices=["embedding", "vector", "db"], default="embedding")
+            p.add_argument("--db-error", choices=sorted(DB_FAULTS), default="sqlite_busy")
             p.add_argument("--failure-probabilities", type=float, nargs="+", default=[0., .1, .5, 1.])
             p.add_argument("--outage-ms", type=float, default=0.)
             p.add_argument("--fault-delay-ms", type=float, default=0.)
@@ -445,10 +493,16 @@ def main():
     if args.command == "query":
         if any(not 0 <= p <= 1 for p in args.failure_probabilities) or not 0 <= args.retries <= 5:
             raise ValueError("probabilities must be in [0,1]; retries must be in [0,5]")
-        if args.repeats < 1 or args.deadline_s <= 0 or min(args.outage_ms, args.fault_delay_ms) < 0:
+        if (args.repeats < 1 or args.deadline_s <= 0 or min(args.outage_ms, args.fault_delay_ms) < 0
+                or not all(math.isfinite(v) for v in (args.deadline_s, args.outage_ms, args.fault_delay_ms))):
             raise ValueError("invalid repeats/deadline/fault duration")
-        if "kb" not in args.surfaces.split(","):
-            raise ValueError("query fault experiments require the kb surface")
+        required_surface = "db" if args.component == "db" else "kb"
+        if required_surface not in args.surfaces.split(","):
+            raise ValueError(f"query fault experiments require the {required_surface} surface")
+        if args.execution == "sql" and args.component != "db":
+            raise ValueError("--execution sql requires --component db")
+        if args.component == "db" and args.execution == "retrieval":
+            raise ValueError("--component db requires --execution sql or agent")
     elif args.crash_stage == "none":
         raise ValueError("build experiment requires checkpoint or publication fault")
     output = Path(args.output).resolve()

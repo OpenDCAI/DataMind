@@ -128,6 +128,100 @@ credentials and endpoint configuration. Pin dependencies and retain the source
 checkout/environment for reproduction. This runner doesn't overwrite or append
 to a prior experiment and does not automatically make API-priced claims.
 
+## Database query fault injection
+
+Database query faults use the same probability, initial outage window, and failed
+attempt delay as KB faults. There is no fail-first-N mode. The condition is
+`elapsed < outage_ms OR random < probability`: after the window ends, probabilistic
+failures continue. A probability of 1 therefore never recovers on its own.
+
+```bash
+python -m benchmark.robustness query --fixture \
+  --surfaces db --execution sql --component db --db-error sqlite_busy \
+  --failure-probabilities 0 0.3 1 --repeats 5 --seed 7 \
+  --retries 1 --deadline-s 5 --output /absolute/new-db-experiment
+```
+
+This builds real local SQLite tables and compares `none` and `retry` against the
+same published workspace revision. It uses no model or embedding API. Default
+fixture SQL checks an aggregate and a row count; `result_match_rate` compares
+returned rows to explicit labels, rather than treating execution as correctness.
+DB experiments do not offer BM25 fallback because document retrieval is not a
+general substitute for SQL results.
+
+For custom SQL tasks, pass `--questions` containing JSONL such as:
+
+```json
+{"task_id":"q1","sql":"SELECT 42","expected_rows":[[42]]}
+```
+
+Use `--execution sql --component db --surfaces db` with either `--fixture` or
+`--source`. Without `expected_rows`, result correctness is null. SQL may use
+`"{table}"` as a placeholder only when the revision contains exactly one table;
+otherwise supply explicit published table names. Agent mode accepts natural
+language `question` tasks as before and passes the plan to child MCP processes.
+It requires a configured Codex host; fixture mode cannot evaluate agent answers.
+
+Faults include `sqlite_busy` (code 5, retryable), `sqlite_locked` (code 6,
+conservatively non-retryable), and `sqlite_error` (code 1, non-retryable), plus
+extended SQLite BUSY, permission, corruption and constraint cases. MySQL faults
+include `mysql_deadlock`, `mysql_lock_timeout`, disconnections, authentication,
+syntax and schema errors. See `--help` or `datamind.experiment_db_errors.DB_FAULTS`
+for all 35 named errors and their expected decisions. The real-server omissions
+`postgres_admin_shutdown` (57P01) and `postgres_lock_not_available` (55P03) are
+included as currently non-retryable cases; adding injection coverage does not
+change the recovery allowlist.
+
+Faults use actual driver exception classes mapped by SQLAlchemy, exercising
+`.orig` classification. These constructed errors do not acquire real database
+locks. Rows label them `fault_origin: simulated_exception`; real lock contention
+is checked separately by the batch script and integration tests. Errors must
+match the target engine's backend: SQLite faults cannot be injected into MySQL.
+MySQL/Dolt injection requires the mysql extra. PostgreSQL exception construction
+and the common executor support PostgreSQL dialects with the postgres extra,
+but this change does not add a registered PostgreSQL service adapter.
+
+For a serverless batch of all error types, raw/wrapped exceptions and native
+SQLite errors, see [SQL error experiments](SQL_ERROR_EXPERIMENTS.md):
+
+```bash
+python -m benchmark.sql_errors --output /absolute/new-sql-error-report
+```
+
+Trusted experiment hosts can also supply `DATAMIND_TEST_READ_FAULT`:
+
+```json
+{"component":"db","error":"sqlite_busy","probability":0.3,"outage_ms":0,"delay_ms":5,"seed":7,"task":"q1","state":"/tmp/db-faults/q1.retry.sqlite3"}
+```
+
+Environment plans activate only inside pinned workspace reads, not during
+workspace builds. In-process harnesses can use
+`with datamind.experiment_faults.db_faults(plan): ...` around a read/recovery
+operation. No model-facing tool enables faults. With no plan, execution creates
+no experiment state. Plans are task-local and do not wrap provider methods, so
+recreated services cannot double-install the injection.
+
+The shared executor checks faults after read-only SQL validation and within its
+query timeout. Each retry consumes another event. Delays respect cancellation
+and deadlines. Metadata inspection and ingestion writes are excluded. This does
+not add physical cancellation of SQL already running in a worker thread.
+
+Each policy/repeat/task/probability has a separate state file, while seed/task/
+attempt schedules are paired across policies. State survives service and MCP
+process recreation on the same host; use fresh files for a new experiment.
+The outage starts at the first eligible query attempt. Concurrent attempts are
+assigned atomic sequence numbers, but their ordering depends on scheduling.
+
+`component_attempts` counts visits to the fault boundary; `injected_faults`
+counts decisions to fail (including delays later cancelled); `sql_executions`
+counts entries to the user-query `conn.execute`, including native SQL failures.
+It excludes metadata/PRAGMA calls and attempts rejected before execution.
+Recovery metadata reports retries separately. The state DB must differ from the
+target DB; state-store failures raise non-retryable `ExperimentFaultError` and
+are reported as `experiment_error`, not as a target database outage. State I/O
+adds experiment overhead, including at probability zero, so compare with the
+same instrumentation enabled.
+
 ## Build interruption workload
 
 ```bash
